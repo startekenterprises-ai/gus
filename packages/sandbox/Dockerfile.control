@@ -1,0 +1,11 @@
+# GUS control plane image (operator-trusted; runs OUTSIDE the sandbox).
+# ARG BASE lets offline dev environments substitute a locally built Node
+# base; production uses the pinned upstream image.
+ARG BASE=node:24-alpine
+FROM ${BASE}
+WORKDIR /app
+COPY dist-bundle/control-plane/ ./
+COPY dist-bundle/node_modules/ ./node_modules/
+ENV GUS_STATE_DIR=/state GUS_COMM_SOCKET=/comm/gus.sock
+USER gus
+ENTRYPOINT ["node", "main.js"]

@@ -1,0 +1,12 @@
+# GUS agent sandbox image (UNTRUSTED code lives here — and only here).
+# The hardening is in the compose/run flags, not this file: read-only
+# rootfs, cap-drop ALL, no-new-privileges, no network. This image assumes
+# all of them.
+ARG BASE=node:24-alpine
+FROM ${BASE}
+WORKDIR /app
+COPY dist-bundle/runtime/ ./
+COPY dist-bundle/node_modules/ ./node_modules/
+ENV GUS_COMM_SOCKET=/comm/gus.sock GUS_WORKSPACE=/workspace
+USER gus
+ENTRYPOINT ["node", "main.js"]

@@ -1,0 +1,65 @@
+/**
+ * Stub inference provider — PHASE 0 ONLY.
+ *
+ * A deterministic, offline "model" so the full pipeline (Governor metering,
+ * tool authorization, verification, receipts) can be built and drilled
+ * before any real provider is wired. It resolves through the same Governor
+ * interface real providers will use in Phase 4 (gateway classes:
+ * primary = Anthropic/OpenAI via gateway, cheap = local via Open WebUI).
+ *
+ * Behavior contract (documented so drills are stable):
+ * - "write file <path> <content...>"  -> workspace_write tool call
+ * - "read file <path>"                -> workspace_read tool call
+ * - "delete <n> files"                -> bulk_delete tool call (destructive)
+ * - "slow job"                        -> slow_work tool call (kill drill)
+ * - "TOOL_RESULT ..."                 -> final summary text
+ * - anything else                     -> echo-style text reply
+ */
+import type { ToolClass } from "@gus/shared";
+
+export interface ProviderReply {
+  text?: string;
+  toolCall?: { tool: string; declaredClass: ToolClass; args: Record<string, unknown> };
+}
+
+export const FAKE_MODEL_NAME = "fake/stub-v0 (Phase 0 offline provider)";
+
+export function estimateTokens(text: string): number {
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
+export function fakeComplete(prompt: string): ProviderReply {
+  const p = prompt.trim();
+
+  if (p.startsWith("TOOL_RESULT")) {
+    return { text: `Done — ${p.slice("TOOL_RESULT".length).trim()}` };
+  }
+  let m = p.match(/^write file\s+(\S+)\s+([\s\S]+)$/i);
+  if (m) {
+    return {
+      toolCall: {
+        tool: "workspace_write",
+        declaredClass: "write",
+        args: { path: m[1], content: m[2] },
+      },
+    };
+  }
+  m = p.match(/^read file\s+(\S+)$/i);
+  if (m) {
+    return { toolCall: { tool: "workspace_read", declaredClass: "read", args: { path: m[1] } } };
+  }
+  m = p.match(/^delete\s+(\d+)\s+files?$/i);
+  if (m) {
+    return {
+      toolCall: {
+        tool: "bulk_delete",
+        declaredClass: "destructive",
+        args: { count: Number(m[1]) },
+      },
+    };
+  }
+  if (/^slow job$/i.test(p)) {
+    return { toolCall: { tool: "slow_work", declaredClass: "read", args: { steps: 60 } } };
+  }
+  return { text: `GUS here (offline stub provider). You said: "${p.slice(0, 200)}"` };
+}

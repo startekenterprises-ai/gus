@@ -1,0 +1,12 @@
+node_modules/
+dist/
+dist-bundle/
+dist-test/
+*.tsbuildinfo
+.env
+.gus-state/
+drill/
+
+# drill + build outputs
+drill/
+dist-bundle/

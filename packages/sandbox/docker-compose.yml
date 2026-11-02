@@ -1,0 +1,58 @@
+# GUS Phase 0 topology — canonical Docker form (real hosts).
+#
+# The security story in one file:
+# - agent-sandbox has NO network (network_mode: none). Its only bridge to
+#   the world is the unix socket on the comm volume, which leads to the
+#   control plane — never to the internet, never to a model, never to a
+#   secret.
+# - control-plane holds all state (ledger/jobs/receipts/kill flag) on its
+#   own volume the sandbox cannot see, and is the only process that talks
+#   to channels and (in later phases) providers.
+# - Both run under the resource budget from the spec (§0 rule 4):
+#   governor + vault + one sandbox steady-state <= 1 GB RAM.
+services:
+  control-plane:
+    build:
+      context: ../..
+      dockerfile: packages/sandbox/Dockerfile.control
+    image: gus-control:dev
+    environment:
+      GUS_CHANNEL: ${GUS_CHANNEL:-fake-file}
+      GUS_FAKE_INBOUND: /run/gus/inbound.ndjson
+      GUS_FAKE_OUTBOUND: /run/gus/outbound.ndjson
+      GUS_TELEGRAM_BOT_TOKEN: ${GUS_TELEGRAM_BOT_TOKEN:-}
+    volumes:
+      - gus-state:/state
+      - gus-comm:/comm
+      - gus-run:/run/gus
+    mem_limit: 256m
+    cpus: 1.0
+    restart: "no"
+
+  agent-sandbox:
+    build:
+      context: ../..
+      dockerfile: packages/sandbox/Dockerfile.agent
+    image: gus-agent:dev
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=32m
+    volumes:
+      - gus-comm:/comm
+      - gus-workspace:/workspace
+    mem_limit: 512m
+    cpus: 1.0
+    restart: "no"
+    depends_on:
+      - control-plane
+
+volumes:
+  gus-state:
+  gus-comm:
+  gus-workspace:
+  gus-run:

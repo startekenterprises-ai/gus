@@ -1,0 +1,1 @@
+{"extends":"./tsconfig.base.json","files":[],"references":[{"path":"packages/shared"},{"path":"packages/gate"},{"path":"packages/channels/telegram"},{"path":"packages/control-plane"},{"path":"packages/runtime"}]}

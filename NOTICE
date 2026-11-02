@@ -1,0 +1,11 @@
+GUS — a secure open-source AI agent
+Copyright 2026 StarTek Enterprise Solutions LLC
+
+This product includes software developed by StarTek Enterprise Solutions LLC.
+
+The GUS name and logo are trademarks of StarTek Enterprise Solutions LLC;
+see TRADEMARK.md. The Apache License 2.0 grants no rights to the marks.
+
+Portions of the secret-detection code in packages/shared are ported from
+agent-shield-scan (Agent-Shield by StarTek), also Apache-2.0, same copyright
+holder.
