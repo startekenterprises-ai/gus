@@ -90,6 +90,17 @@ export const BUILTIN_PRICES_USD_PER_1K: Record<string, number> = {
   "anthropic/claude-haiku-4-5": 0.002,
   "openai/gpt-5": 0.009,
   "openai/gpt-5-mini": 0.0011,
+  // Google's published paid-tier Gemini rates (ai.google.dev/gemini-api
+  // /docs/pricing, checked 2026-11-03), blended in+out per 1k tokens
+  // like the entries above: gemini-3.5-flash is $1.50 in / $9.00 out
+  // per 1M tokens → (0.0015 + 0.009) / 2; gemini-3-flash-preview is
+  // $0.50 / $3.00 per 1M → (0.0005 + 0.003) / 2. A free-tier AI Studio
+  // key is charged $0 by Google within its limits — an operator on the
+  // free tier can zero these in governor.json; the built-ins price the
+  // paid rates so the caps stay honest if the key is ever on a paid
+  // project.
+  "gemini/gemini-3.5-flash": 0.00525,
+  "gemini/gemini-3-flash-preview": 0.00175,
 };
 
 export type LedgerEntry =

@@ -1,8 +1,9 @@
 /**
  * Provider classes (foundation spec §2.1) — Phase 4.
  *
- * Three provider classes behind the interface the CommServer meters:
- * Anthropic (primary), OpenAI (secondary), and Ollama — the local,
+ * Provider classes behind the interface the CommServer meters:
+ * Anthropic (primary), OpenAI (secondary), Gemini (Google's
+ * OpenAI-compatible endpoint), and Ollama — the local,
  * OpenAI-compatible endpoint — plus the "starter gateway" class (an
  * OpenAI-compatible StarTek gateway, when configured) and the Phase 0
  * deterministic stub, which remains the drill/offline provider.
@@ -31,7 +32,7 @@ import {
   type ProviderReply,
 } from "./provider.js";
 
-export type ProviderId = "stub" | "anthropic" | "openai" | "ollama" | "gateway";
+export type ProviderId = "stub" | "anthropic" | "openai" | "gemini" | "ollama" | "gateway";
 
 export interface ProviderConfig {
   provider: ProviderId;
@@ -54,9 +55,20 @@ export const DEFAULT_MAX_TOKENS = 1024;
 export const SUGGESTED_MODELS: Record<Exclude<ProviderId, "stub">, string> = {
   anthropic: "claude-sonnet-5",
   openai: "gpt-5-mini",
+  gemini: "gemini-3.5-flash",
   ollama: "llama3.1:8b",
   gateway: "llama3.1:8b",
 };
+
+/** Google's OpenAI-compatible Gemini endpoint. The Gemini provider
+ *  PINNED to this host: unlike the generic classes, its base URL is
+ *  not operator-overridable, so the vault key can only ever be
+ *  injected on calls to generativelanguage.googleapis.com. */
+export const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai";
+
+/** Gemini models the wizard offers out of the box (the operator can
+ *  put any Gemini model id in provider.json — config is theirs). */
+export const GEMINI_MODELS = ["gemini-3.5-flash", "gemini-3-flash-preview"] as const;
 
 export interface ProviderCompletion {
   reply: ProviderReply;
@@ -109,7 +121,7 @@ export function loadProviderConfig(stateDir: string): ProviderConfig {
   try {
     if (existsSync(configPath(stateDir))) {
       const raw = JSON.parse(readFileSync(configPath(stateDir), "utf8")) as Partial<ProviderConfig>;
-      const ids: ProviderId[] = ["stub", "anthropic", "openai", "ollama", "gateway"];
+      const ids: ProviderId[] = ["stub", "anthropic", "openai", "gemini", "ollama", "gateway"];
       if (raw.provider && ids.includes(raw.provider) && typeof raw.model === "string" && raw.model) {
         return {
           provider: raw.provider,
@@ -292,7 +304,7 @@ export class OpenAiCompatibleProvider extends RemoteProvider {
   constructor(
     vault: VaultBroker,
     opts: {
-      id: "openai" | "ollama" | "gateway";
+      id: "openai" | "gemini" | "ollama" | "gateway";
       model: string;
       baseUrl: string;
       keyName: string;
@@ -331,6 +343,35 @@ export class OpenAiCompatibleProvider extends RemoteProvider {
   }
 }
 
+/**
+ * Gemini — Google's models through their OpenAI-compatible endpoint.
+ * A thin specialization of the OpenAI-compatible class, not a parallel
+ * implementation: same request shape, same usage parsing, same
+ * Governor metering under "gemini/<model>". Two differences, both
+ * deliberate: the key is REQUIRED (there is no local Gemini), and the
+ * base URL is pinned to GEMINI_BASE_URL — a baseUrl in provider.json
+ * is ignored for this class, so the key can only be injected at
+ * Google's host.
+ */
+export class GeminiProvider extends OpenAiCompatibleProvider {
+  constructor(
+    vault: VaultBroker,
+    model: string,
+    opts?: { maxTokens?: number; transport?: ProviderTransport },
+  ) {
+    super(vault, {
+      id: "gemini",
+      model,
+      baseUrl: GEMINI_BASE_URL,
+      keyName: "gemini",
+      keyRequired: true,
+      who: "Gemini",
+      maxTokens: opts?.maxTokens,
+      transport: opts?.transport,
+    });
+  }
+}
+
 // ---------------------------------------------------------------- factory
 
 /** Resolve the active provider from config (re-read per call). */
@@ -355,6 +396,13 @@ export function resolveProvider(
         keyName: "openai",
         keyRequired: true,
         who: "OpenAI",
+        maxTokens: cfg.maxTokens,
+        transport,
+      });
+    case "gemini":
+      // cfg.baseUrl deliberately NOT honored: the Gemini key is only
+      // ever injected at Google's pinned endpoint (see GeminiProvider).
+      return new GeminiProvider(vault, cfg.model, {
         maxTokens: cfg.maxTokens,
         transport,
       });

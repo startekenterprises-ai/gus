@@ -93,9 +93,10 @@ export const PANEL_HTML = `<!doctype html>
 
 <div class="step" id="step-provider">
   <b>3 · Choose how GUS thinks</b>
-  <div class="hint">Your own provider key (stored in the vault, metered by the same caps), a model running on your own machine (Ollama — free), or the StarTek starter gateway when configured.</div>
+  <div class="hint">Your own provider key (stored in the vault, metered by the same caps), a model running on your own machine (Ollama — free), or the StarTek starter gateway when configured. New here? Gemini is the recommended starter: a free key from Google AI Studio (aistudio.google.com) is enough to begin. One honest catch: on Google's free tier, Google may use what you send to improve its models — a paid Gemini key removes that.</div>
   <label>Provider</label>
   <select id="pv-kind">
+    <option value="gemini">Google Gemini — my key (recommended starter: free key from Google AI Studio)</option>
     <option value="anthropic">Anthropic (Claude) — my key</option>
     <option value="openai">OpenAI — my key</option>
     <option value="ollama">Ollama on my machine — no key, $0</option>
@@ -103,7 +104,7 @@ export const PANEL_HTML = `<!doctype html>
     <option value="stub">Offline stub (testing only — not a real model)</option>
   </select>
   <label>Model</label>
-  <input id="pv-model" value="claude-sonnet-5">
+  <input id="pv-model" value="gemini-3.5-flash">
   <label>API key (not needed for Ollama)</label>
   <input id="pv-key" type="password" autocomplete="off" placeholder="paste key — goes to the vault only">
   <label>Base URL (optional — Ollama / gateway)</label>
@@ -251,7 +252,7 @@ document.addEventListener("click", (ev) => {
 $("#kill-on").onclick = () => act(() => api("/api/kill", { method: "POST", body: JSON.stringify({ on: true }) }), "Kill switch ON.");
 $("#kill-off").onclick = () => act(() => api("/api/kill", { method: "POST", body: JSON.stringify({ on: false }) }), "Kill switch off.");
 $("#pv-kind").addEventListener("change", () => {
-  const models = { anthropic: "claude-sonnet-5", openai: "gpt-5-mini", ollama: "llama3.1:8b", gateway: "llama3.1:8b", stub: "stub-v0" };
+  const models = { gemini: "gemini-3.5-flash", anthropic: "claude-sonnet-5", openai: "gpt-5-mini", ollama: "llama3.1:8b", gateway: "llama3.1:8b", stub: "stub-v0" };
   $("#pv-model").value = models[$("#pv-kind").value] || "";
 });
 refresh().catch((e) => { $("#subtitle").textContent = "Could not load the panel: " + e.message; });

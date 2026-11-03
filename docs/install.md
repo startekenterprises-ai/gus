@@ -70,9 +70,13 @@ appear:
    so GUS only ever sends approvals and summaries there — never
    secrets.*
 3. **Pick a brain.** Choose which AI model service the agent uses:
-   your own Anthropic or OpenAI key, a model running on your own
-   machine (Ollama), or a starter gateway if one is offered. Keys go
-   into the panel and straight into the encrypted vault.
+   a Google Gemini key (the recommended starter — a free key from
+   Google AI Studio is enough to begin), your own Anthropic or OpenAI
+   key, a model running on your own machine (Ollama), or a starter
+   gateway if one is offered. Keys go into the panel and straight
+   into the encrypted vault. One honest catch: on Google's free tier,
+   Google may use what you send to improve its models — a paid Gemini
+   key removes that.
 4. **Set your spending caps.** Pre-filled with starter limits —
    $2 per task, $10 per day, $100 per month. These are hard ceilings
    enforced outside the AI: when the money runs out, the work stops,

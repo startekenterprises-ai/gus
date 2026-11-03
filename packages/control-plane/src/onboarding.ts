@@ -44,6 +44,11 @@ import {
 
 export const TELEGRAM_SECRET_NAME = "telegram-bot";
 
+/** The one-sentence free-tier disclosure shown wherever the Gemini
+ *  choice is presented (wizard + install docs use this same text). */
+export const GEMINI_FREE_TIER_NOTE =
+  "One honest catch: on Google's free tier, Google may use what you send to improve its models — a paid Gemini key removes that.";
+
 /** The first guided job (spec §2.1, job type 1). Read-only by design. */
 export const DIGEST_PROMPT =
   "daily digest — summarize today's email and calendar headlines, read-only, no sends, no changes";
@@ -75,11 +80,12 @@ export interface OnboardingState {
 export const PROVIDER_KEY_NAMES: Record<Exclude<ProviderId, "stub">, string> = {
   anthropic: "anthropic",
   openai: "openai",
+  gemini: "gemini",
   ollama: "ollama",
   gateway: "starter-gateway",
 };
 
-const PROVIDER_IDS: ProviderId[] = ["stub", "anthropic", "openai", "ollama", "gateway"];
+const PROVIDER_IDS: ProviderId[] = ["stub", "anthropic", "openai", "gemini", "ollama", "gateway"];
 
 export class Onboarding {
   constructor(
@@ -205,7 +211,7 @@ export class Onboarding {
         ? payload.baseUrl.trim().slice(0, 200)
         : undefined;
     const apiKey = typeof payload.apiKey === "string" ? payload.apiKey.trim() : "";
-    if ((provider === "anthropic" || provider === "openai") && !apiKey) {
+    if ((provider === "anthropic" || provider === "openai" || provider === "gemini") && !apiKey) {
       const keyName = PROVIDER_KEY_NAMES[provider as Exclude<ProviderId, "stub">];
       if (!this.deps.vault.has(keyName)) {
         return {
@@ -235,7 +241,9 @@ export class Onboarding {
       detail:
         provider === "stub"
           ? "Offline stub selected — fine for testing the plumbing; it is not a real model."
-          : `Provider saved: ${provider} / ${model}. Keys live in the vault; the Governor meters every call.`,
+          : provider === "gemini"
+            ? `Provider saved: gemini / ${model}. Keys live in the vault; the Governor meters every call. ${GEMINI_FREE_TIER_NOTE}`
+            : `Provider saved: ${provider} / ${model}. Keys live in the vault; the Governor meters every call.`,
     };
   }
 

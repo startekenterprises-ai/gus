@@ -25,10 +25,14 @@ import { PolicyStore } from "../../packages/control-plane/src/policy.js";
 import {
   AnthropicProvider,
   OpenAiCompatibleProvider,
+  GeminiProvider,
+  GEMINI_BASE_URL,
   loadProviderConfig,
+  resolveProvider,
+  writeProviderConfig,
   type ProviderTransport,
 } from "../../packages/control-plane/src/providers.js";
-import { Onboarding } from "../../packages/control-plane/src/onboarding.js";
+import { Onboarding, GEMINI_FREE_TIER_NOTE } from "../../packages/control-plane/src/onboarding.js";
 import { SkillInstaller } from "../../packages/control-plane/src/skills.js";
 import { PanelServer, type PanelBackend } from "../../packages/panel/src/index.js";
 
@@ -319,6 +323,83 @@ test("governor pricing: built-in per-model rates; local models cost $0", () => {
   assert.equal(governor.costFor("stub/stub-v0", 5000, 5000), 0);
 });
 
+test("providers: Gemini — vault key injected ONLY at Google's pinned endpoint", async () => {
+  const { dir, vault } = tempVault();
+  const FAKE_GEMINI_KEY = "AIzaUnitTestGeminiKey00000000000";
+  vault.add("gemini", FAKE_GEMINI_KEY);
+
+  const seen: { url: string; headers: Record<string, string>; body?: string }[] = [];
+  const transport: ProviderTransport = async (url, init) => {
+    seen.push({ url, headers: init.headers, body: init.body });
+    return {
+      status: 200,
+      json: async () => ({
+        choices: [{ message: { content: "hello from gemini" } }],
+        usage: { prompt_tokens: 9, completion_tokens: 4 },
+      }),
+    };
+  };
+  const gemini = new GeminiProvider(vault, "gemini-3.5-flash", { transport });
+  const g = await gemini.complete("hi");
+  assert.equal(g.reply.text, "hello from gemini");
+  assert.equal(g.tokensIn, 9);
+  assert.equal(g.tokensOut, 4);
+  assert.equal(gemini.id, "gemini");
+  assert.equal(gemini.modelKey, "gemini/gemini-3.5-flash");
+  assert.equal(gemini.kind, "remote");
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].url, `${GEMINI_BASE_URL}/chat/completions`);
+  assert.ok(seen[0].url.startsWith("https://generativelanguage.googleapis.com/"));
+  assert.equal(seen[0].headers.authorization, `Bearer ${FAKE_GEMINI_KEY}`);
+  // Request shaping matches the OpenAI-compatible contract.
+  const sentBody = JSON.parse(seen[0].body ?? "{}") as { model?: string; messages?: unknown };
+  assert.equal(sentBody.model, "gemini-3.5-flash");
+  assert.deepEqual(sentBody.messages, [{ role: "user", content: "hi" }]);
+
+  // The preview model is a first-class citizen too.
+  const preview = new GeminiProvider(vault, "gemini-3-flash-preview", { transport });
+  assert.equal(preview.modelKey, "gemini/gemini-3-flash-preview");
+  await preview.complete("hi");
+  assert.equal(seen[1].url, `${GEMINI_BASE_URL}/chat/completions`);
+
+  // Key required: an empty vault is a plain operator error, and no
+  // request leaves the process.
+  const { vault: emptyVault } = tempVault();
+  const noKey = new GeminiProvider(emptyVault, "gemini-3.5-flash", { transport });
+  await assert.rejects(() => noKey.complete("hi"), /no vault secret named "gemini"/);
+  assert.equal(seen.length, 2, "no transport call may happen without the key");
+
+  // Factory: provider.json selects gemini, and a hostile baseUrl in
+  // config is IGNORED — the class stays pinned to Google's host, so
+  // the key cannot be redirected elsewhere by a config edit.
+  writeProviderConfig(dir, {
+    provider: "gemini",
+    model: "gemini-3.5-flash",
+    baseUrl: "https://evil.example/v1",
+  });
+  const resolved = resolveProvider(dir, vault, transport);
+  assert.equal(resolved.id, "gemini");
+  assert.equal(resolved.modelKey, "gemini/gemini-3.5-flash");
+  await resolved.complete("hi");
+  assert.equal(seen[2].url, `${GEMINI_BASE_URL}/chat/completions`);
+  assert.equal(seen[2].headers.authorization, `Bearer ${FAKE_GEMINI_KEY}`);
+});
+
+test("governor: a Gemini call reserves and settles at the built-in rate", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gus-p4-gemgov-"));
+  const governor = new Governor(dir, { maxTokensPerJob: 1_000_000, maxTokensPerDay: 1_000_000 });
+  // Published paid-tier rates, blended per 1k (see governor.ts).
+  assert.equal(governor.costFor("gemini/gemini-3.5-flash", 1000, 0), 0.00525);
+  assert.equal(governor.costFor("gemini/gemini-3-flash-preview", 1000, 0), 0.00175);
+  const auth = governor.authorize("job-gemini", 1000, 1000, "gemini/gemini-3.5-flash");
+  assert.equal(auth.ok, true);
+  if (auth.ok) governor.settle(auth.reservationId, 1000, 1000);
+  const audit = governor.audit();
+  assert.equal(audit.reconciles, true);
+  assert.equal(audit.openReservations, 0);
+  assert.equal(audit.settledUsd, governor.costFor("gemini/gemini-3.5-flash", 1000, 1000));
+});
+
 // ------------------------------------------------------------- panel
 
 function stubBackend(calls: string[]): PanelBackend {
@@ -499,5 +580,62 @@ test("onboarding: five steps complete; secrets exist ONLY as vault ciphertext", 
     for (const secret of secrets) {
       assert.ok(!content.includes(secret), `secret leaked into ${file}`);
     }
+  }
+});
+
+test("onboarding: Gemini is a choice inside the provider step (no new step, key to vault only)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "gus-p4-onb-gem-"));
+  const vault = new VaultBroker(join(dir, "vault.json"), join(dir, "vault.key"));
+  const calls: { url: string; headers: Record<string, string> }[] = [];
+  const client = new ShieldClient({
+    vault,
+    baseUrl: "https://shield.example",
+    transport: fakeShieldTransport(calls),
+  });
+  const gate = new ShieldGate({
+    client,
+    policy: () => ({ required: false, onUnavailable: "closed" }),
+    logPath: join(dir, "gate.jsonl"),
+  });
+  const onboarding = new Onboarding(dir, {
+    vault,
+    gate,
+    policy: new PolicyStore(join(dir, "policy.json")),
+    governor: new Governor(dir),
+    runFirstJob: () => "job_digest_gemini",
+  });
+
+  // Gemini without a key is refused plainly, like the other BYOK classes.
+  const noKey = onboarding.provider({ provider: "gemini" });
+  assert.equal(noKey.ok, false, "gemini without a key is refused plainly");
+
+  const FAKE_GEMINI_KEY = "AIzaUnitTestWizardKey0000000000";
+  const chosen = onboarding.provider({ provider: "gemini", apiKey: FAKE_GEMINI_KEY });
+  assert.equal(chosen.ok, true);
+  assert.ok(chosen.detail.includes(GEMINI_FREE_TIER_NOTE), "the free-tier disclosure rides the confirmation");
+  // Default model pre-fill is the recommended starter model.
+  const cfg = loadProviderConfig(dir);
+  assert.equal(cfg.provider, "gemini");
+  assert.equal(cfg.model, "gemini-3.5-flash");
+  assert.equal(vault.has("gemini"), true);
+
+  // The preview model is selectable in the same step.
+  const preview = onboarding.provider({ provider: "gemini", model: "gemini-3-flash-preview" });
+  assert.equal(preview.ok, true);
+  assert.equal(loadProviderConfig(dir).model, "gemini-3-flash-preview");
+
+  // Still exactly five steps in the wizard view — Gemini added none.
+  const view = onboarding.view();
+  assert.deepEqual(Object.keys(view.steps).sort(), ["caps", "firstJob", "provider", "shield", "telegram"]);
+  assert.equal(view.steps.provider.done, true);
+
+  // The key VALUE appears in no state file (vault ciphertext only).
+  const walk = (d: string): string[] =>
+    readdirSync(d).flatMap((name) => {
+      const p = join(d, name);
+      return statSync(p).isDirectory() ? walk(p) : [p];
+    });
+  for (const file of walk(dir)) {
+    assert.ok(!readFileSync(file, "utf8").includes(FAKE_GEMINI_KEY), `gemini key leaked into ${file}`);
   }
 });
