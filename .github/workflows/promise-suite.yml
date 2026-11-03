@@ -1,0 +1,142 @@
+# The Promise Suite (foundation spec §5).
+#
+# One named drill per product promise lives in test/promise/. This
+# workflow runs the suite the way the spec demands: on every release
+# candidate, and — for the parts that need nothing but Node — on every
+# push and pull request. A release that requires skipping, loosening,
+# or mocking a Promise Suite test cannot ship; that rule is in
+# CONTRIBUTING.md and it is why this file exists.
+#
+# HONEST STATUS: this workflow has never executed. The repository has
+# no remote yet (pre-launch), so every job below is validated by
+# running the identical commands locally, and the container drills by
+# their Phase-gate runs in the authoring environment — not by a green
+# CI badge. The first real run happens when the repo goes public, and
+# the launch checklist requires it to be green before the launch post.
+#
+# Job map:
+#   unit-and-budget   npm test (unit suite) + the static budget check.
+#   boot-sweep        the Phase 5 crash-recovery drill — a host-process
+#                     drill, no containers needed, so it runs per-push.
+#   drill-phase0..4   the container gate drills. They run the project's
+#                     OCI images through podman (GitHub's ubuntu
+#                     runners carry it), with the exact commands the
+#                     Phase gates used. Manual dispatch: the container
+#                     drills are release-candidate gates (spec §5), not
+#                     per-PR checks — they take minutes and build full
+#                     images.
+#   drill-phase4*     additionally, the Phase 4 drills talk to the
+#                     LIVE Agent-Shield API by design (they record real
+#                     responses and receipts for the drill payloads),
+#                     so they run only when a maintainer dispatches
+#                     this workflow for a release candidate. Nothing
+#                     about them is mocked to make CI quieter.
+
+name: promise-suite
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      container_drills:
+        description: "Also run the container gate drills (release-candidate gate)"
+        type: boolean
+        default: false
+
+jobs:
+  unit-and-budget:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run check:budget
+
+  boot-sweep:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: bash test/promise/boot-sweep-drill.sh
+
+  # --- Container gate drills (release candidates; dispatch-gated) ---
+  # Each builds the real images and runs the drill script unmodified
+  # with PODMAN=podman (the scripts' default vehicle). If a future
+  # runner image drops podman, these jobs fail loudly at the build
+  # step rather than skipping — that is deliberate: a promise drill
+  # that cannot run is a blocked release, not a green checkmark.
+  drill-phase0:
+    if: ${{ inputs.container_drills }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci && npm run build && npm run pack
+      - run: docker build -f packages/sandbox/Dockerfile.control -t gus-control:dev .
+      - run: docker build -f packages/sandbox/Dockerfile.agent -t gus-agent:dev .
+      - run: bash test/promise/phase0-drill.sh
+
+  drill-phase1:
+    if: ${{ inputs.container_drills }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci && npm run build && npm run pack
+      - run: docker build -f packages/sandbox/Dockerfile.control -t gus-control:dev .
+      - run: docker build -f packages/sandbox/Dockerfile.agent -t gus-agent:dev .
+      - run: bash test/promise/phase1-drill.sh
+
+  drill-phase2:
+    if: ${{ inputs.container_drills }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci && npm run build && npm run pack
+      - run: docker build -f packages/sandbox/Dockerfile.control -t gus-control:dev .
+      - run: docker build -f packages/sandbox/Dockerfile.agent -t gus-agent:dev .
+      - run: bash test/promise/phase2-drill.sh
+
+  drill-phase3:
+    if: ${{ inputs.container_drills }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci && npm run build && npm run pack
+      - run: docker build -f packages/sandbox/Dockerfile.control -t gus-control:dev .
+      - run: docker build -f packages/sandbox/Dockerfile.agent -t gus-agent:dev .
+      - run: bash test/promise/phase3-drill.sh
+
+  # Phase 4 drills record REAL responses from the live Agent-Shield
+  # API (record-shield.mjs) — that is what makes their evidence real.
+  # They therefore mint a fresh free-tier Shield key per run and must
+  # never be pointed anywhere else; dispatch only for release
+  # candidates, with the repository's default outbound network.
+  drill-phase4:
+    if: ${{ inputs.container_drills }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci && npm run build && npm run pack
+      - run: docker build -f packages/sandbox/Dockerfile.control -t gus-control:dev .
+      - run: docker build -f packages/sandbox/Dockerfile.agent -t gus-agent:dev .
+      - run: bash test/promise/phase4-drill.sh
+      - run: bash test/promise/phase4-onboarding-drill.sh

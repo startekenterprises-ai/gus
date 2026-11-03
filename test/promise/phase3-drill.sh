@@ -200,6 +200,16 @@ OUT="$DRILL/run/outbound.ndjson"
 count_out() { grep -c "$1" "$OUT" 2>/dev/null || true; }
 SNAP=0
 snap_out() { SNAP=$(count_out "$1"); }
+wait_out_has() { # bounded wait for a phrase to exist at all (notices
+  # race the checks that follow their triggers; a bare grep is a coin
+  # flip — observed 2026-11-03 on the S2 pre-apply notice)
+  local pat="$1" secs="$2" i
+  for i in $(seq 1 $((secs*5))); do
+    grep -q "$pat" "$OUT" 2>/dev/null && return 0
+    sleep 0.2
+  done
+  return 1
+}
 wait_out_new() {
   local pat="$1" secs="$2" i
   for i in $(seq 1 $((secs*5))); do
@@ -377,7 +387,7 @@ slow_settles_first() { # the running job must settle BEFORE any switch-over
   return 1
 }
 check "S2 MID-JOB: the running slow job settles verified-done BEFORE the update switches over (never interrupted)" slow_settles_first
-check "S2 the pre-apply notice told the operator the replay was running" bash -c 'grep -q "the release verified and is staged. Now checking it against your recorded automations" "'"$OUT"'"'
+check "S2 the pre-apply notice told the operator the replay was running" wait_out_has "the release verified and is staged. Now checking it against your recorded automations" 30
 snap_out "Update complete"
 check "S2 the update lands and the operator is told (v0.4.0 live)" wait_out_new "Update complete" 120
 check "S2 update job settles verified-done" test "$(latest_update_state)" = "verified-done"
@@ -401,9 +411,13 @@ send_msg "/update 0.4.1"
 sleep 6
 check "S3 GATE: while an approval is parked the update WAITS — no failure notice, no settlement" update_still_waiting "$DID_NOT_HAPPEN_BEFORE"
 check "S3 GATE: version is still 0.4.0 while the update waits" test "$(pointer_field version)" = "0.4.0"
+# Snapshot BEFORE the deny: the refusal notice can land while the
+# delete's settlement is being awaited, and a snapshot taken after it
+# made this check a coin flip on ordering (observed 2026-11-03; the
+# notice itself was present and correct in the transcript both ways).
+snap_out "did not happen"
 press_latest deny
 check "S3 the denied delete ends failed-loudly (park cleared)" wait_state failed-loudly 20 approval_job_state
-snap_out "did not happen"
 check "S3(a) once unblocked, the tampered bundle is refused and the operator told" wait_out_new "did not happen" 60
 check "S3(a) refusal reason: rejected BEFORE staging on hash mismatch" update_note_has "rejected before staging" "hash mismatch"
 check "S3(a) update job ends failed-loudly" test "$(latest_update_state)" = "failed-loudly"

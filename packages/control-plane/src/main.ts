@@ -50,6 +50,7 @@ import { runVaultAdmin } from "./vault-admin.js";
 import { loadProviderConfig, resolveProvider } from "./providers.js";
 import { Onboarding, DIGEST_PROMPT, TELEGRAM_SECRET_NAME } from "./onboarding.js";
 import { SkillInstaller } from "./skills.js";
+import { startHeartbeat } from "./heartbeat.js";
 
 const stateDir = process.env.GUS_STATE_DIR ?? "/state";
 const socketPath = process.env.GUS_COMM_SOCKET ?? "/comm/gus.sock";
@@ -342,9 +343,41 @@ appendFileSync(
 
 await comm.start();
 await host.start();
+// Phase 5: the Job Runner boot sweep. Jobs a previous incarnation left
+// queued/running have no driver in this one — settle them failed-loudly
+// with receipts instead of leaving them hanging (spec §1.5: no silent
+// failure). Update jobs are swept too UNLESS an update record is still
+// in flight: promotion works by exiting this process, so a live record
+// means bootReconcile (below) owns that job and settles it from the
+// record — confirmed, rolled back, or aborted.
+const updRec = updater.readRecord();
+const updateInFlight =
+  updRec !== null &&
+  ["waiting-idle", "verifying", "staging", "canary", "promoting"].includes(updRec.status);
+const swept = jobs.sweepOrphanedJobs({ includeUpdateJobs: !updateInFlight });
+for (const rec of swept) {
+  appendFileSync(
+    `${stateDir}/runtime-log.jsonl`,
+    JSON.stringify({
+      ts: Date.now(),
+      level: "warn",
+      text: `boot sweep: job ${rec.id} (${rec.kind}) left unsettled by a previous incarnation — settled failed-loudly, receipt ${rec.receiptId}`,
+    }) + "\n",
+  );
+  void host
+    .notifyOperator(
+      rec.conversationId,
+      `⚠️ GUS restarted and a job didn't survive it: the ${rec.kind} job from ${new Date(rec.createdAt).toLocaleString()} was settled as FAILED with a receipt (id ${rec.receiptId ?? "—"}) rather than left hanging. Nothing from it ran after the restart.`,
+    )
+    .catch(() => {});
+}
 // Settle anything a previous incarnation left in flight — above all a
 // promotion this process was booted to confirm (updater.ts).
 void updater.bootReconcile(GUS_VERSION);
+// Spec §5 kill-criteria instrumentation: the anonymous install
+// heartbeat. OFF unless the operator opted in (GUS_HEARTBEAT=1 with a
+// counter URL); the payload is { version, mode } and nothing else.
+startHeartbeat();
 appendFileSync(
   `${stateDir}/runtime-log.jsonl`,
   JSON.stringify({ ts: Date.now(), level: "info", text: `control plane up; channel=${adapter.name} transport=${channelKind} killed=${governor.isKilled()}` }) + "\n",

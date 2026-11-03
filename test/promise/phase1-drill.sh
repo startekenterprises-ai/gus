@@ -56,6 +56,11 @@ EVIDENCE="$DRILL/evidence.log"
 FAILS=0
 rm -rf "$DRILL"
 mkdir -p "$DRILL"/{comm,workspace,state,run,apilog}
+# comm is SHARED between two userns=auto containers: mount it without
+# :U and make it world-writable (the Phase 3 lesson — a :U re-chown by
+# one container locks the other's user namespace out, EACCES on the
+# socket bind; the race made this drill flaky on the podman vehicle).
+chmod 777 "$DRILL/comm"
 : > "$EVIDENCE"
 touch "$DRILL/run/inbound.ndjson" "$DRILL/run/outbound.ndjson"
 chmod 666 "$DRILL/run/inbound.ndjson" "$DRILL/run/outbound.ndjson"
@@ -111,7 +116,7 @@ rm_containers
 # Control plane + drill test world (same container — see header note).
 $PODMAN run -d --name gus-control --userns=auto --network none --read-only \
   --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:size=32m \
-  -v "$STATE:/state:U" -v "$DRILL/comm:/comm:U" -v "$DRILL/run:/run/gus:U" \
+  -v "$STATE:/state:U" -v "$DRILL/comm:/comm" -v "$DRILL/run:/run/gus:U" \
   -v "$DRILL/apilog:/apilog:U" \
   -e GUS_CHANNEL=fake-file \
   -e GUS_FAKE_INBOUND=/run/gus/inbound.ndjson \
@@ -121,7 +126,7 @@ $PODMAN run -d --name gus-control --userns=auto --network none --read-only \
   --entrypoint /usr/bin/node gus-control:dev drill-entry.mjs >>"$EVIDENCE" 2>&1
 $PODMAN run -d --name gus-sandbox --userns=auto --network none --read-only \
   --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:size=32m \
-  -v "$DRILL/comm:/comm:U" -v "$DRILL/workspace:/workspace:U" \
+  -v "$DRILL/comm:/comm" -v "$DRILL/workspace:/workspace:U" \
   gus-agent:dev >>"$EVIDENCE" 2>&1
 
 for i in $(seq 1 50); do [ -S "$DRILL/comm/gus.sock" ] && break; sleep 0.2; done

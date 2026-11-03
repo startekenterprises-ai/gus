@@ -92,10 +92,9 @@ export class ChannelHost {
   }
 
   async start(): Promise<void> {
-    // Boot sweep: jobs left queued/running by a previous control-plane
-    // incarnation must not hang silently (must-have 5).
-    // (JobRunner has no iterator yet; the drill starts from fresh
-    // state. The sweep remains deferred past Phase 1.)
+    // Jobs left queued/running by a previous control-plane incarnation
+    // are settled by the Job Runner boot sweep (jobs.ts, wired in
+    // main.ts before this start) — must-have 5: no silent failure.
     for (const a of this.adapters) {
       await a.start((ev) => void this.onEvent(a.name, ev));
     }

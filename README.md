@@ -4,186 +4,208 @@
 process, capped by default.
 
 GUS is built backwards from how the current generation of open-source
-agents actually fails — updates that break the install, runaway token
-bills with no ceiling, credentials sitting in the model's context, safety
-instructions silently dropped by context compaction, and jobs that report
-success while delivering nothing. GUS's seven v1 promises attack exactly
-those failure modes:
+agents actually fails: updates that break the install, runaway token
+bills with no ceiling, credentials sitting inside the model's context,
+safety instructions silently dropped when the conversation is
+compacted, and jobs that report success while delivering nothing.
 
-1. **Boring updates** — staged, auto-rollback, post-update verification.
-2. **A hard spend ceiling, enforced outside the model** — per-task /
-   per-day / per-month caps, a live ledger, and a kill switch the model
-   cannot argue with.
-3. **OS-level isolation by default** — the agent loop runs in a
-   sandboxed container with no network and no host access; credentials
-   never enter the agent's context.
-4. **Approval as a system property** — enforced at the tool layer,
-   outside the model's context, so compaction cannot erase it.
-5. **No silent failure** — every job ends *verified-done*,
-   *failed-loudly*, or parked *needs-approval*, with a signed receipt.
-6. **Five-minute onboarding, no terminal required.**
-7. **Agent-Shield on every path** — every tool call, skill install, and
-   MCP connection passes the Agent-Shield gate; nothing bypasses it.
-   Plus **secret-guard**: paste a password or API key into the chat and
-   GUS flags it, refuses to forward, store, or ingest it, and tells you
-   to rotate it. (It cannot unsend what other people in the chat already
-   saw — no software can. It stops *itself* from propagating the secret.)
+So GUS is split in two. The **agent loop** runs inside a sandboxed
+container with no network and no secrets. Everything that keeps it
+honest — the spend Governor, the credential Vault, the Approval
+Engine, the Updater — runs in a **separate control plane the agent
+cannot reach**. Nothing the model says, remembers, or forgets can
+change how those components behave. That one decision is the product.
 
-Safety is never the upsell: all seven promises ship in this open-source
-core, forever. The hosted tier sells operation and assurance — updates,
-backups, monitoring, support — never safety features. A self-hoster
-gives up nothing functional, only their time, uptime, and support.
+## The seven promises
 
-## Status
+Each promise is a mechanism, not a setting — and each one is proved by
+a named, runnable test in `test/promise/` (the Promise Suite). If a
+change ever requires loosening one of these tests, the release does
+not ship.
 
-**Phase 0 (foundation) is built**: monorepo skeleton, sandboxed agent
-loop, separate control plane (Governor + Job Runner), channel adapter
-interface with a Telegram adapter (incl. an offline fake transport),
-secret-guard wired at channel ingress/egress, and the Phase 0 gate
-drill proving sandboxing, control-plane separation, kill switch, and
-secret refusal.
+1. **Boring updates.** Updates are signed, staged into an idle slot,
+   and replayed against your own recorded automations *before* they go
+   live; anything that fails is rolled back automatically — a bad
+   update never replaces your working version. *Proved by the
+   bad-update drill (Phase 3).*
+2. **A hard spend ceiling, enforced outside the model.** Per-task,
+   per-day, and per-month caps in dollars, a live append-only ledger,
+   and a kill switch the model cannot argue with. When the cap is hit,
+   the tool layer refuses — it doesn't ask the model to stop. *Proved
+   by the runaway-cap drill (Phase 2).*
+3. **Credentials the agent can use but never read.** Secrets live
+   encrypted in the Vault Broker, outside the sandbox. There is no API
+   that returns a secret. When a call needs one, the egress proxy
+   injects it in flight, at the edge, for that one request. *Proved by
+   the credential red-team drill (Phase 1).*
+4. **Approval as a system property.** Destructive, bulk, and external
+   actions are classified at the tool layer and parked for your
+   approval — bound to the exact arguments, single-use, timeout means
+   no. The requirement lives in the control plane, so context
+   compaction cannot erase it. *Proved by the Yue drill (Phase 2)* —
+   named for the February 2026 incident where an agent whose "confirm
+   before acting" instruction was compacted away bulk-deleted 200+
+   emails while ignoring stop commands.
+5. **No silent failure.** Every job ends in exactly one of three
+   states — **verified-done** (a control-plane post-condition check
+   passed, not the agent's self-report), **failed-loudly** (you're
+   told, in plain language), or **needs-approval** — and every ending
+   issues a signed receipt. Even a crash is covered: jobs orphaned by
+   a dead control plane are settled failed-loudly by the boot sweep on
+   the next start. *Proved by every drill, plus the boot-sweep drill
+   (Phase 5).*
+6. **Five-minute onboarding, no terminal after install.** A
+   five-step wizard in the web panel: connect the Shield, add your
+   channel, pick a model provider, accept (or change) the starter
+   caps, run your first job. Measured in the onboarding drill at
+   **5 user actions**. *Proved by the onboarding drill (Phase 4).*
+7. **Agent-Shield on every path.** Every inbound message, every tool
+   call, and every tool result passes the Agent-Shield scan gate, and
+   the signed receipt lands on the job. Skill installs and MCP configs
+   pass the local scanner first — a *do not install* verdict has **no
+   override**. Plus **secret-guard**: paste a password or API key into
+   the chat and GUS flags it, refuses to forward, store, or ingest it,
+   and tells you to rotate it. *Proved by the Shield-gate drill
+   (Phase 4) and the Phase 0 drill.*
 
-**Phase 1 (vault & egress) is built**: the Vault Broker (encrypted at
-rest, no read API — secrets are referenced by name and used only via
-injection) and the egress proxy (allowlist, outbound screening, auth
-injection at the edge, response scrubbing, per-call receipts), with a
-sandbox `fetch` tool executed by the control plane through the proxy.
-The Phase 1 gate is the credential red-team drill: a canary secret
-survives direct vault asks, non-allowlisted fetches, echo/redirect/body
-smuggling, state scraping, and prompt-injected instructions in fetched
-content — appearing nowhere outside the vault's ciphertext and the one
-intended in-flight request.
+**Safety is never the upsell.** All seven promises ship in this
+open-source core, forever. The hosted tier sells operation and
+assurance — we run the updates, backups, monitoring, and support — not
+safety features. A self-hoster gives up nothing functional: only their
+time, uptime, and support.
 
-**Phase 2 (Governor & approvals) is built**: the Governor complete —
-per-task/per-day/per-month USD caps over a versioned price table
-(operator-owned config the sandbox cannot write), enforced by
-reservation against an append-only ledger that reconciles exactly
-(reserves = settles + refunds) — and the Approval Engine: every tool
-call classified in the control plane from tool + arguments, approvals
-parked as durable control-plane state, bound to the hash of the exact
-arguments, single-use, timeout = deny, resolvable only from the
-channel (buttons or /approve /deny commands). The Phase 2 gate is two
-drills: the **Yue drill** (a bulk delete parks with no confirm
-instruction anywhere in context; STOP freezes a running loop; replay,
-forgery, bare-text "approve", and timeout all execute nothing) and the
-**runaway-cap drill** (a looping job is cut at the cap exactly, ledger
-reconciled, next job unaffected).
+## Quickstart
 
-**Phase 3 (boring updates) is built**: the Updater lives in the
-control plane (the sandbox never updates itself). A release is a
-versioned bundle with an Ed25519-signed manifest (local release key
-for now, honestly labeled like the receipt stub); the flow is verify
-signature + every file hash → snapshot operator config → stage into
-the idle A/B slot → **canary replay**: the candidate runtime boots
-alongside the live one and replays the recorded scenarios (chat
-round-trip, workspace write+verify, allowlisted fetch, approval park)
-→ only on a full pass does the version pointer flip, and the new
-control plane must still confirm itself live before the update
-settles. Updates never start while a job is running or an approval
-is parked; they wait. The data rule is stated in one line: **code and
-config roll back; data never does** — the append-only stores
-(ledger, jobs, approvals, receipts, vault) are never copied or
-restored by an update, only prefix-checked for integrity. Both
-containers boot through a small non-versioned slot launcher whose
-watchdog flips the pointer back if a promoted control plane dies
-before confirming. The Phase 3 gate is the **bad-update drill**: a
-real v0.3 → v0.4 update lands mid-job without interrupting it; a
-tampered bundle is rejected before staging; a crashy release and a
-subtly broken one (its write path returns wrong content, caught by
-the digest post-condition) are rolled back before going live; a
-crashy control plane is rolled back by the watchdog after promotion;
-and store/vault/config integrity is verified byte-for-byte across
-the whole drill. Model providers and real Agent-Shield receipts land
-in Phase 4 per the foundation spec.
+You need Docker. (Node ≥ 22 is only needed to build from source and
+run the test suite, which the Docker build does for you.)
 
-**Phase 4 (the Shield gate + onboarding) is built**: the hosted
-Agent-Shield is wired in as the non-optional gate (spec §1.7) — the
-control plane scans inbound messages before a job reaches the
-runtime, tool-call arguments before classification (scan-before-act),
-and tool results before they can enter the model's context, with the
-signed Protocol receipt recorded on the job and in `gate.jsonl`.
-Provisioning is the zero-form free signup; the key lives in the vault
-and is attached only inside a `withSecret` callback. Once the gate is
-required by policy, an unreachable Shield is a policy decision, never
-a silent skip: fail-closed (the operator's recorded choice, and the
-default — for tool calls specifically) blocks the surface; fail-open
-proceeds flagged, with no receipt and no pretense of a scan. Skill
-installation sits behind the local scanner gate (the agent-shield-scan
-catalog ported into `@gus/gate`): a DO NOT INSTALL verdict refuses
-the install with no override; MCP configs pass the same walker.
-Provider classes (Anthropic, OpenAI-compatible, Ollama, the starter
-gateway, the offline stub) resolve per call from operator config,
-take their keys from the vault by name, and report under Governor
-price-table keys so caps price real calls like stub calls. The
-operator panel serves status, ledger, jobs with receipt links,
-approvals, the vault (names only), the skill registry, and the
-five-step onboarding wizard (Shield → Telegram token → provider →
-caps → first job), whose state file never contains a secret. The
-Phase 4 gates are two drills: the **Shield-gate drill** (an inbound
-injection blocked at ingress with its live-verified receipt; a
-fetched page carrying an exfiltration directive withheld at the
-result surface; planted skill + MCP config refused, clean skill
-installed; a fail-closed staging where an approved credential fetch
-executes but its data is withheld while the Shield is down) and the
-**onboarding drill** (a fresh install walked through the wizard only:
-5 user actions, first digest job verified-done). In the authoring VM
-the drills run the gate in recorded-replay mode — the live API's
-responses for the exact drill payloads, captured at host level and
-replayed byte-for-byte — because the drill containers have no
-egress; the receipts collected are real and are verified against the
-live verify endpoint from the host. See docs/LOCAL-DRILL.md.
+```sh
+git clone <this repo> gus && cd gus
+npm install && npm run build && npm run pack
+docker compose -f packages/sandbox/docker-compose.yml up --build -d
+```
+
+That one compose command starts both halves: the control plane and
+the sandboxed agent. Then open the operator panel at
+**http://127.0.0.1:8731** (loopback only). The first boot writes an
+operator token to the state volume — the control-plane log names the
+file (`panel-token`); read it with
+`docker compose -f packages/sandbox/docker-compose.yml exec control-plane cat /state/panel-token`
+and paste it into the panel. The five-step wizard takes it from
+there: no config files to edit, and every secret you enter goes
+straight into the encrypted vault — never into the chat (see
+*Limitations* on why).
+
+Plain-English walkthrough: [docs/install.md](docs/install.md).
+
+## Honest limitations
+
+We publish what GUS does *not* do, in the same place as what it does:
+
+- **Skills are installed, not executed.** In v1, third-party skills
+  are scanner-gated and stored, but GUS does not yet run third-party
+  skill code. The four built-in job types (daily digest, fetch &
+  summarize, workspace files, reminders/heartbeat) are the working
+  surface.
+- **A receipt means "no known-bad patterns detected."** A signed
+  receipt proves a scan happened, what it covered, and what it found
+  — it is not a guarantee that content is safe. Agent-Shield's own
+  published benchmarks are candid about detection limits; GUS markets
+  the gate as *architecture* — every call is checked and receipted —
+  never as "the scanner catches everything."
+- **The drill evidence has two vehicle caveats, until it doesn't.**
+  The gate drills were authored in a VM whose containers have no
+  network egress, so (a) container drills ran the same OCI images
+  through podman+crun instead of a Docker daemon, and (b) the Phase 4
+  Shield drill replays responses captured from the *live* Agent-Shield
+  API for the drill's exact payloads (the receipts earned are real
+  and were verified against the live verify endpoint). A re-run on a
+  stock Docker host retires both caveats and is on the launch
+  checklist. The substitutions are documented per-phase in
+  [docs/LOCAL-DRILL.md](docs/LOCAL-DRILL.md).
+- **Telegram is not end-to-end encrypted.** Telegram bot chats are
+  cloud chats. GUS therefore sends Telegram approvals and metadata
+  only — secrets never transit it — and the same rule is why secrets
+  are entered in the panel, not in chat. GUS's secret-guard also has
+  an honest edge: if you paste a secret into a group chat, GUS stops
+  *itself* from ingesting or propagating it and tells you to rotate
+  it — it cannot unsend what other people already saw. No software
+  can.
+- **Working name.** "GUS" is a working name pending formal trademark
+  clearance; see `TRADEMARK.md`.
+
+## Privacy
+
+GUS sends nothing home by default. There is an **opt-in, anonymous
+install heartbeat** (off unless you set `GUS_HEARTBEAT=1` and a
+counter URL): it sends exactly `{ version, mode: "self-host" }` — no
+install id, no usage data, no content — so the project's adoption
+kill-criterion (spec §5) can be measured without measuring *you*. You
+can also point it at your own counter, or leave it off forever;
+nothing else changes.
 
 ## Layout
 
 ```
 packages/
-  shared/          types, comm protocol, job model, S1 patterns, secret-guard
-  gate/            receipts (local stub + the Agent-Shield client/gate, Phase 4), skill scanner
-  control-plane/   Governor, Job Runner, comm server, channel host — OUTSIDE the sandbox
-  runtime/         the agent loop — runs INSIDE the sandbox, owns no secrets
-  channels/telegram/  first channel adapter (Bot API + offline fake-file transport)
-  vault/           Vault Broker — encrypted secrets, no read API (Phase 1)
-  egress/          egress proxy — allowlist, injection, screening (Phase 1)
-  panel/           operator web panel: status, ledger, jobs, approvals, vault, skills, onboarding
-  sandbox/         Dockerfiles + compose (control plane + agent sandbox)
+  shared/            types, comm protocol, job model, S1 secret patterns, secret-guard
+  gate/              receipts, the Agent-Shield client/gate, the skill scanner
+  control-plane/     Governor · Job Runner · Approval Engine · Updater · onboarding — OUTSIDE the sandbox
+  runtime/           the agent loop — INSIDE the sandbox, owns no secrets
+  channels/telegram/ first channel adapter (Bot API + offline fake-file transport)
+  vault/             Vault Broker — encrypted secrets, no read API
+  egress/            egress proxy — allowlist, DNS pinning, injection at the edge, screening
+  panel/             operator web panel: status, ledger, jobs, approvals, vault, skills, onboarding
+  sandbox/           Dockerfiles + compose (control plane + agent sandbox, A/B slot launcher)
 test/
-  unit/            secret-guard, Governor/Job Runner, vault + egress tests
-  promise/         gate drills + resource-budget check (the Promise Suite)
-skills/            skill format placeholder (scanner-gated installs, Phase 4)
+  unit/              unit suite (90 tests)
+  promise/           the gate drills — the Promise Suite
+  fixtures/          planted malicious skills, drill worlds, recorded Shield responses tooling
+skills/              first-party skill shelf (scanner-gated installs)
+docs/                install guide, threat model, local-drill notes, launch drafts
 ```
 
-## Run the drills
+Channels are thin adapters over one interface; Telegram is the first
+and remains the approval/kill-switch surface even as more land (a
+Teams adapter is planned second), so the safety path never depends on
+a corporate tenant's availability.
+
+## Run the Promise Suite
 
 ```sh
-npm install && npm run build && npm test     # 72 unit tests
-npm run pack                                  # assemble dist-bundle/
+npm install && npm test                       # 90 unit tests
+npm run build && npm run pack                 # assemble dist-bundle/ for the images
 docker build -f packages/sandbox/Dockerfile.control -t gus-control:dev .
 docker build -f packages/sandbox/Dockerfile.agent   -t gus-agent:dev .
-bash test/promise/phase0-drill.sh             # the Phase 0 gate
-bash test/promise/phase1-drill.sh             # the Phase 1 credential red-team
-bash test/promise/phase2-drill.sh             # the Phase 2 Yue + runaway-cap drills
-bash test/promise/phase3-drill.sh             # the Phase 3 bad-update drill
-bash test/promise/phase4-drill.sh             # the Phase 4 Shield-gate drill
-bash test/promise/phase4-onboarding-drill.sh  # the Phase 4 onboarding drill
-npm run check:budget                          # ≤1 GB RAM budget, static + measured
+bash test/promise/phase0-drill.sh             # sandbox + secret-guard gate
+bash test/promise/phase1-drill.sh             # credential red-team
+bash test/promise/phase2-drill.sh             # Yue drill + runaway-cap drill
+bash test/promise/phase3-drill.sh             # bad-update drill
+bash test/promise/phase4-drill.sh             # Shield-gate drill
+bash test/promise/phase4-onboarding-drill.sh  # onboarding drill
+bash test/promise/boot-sweep-drill.sh         # crash-recovery (boot sweep) drill
+npm run check:budget                          # ≤ 1 GB steady-state budget, static + measured
 ```
 
-On a host without a working Docker daemon the drill can drive the same
-OCI images through podman (`PODMAN=podman bash test/promise/phase0-drill.sh`);
-see `docs/LOCAL-DRILL.md` for the substitution notes from the Phase 0
-dev environment.
+On a host without a working Docker daemon the container drills can
+drive the same OCI images through podman (`PODMAN=podman bash
+test/promise/phase0-drill.sh`); see `docs/LOCAL-DRILL.md`.
 
-## Channels
+## Status
 
-Channels are thin adapters over one interface (`packages/shared`:
-`ChannelAdapter`). Telegram is the first adapter and remains the
-approval/kill-switch surface even as more channels land — the safety
-path never depends on someone else's platform. Note: **Telegram bot
-chats are not end-to-end encrypted** — Telegram carries approvals and
-metadata only; secrets never transit it.
+The v1 foundation is **built and gate-drilled end to end**: skeleton
+and sandbox (Phase 0), vault and egress (Phase 1), Governor and
+approvals (Phase 2), boring updates (Phase 3), the Shield gate,
+provider classes, panel and onboarding (Phase 4), and launch prep —
+docs, CI, boot sweep, DNS pinning (Phase 5). What remains before a
+public launch is a short checklist of decisions and verifications
+that belong to the maintainer, not more foundation code. Per-phase
+build detail and drill evidence live in `docs/LOCAL-DRILL.md` and the
+`drill/` evidence logs.
 
 ## License
 
-Apache-2.0 — see `LICENSE` and `NOTICE`. "GUS" and the product identity
-are covered by `TRADEMARK.md`: forks are welcome, but must ship under
-their own name. Security issues: see `SECURITY.md`.
+Apache-2.0 — see `LICENSE` and `NOTICE`. "GUS" and the product
+identity are covered by `TRADEMARK.md`: forks are welcome, but must
+ship under their own name. Security issues: see `SECURITY.md`.
+Contributing: see `CONTRIBUTING.md`.

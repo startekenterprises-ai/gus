@@ -110,6 +110,46 @@ export class JobRunner {
     return false;
   }
 
+  /**
+   * Boot sweep (Phase 5) — the job-side twin of the Governor's orphan
+   * reservation sweep. A job left `queued` or `running` by a control-plane
+   * incarnation that died (crash, kill, host reboot) has no driver in this
+   * incarnation: nothing will ever pick it up, so left alone it would sit
+   * unsettled forever — a silent failure, which §1.5 forbids. The sweep
+   * settles each such job failed-loudly, with a receipt, at boot.
+   *
+   * NOT swept:
+   *  - `needs-approval` jobs: approvals are durable control-plane state
+   *    that survives restarts by design (Phase 2) — a parked job is
+   *    waiting on the operator, not on a dead process.
+   *  - `update` jobs, unless `includeUpdateJobs` is set: promotion works
+   *    BY exiting the control plane, so the Updater's bootReconcile owns
+   *    update jobs and settles them from the update record (confirmed,
+   *    rolled back, or aborted). main.ts therefore sweeps once before
+   *    bootReconcile (update jobs excluded) and once after it (included)
+   *    — the second pass catches only an update job whose record
+   *    bootReconcile could not claim, and is otherwise a no-op.
+   *
+   * Returns the records it settled (empty on a clean boot), so the caller
+   * can notify the affected conversations — failed-loudly means visible.
+   */
+  sweepOrphanedJobs(opts?: { includeUpdateJobs?: boolean }): JobRecord[] {
+    const swept: JobRecord[] = [];
+    for (const rec of this.jobs.values()) {
+      if (rec.state !== "queued" && rec.state !== "running") continue;
+      if (rec.kind === "update" && !opts?.includeUpdateJobs) continue;
+      swept.push(
+        this.transition(
+          rec.id,
+          "failed-loudly",
+          "the control plane restarted before this job finished; it was settled " +
+            "failed-loudly by the boot sweep — no part of it ran after the restart",
+        ),
+      );
+    }
+    return swept;
+  }
+
   /** Phase 4: attach a real Agent-Shield receipt id to this job (a
    *  gated surface produced it). Persisted immediately — the id is the
    *  job's durable link to gate.jsonl and the verify endpoint. */

@@ -267,3 +267,50 @@ notes in hand:
   result can arrive with the Shield unavailable, because channel
   jobs are stopped earlier, at ingress — which is itself the
   fail-closed property for tool calls in this topology.
+
+## Phase 5 (launch prep) — engineering notes
+
+- **DNS pinning transport (egress).** The pinned transport does NOT
+  use a `lookup` override: on Node 24 the default http agent silently
+  ignores a per-request `lookup` (the connection then goes to real
+  DNS — in this VM, a wildcard resolver answered test names with a
+  proxy address that reset the connection, which is how the bug
+  showed itself). The reliable pin is a per-request `createConnection`
+  override: the socket is opened to the resolved IP directly, with
+  `servername` set explicitly for TLS. Proven by
+  `test/unit/egress-dns.test.ts`, including a live local-server test
+  under an unresolvable name. The proxy additionally verifies the
+  socket's real remote address against the resolved set on every hop.
+- **Boot-sweep drill vehicle.** `test/promise/boot-sweep-drill.sh`
+  runs the control plane as a host process, deliberately: the subject
+  is state handling across a SIGKILL, not isolation. The fake-file
+  channel is the production adapter path either way.
+- **CI.** `.github/workflows/promise-suite.yml` encodes the suite but
+  has never executed — the repo has no remote. Its header says so.
+  First real run is a launch-checklist item.
+- **DNS-pinning evidence stays out of the result text.** The first
+  pinning implementation appended a "DNS pinned: …" note to the
+  fetch result — which flows into the tool-result summary the Shield
+  gate scans, changing a byte-exact surface the Phase 4
+  recorded-replay drill pins (one stand-in miss, G3/G6/G7 red). The
+  verified peer address now goes in the egress audit log entry
+  (`remoteAddress`) only. Rule of thumb: transport internals are
+  audit data, not model-facing text.
+- **Phase 1 drill comm mount fixed (Phase 3 pattern).** Phase 1's
+  script still mounted the shared comm volume with `:U` on both
+  containers, control first — on this vehicle the sandbox's later
+  `:U` re-chown can win the race against the control plane's socket
+  bind (EACCES on /comm/gus.sock; the stack then never starts and
+  every fetch check fails against missing state files, which looks
+  exactly like an egress regression — check `podman logs
+  gus-control` before believing it). comm now mounts without `:U`,
+  chmod 777, as Phase 3 already did for its shared volumes.
+- **Phase 3 drill timing hardening (2026-11-03).** Two checks raced
+  their own triggers: S3(a) snapshotted the outbound count AFTER the
+  deny that releases the update-refusal notice (the notice was in the
+  transcript, correct, both times it "failed"), and S2's pre-apply
+  notice check was a bare grep with no wait. Both are fixed in the
+  script (snapshot before the trigger; a bounded `wait_out_has`).
+  Product behavior was never at fault — but a promise suite that
+  coin-flips teaches people to ignore red, so the races are fixed,
+  not tolerated.

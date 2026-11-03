@@ -33,13 +33,30 @@
  *      origin+path with the query scrubbed, and all free text is
  *      screened before it is written.
  *
- * Known limit, stated plainly: hostnames are matched as written; DNS
- * resolution happens at fetch time (no resolved-IP pinning yet). On the
- * drill's loopback test surface this is exact; IP pinning is a hardening
- * item for hostile-network deployments, not a Phase 1 claim.
+ * DNS pinning (Phase 5 hardening): the allowlist matches hostnames,
+ * but a hostname is only as trustworthy as its DNS answer — a rebinding
+ * attack resolves an allowlisted name to an internal address between
+ * check and connect. So for every hop the proxy resolves the name
+ * ONCE, connects to a resolved IP (the built-in transport pins the
+ * socket to it via a createConnection override — the name is still
+ * used for the Host header, TLS SNI, and certificate verification),
+ * and then verifies the socket's actual remote address is in the
+ * resolved set before the response is screened or returned. A
+ * mismatch is blocked as
+ * blocked:dns_rebinding_detected and the fetched bytes are discarded;
+ * a name that does not resolve is blocked:dns_resolution_failed and no
+ * socket opens. IP-literal destinations skip DNS (the literal IS the
+ * pin). Transports injected for tests skip resolution unless a
+ * resolver is injected too, but a transport that REPORTS its remote
+ * address is always held to the resolved set when one exists.
  */
 import { appendFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { lookup } from "node:dns/promises";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { connect as netConnect, isIP, type NetConnectOpts, type Socket } from "node:net";
+import { connect as tlsConnect, type ConnectionOptions, type TLSSocket } from "node:tls";
 import { screenText } from "@gus/shared";
 import type { VaultBroker } from "@gus/vault";
 import {
@@ -62,7 +79,15 @@ export interface EgressTransportResponse {
   status: number;
   headers: Record<string, string>;
   body: string;
+  /** The IP the transport actually connected to, when it knows it.
+   *  The built-in (pinned) transport always reports it; the proxy
+   *  verifies it against the resolved set (DNS pinning). */
+  remoteAddress?: string;
 }
+
+/** Resolves a hostname to its IP addresses. Injectable for tests;
+ *  production uses node:dns lookup (all records, verbatim order). */
+export type EgressResolver = (hostname: string) => Promise<string[]>;
 
 /** Transport is injectable for unit tests; production uses global fetch
  *  with redirect:"manual" so step 4 above is ours, not the library's. */
@@ -104,6 +129,12 @@ export interface EgressLogEntry {
   status?: number;
   verdict: string;
   receiptId: string;
+  /** The verified peer address of the final hop, when the transport
+   *  reported one — DNS-pinning evidence lives in the audit log,
+   *  deliberately NOT in the model-facing result notes: the
+   *  tool-result text surface stays byte-stable (the Phase 4
+   *  recorded-replay drill pins that format). */
+  remoteAddress?: string;
 }
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -115,23 +146,87 @@ const MAX_REDIRECTS = 3;
 const MAX_BODY_BYTES = 256 * 1024;
 const BODY_FOR_CONTEXT = 8 * 1024;
 
-const defaultTransport: EgressTransport = async (url, init) => {
-  const res = await fetch(url, {
-    method: init.method,
-    headers: init.headers,
-    body: init.body,
-    redirect: "manual",
-    signal: AbortSignal.timeout(10_000),
-  });
-  const headers: Record<string, string> = {};
-  res.headers.forEach((v, k) => {
-    headers[k.toLowerCase()] = v;
-  });
-  return { status: res.status, headers, body: await res.text() };
+/** Normalize an address for set comparison: an IPv4-mapped IPv6 form
+ *  ("::ffff:1.2.3.4") is the same endpoint as the bare IPv4. */
+function normalizeIp(ip: string): string {
+  const lower = ip.toLowerCase();
+  if (lower.startsWith("::ffff:") && isIP(lower.slice(7)) === 4) return lower.slice(7);
+  return lower;
+}
+
+const defaultResolver: EgressResolver = async (hostname) => {
+  const records = await lookup(hostname, { all: true, verbatim: true });
+  return records.map((r) => r.address);
 };
+
+/**
+ * The built-in transport: connects to `pinnedIp` and nothing else.
+ * The pin is a `createConnection` override on the request — the socket
+ * is opened to the pinned address directly, so no DNS lookup happens
+ * at connect time at all. The URL's hostname still drives the Host
+ * header, TLS SNI (servername set explicitly), and certificate
+ * verification (against the name, as it must be). The socket's real
+ * remote address is reported back so the proxy can verify the pin
+ * held. Redirects stay manual — the proxy follows them hop by hop.
+ */
+function pinnedTransport(pinnedIp: string): EgressTransport {
+  return (url, init) =>
+    new Promise((resolve, reject) => {
+      const u = new URL(url);
+      const isHttps = u.protocol === "https:";
+      const doRequest = isHttps ? httpsRequest : httpRequest;
+      const createConnection = (options: Record<string, unknown>): Socket | TLSSocket =>
+        isHttps
+          ? tlsConnect({
+              ...options,
+              host: pinnedIp,
+              servername: typeof options.servername === "string" ? options.servername : u.hostname,
+            } as ConnectionOptions)
+          : netConnect({ ...options, host: pinnedIp } as NetConnectOpts);
+      const req = doRequest(
+        u,
+        {
+          method: init.method,
+          headers: init.headers,
+          timeout: 10_000,
+          createConnection: createConnection as never,
+        },
+        (res) => {
+          const remoteAddress = res.socket.remoteAddress;
+          const chunks: Buffer[] = [];
+          let total = 0;
+          res.on("data", (c: Buffer) => {
+            total += c.length;
+            if (total <= 8 * 1024 * 1024) chunks.push(c);
+          });
+          res.on("end", () => {
+            const headers: Record<string, string> = {};
+            for (const [k, v] of Object.entries(res.headers)) {
+              if (v !== undefined) headers[k.toLowerCase()] = Array.isArray(v) ? v.join(", ") : v;
+            }
+            resolve({
+              status: res.statusCode ?? 0,
+              headers,
+              body: Buffer.concat(chunks).toString("utf8"),
+              remoteAddress,
+            });
+          });
+          res.on("error", reject);
+        },
+      );
+      req.on("timeout", () => req.destroy(new Error("egress fetch timed out after 10000ms")));
+      req.on("error", reject);
+      if (init.body !== undefined) req.write(init.body);
+      req.end();
+    });
+}
 
 export class EgressProxy {
   private transport: EgressTransport;
+  /** True when the built-in pinned transport is in use (no injected
+   *  transport): resolution + pinning are then always enforced. */
+  private usePinnedTransport: boolean;
+  private resolver?: EgressResolver;
 
   constructor(
     private opts: {
@@ -141,9 +236,28 @@ export class EgressProxy {
       receiptsPath: string;
       issuer: ReceiptIssuerLike;
       transport?: EgressTransport;
+      resolver?: EgressResolver;
     },
   ) {
-    this.transport = opts.transport ?? defaultTransport;
+    this.usePinnedTransport = opts.transport === undefined;
+    // With the built-in transport there is no single instance: the hop
+    // loop constructs pinnedTransport(chosenIp) per hop, after DNS
+    // resolution picks the address. This placeholder is never called.
+    this.transport =
+      opts.transport ??
+      (() => Promise.reject(new Error("egress: pinned transport is constructed per hop")));
+    this.resolver = opts.resolver ?? (this.usePinnedTransport ? defaultResolver : undefined);
+  }
+
+  /** Resolve a hop's hostname once. Returns the normalized address
+   *  set, or null when resolution is not in play for this call
+   *  (injected test transport without an injected resolver). Throws /
+   *  returns [] on resolution failure — the caller blocks. */
+  private async resolveHop(hostname: string): Promise<string[] | null> {
+    if (isIP(hostname)) return [normalizeIp(hostname)]; // the literal IS the pin
+    if (!this.resolver) return null;
+    const addrs = await this.resolver(hostname);
+    return [...new Set(addrs.map(normalizeIp))];
   }
 
   /** Scrub a string of vault values and S1-pattern hits (for logging). */
@@ -296,15 +410,68 @@ export class EgressProxy {
         injectedFor = `${currentUrl.hostname}:${currentUrl.port || (currentUrl.protocol === "https:" ? "443" : "80")}`;
       }
 
+      // -- DNS pinning: resolve this hop once, connect only to a
+      //    resolved address, verify the socket's real peer afterwards.
+      let resolved: string[] | null;
+      try {
+        resolved = await this.resolveHop(currentUrl.hostname);
+      } catch {
+        return blocked(
+          "blocked:dns_resolution_failed",
+          `DNS resolution failed for ${currentUrl.hostname}; no connection was attempted`,
+        );
+      }
+      if (resolved !== null && resolved.length === 0) {
+        return blocked(
+          "blocked:dns_resolution_failed",
+          `DNS returned no addresses for ${currentUrl.hostname}; no connection was attempted`,
+        );
+      }
+
       let resp: EgressTransportResponse;
       try {
-        resp = await this.transport(currentUrl.toString(), {
-          method: currentMethod,
-          headers,
-          body: currentBody,
-        });
+        if (this.usePinnedTransport) {
+          // Try each resolved address in order; the transport pins the
+          // socket to the one in use. (resolved is non-null here: the
+          // built-in path always has a resolver.)
+          let lastErr: unknown;
+          resp = undefined as never;
+          for (const ip of resolved ?? []) {
+            try {
+              resp = await pinnedTransport(ip)(currentUrl.toString(), {
+                method: currentMethod,
+                headers,
+                body: currentBody,
+              });
+              lastErr = undefined;
+              break;
+            } catch (e) {
+              lastErr = e;
+            }
+          }
+          if (lastErr !== undefined) throw lastErr;
+        } else {
+          resp = await this.transport(currentUrl.toString(), {
+            method: currentMethod,
+            headers,
+            body: currentBody,
+          });
+        }
       } catch (e) {
         return blocked("blocked:transport_error", `fetch failed: ${this.scrub(String(e)).slice(0, 200)}`);
+      }
+
+      // The peer the socket ACTUALLY reached must be one of the
+      // addresses this hop resolved to. Otherwise the name was
+      // rebound between resolution and connect: discard the response
+      // unscreened — it never gets near the agent.
+      if (resolved !== null && resp.remoteAddress !== undefined) {
+        if (!resolved.includes(normalizeIp(resp.remoteAddress))) {
+          return blocked(
+            "blocked:dns_rebinding_detected",
+            `connected to ${resp.remoteAddress}, which is not among the resolved addresses for ${currentUrl.hostname} (${resolved.join(", ")}); the response was discarded`,
+          );
+        }
       }
 
       const location = resp.headers["location"];
@@ -367,6 +534,9 @@ export class EgressProxy {
           bytesIn: (resp.body ?? "").length,
           status: resp.status,
           verdict: "allowed",
+          ...(resp.remoteAddress !== undefined
+            ? { remoteAddress: resp.remoteAddress }
+            : {}),
         },
         hashInput,
       );
