@@ -75,6 +75,23 @@ export const DEFAULT_GOVERNOR_CONFIG: GovernorConfig = {
   maxTokensPerDay: 200_000,
 };
 
+/**
+ * Built-in blended prices (USD per 1k tokens, in+out) for the Phase 4
+ * provider classes, used only when the operator's price table doesn't
+ * name the model — an operator entry always wins. Approximations of
+ * the providers' published per-token prices, blended across input and
+ * output; the operator can correct them in governor.json at any time
+ * (the ledger prices history with the table in force at settle time).
+ * Local inference (Ollama, anything "ollama/…" or "gateway/…" the
+ * operator runs themselves) is $0 unless the operator prices it.
+ */
+export const BUILTIN_PRICES_USD_PER_1K: Record<string, number> = {
+  "anthropic/claude-sonnet-5": 0.009,
+  "anthropic/claude-haiku-4-5": 0.002,
+  "openai/gpt-5": 0.009,
+  "openai/gpt-5-mini": 0.0011,
+};
+
 export type LedgerEntry =
   | {
       kind: "reserve";
@@ -167,7 +184,12 @@ export class Governor {
   }
 
   priceUsdPer1k(model: string, cfg: GovernorConfig = this.config()): number {
-    return cfg.pricesUsdPer1k?.[model] ?? cfg.defaultPriceUsdPer1k ?? 0;
+    return (
+      cfg.pricesUsdPer1k?.[model] ??
+      BUILTIN_PRICES_USD_PER_1K[model] ??
+      cfg.defaultPriceUsdPer1k ??
+      0
+    );
   }
 
   costFor(model: string, tokensIn: number, tokensOut: number, cfg?: GovernorConfig): number {
@@ -276,7 +298,68 @@ export class Governor {
     return this.committedTokens(this.readLedger(), dayStart(Date.now()));
   }
 
+  /** Settled USD since a timestamp (Phase 4: the panel's money view). */
+  settledUsdSince(fromTs: number): number {
+    let sum = 0;
+    for (const e of this.readLedger()) {
+      if (e.kind === "settle" && e.ts >= fromTs) sum += e.costUsd;
+    }
+    return sum;
+  }
+
+  /** Spend vs caps for the panel's first screen: where the money went,
+   *  grouped by day and month, next to the ceilings it answers to. */
+  spendSummary(): {
+    todayUsd: number;
+    monthUsd: number;
+    totalUsd: number;
+    caps: GovernorConfig;
+  } {
+    const now = Date.now();
+    return {
+      todayUsd: this.settledUsdSince(dayStart(now)),
+      monthUsd: this.settledUsdSince(monthStart(now)),
+      totalUsd: this.settledUsdSince(0),
+      caps: this.config(),
+    };
+  }
+
+  /**
+   * Operator-surface caps write (onboarding + panel settings): merges
+   * the given fields into <state>/governor.json, preserving everything
+   * else (price table included). Atomic enough for a single-operator
+   * file (write-then-rename is unnecessary here; the Governor re-reads
+   * per authorization and a torn read falls back to defaults, never to
+   * "no caps"). Undefined fields are left untouched.
+   */
+  writeCaps(patch: Partial<GovernorConfig>): void {
+    if (this.fixedConfig) {
+      Object.assign(this.fixedConfig, patch);
+      return;
+    }
+    let raw: Record<string, unknown> = {};
+    try {
+      if (existsSync(this.configPath())) {
+        raw = JSON.parse(readFileSync(this.configPath(), "utf8")) as Record<string, unknown>;
+      }
+    } catch {
+      raw = {};
+    }
+    for (const [k, v] of Object.entries(patch)) {
+      if (v !== undefined) raw[k] = v;
+    }
+    if (typeof raw.maxTokensPerJob !== "number") raw.maxTokensPerJob = DEFAULT_GOVERNOR_CONFIG.maxTokensPerJob;
+    if (typeof raw.maxTokensPerDay !== "number") raw.maxTokensPerDay = DEFAULT_GOVERNOR_CONFIG.maxTokensPerDay;
+    writeFileSync(this.configPath(), JSON.stringify(raw, null, 2) + "\n", { mode: 0o600 });
+  }
+
   /** The reconciliation statement the Phase 2 gate asserts. */
+  /** Phase 4 (panel): the most recent ledger entries, oldest first. */
+  recentEntries(limit = 200): LedgerEntry[] {
+    const all = this.readLedger();
+    return all.slice(Math.max(0, all.length - limit));
+  }
+
   audit(): LedgerAudit {
     const entries = this.readLedger();
     let reserves = 0;

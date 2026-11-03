@@ -54,4 +54,9 @@ export interface JobRecord {
   tokensIn: number;
   tokensOut: number;
   receiptId?: string;
+  /** Phase 4: real Agent-Shield receipt ids issued for this job's
+   *  gated surfaces (inbound message, tool calls, tool results), in
+   *  scan order. The full receipts live in gate.jsonl; these ids are
+   *  the job's link to them. Absent when no scan applied. */
+  shieldReceiptIds?: string[];
 }

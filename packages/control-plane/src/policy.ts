@@ -32,8 +32,9 @@
  * file at all. The file is re-read on every classification: operator
  * edits are live on the next call.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
 import type { ToolClass } from "@gus/shared";
+import { DEFAULT_SHIELD_POLICY, type ShieldPolicyView } from "@gus/gate";
 
 export type PolicyAction = "allow" | "deny" | "needs-approval";
 
@@ -58,6 +59,8 @@ export interface PolicyData {
   /** Approval lifetime; an unanswered approval is a denial. */
   approvalTimeoutMs: number;
   rules: PolicyRule[];
+  /** Phase 4: the Shield gate's operator policy (spec §1.7). */
+  shield: ShieldPolicyView;
 }
 
 export const DEFAULT_POLICY: PolicyData = {
@@ -65,6 +68,7 @@ export const DEFAULT_POLICY: PolicyData = {
   bulkThreshold: 5,
   approvalTimeoutMs: 10 * 60 * 1000,
   rules: [],
+  shield: { ...DEFAULT_SHIELD_POLICY },
 };
 
 export interface ToolCallShape {
@@ -129,6 +133,17 @@ function ruleMatches(rule: PolicyRule, call: ToolCallShape): boolean {
   return true;
 }
 
+/** Parse the file's shield section defensively (a hand-edited file
+ *  must never weaken the defaults by accident). */
+function parseShield(raw: unknown): ShieldPolicyView {
+  if (!raw || typeof raw !== "object") return { ...DEFAULT_SHIELD_POLICY };
+  const s = raw as Partial<ShieldPolicyView>;
+  return {
+    required: s.required === true,
+    onUnavailable: s.onUnavailable === "open" ? "open" : "closed",
+  };
+}
+
 export class PolicyStore {
   constructor(private policyPath: string) {}
 
@@ -147,12 +162,43 @@ export class PolicyStore {
               ? raw.approvalTimeoutMs
               : DEFAULT_POLICY.approvalTimeoutMs,
           rules: Array.isArray(raw.rules) ? (raw.rules as PolicyRule[]) : [],
+          shield: parseShield(raw.shield),
         };
       }
     } catch {
       /* malformed operator policy: strict defaults, built-ins still hold */
     }
     return DEFAULT_POLICY;
+  }
+
+  /** The Shield gate's resolved policy (Phase 4). */
+  shieldPolicy(): ShieldPolicyView {
+    return this.load().shield;
+  }
+
+  /**
+   * Operator-surface write of the Shield section (onboarding records
+   * the provisioning + the operator's fail-mode choice here). Merges
+   * into the existing file so hand-authored rules survive; creates the
+   * file from defaults when absent. This is an operator action — the
+   * sandbox has no path to it, like every policy write.
+   */
+  writeShield(shield: ShieldPolicyView): void {
+    let raw: Record<string, unknown> = {};
+    try {
+      if (existsSync(this.policyPath)) {
+        raw = JSON.parse(readFileSync(this.policyPath, "utf8")) as Record<string, unknown>;
+      }
+    } catch {
+      raw = {};
+    }
+    raw.shield = { required: shield.required, onUnavailable: shield.onUnavailable };
+    if (typeof raw.version !== "number") raw.version = DEFAULT_POLICY.version;
+    if (typeof raw.bulkThreshold !== "number") raw.bulkThreshold = DEFAULT_POLICY.bulkThreshold;
+    if (typeof raw.approvalTimeoutMs !== "number") raw.approvalTimeoutMs = DEFAULT_POLICY.approvalTimeoutMs;
+    if (!Array.isArray(raw.rules)) raw.rules = [];
+    writeFileSync(this.policyPath, JSON.stringify(raw, null, 2) + "\n", { mode: 0o600 });
+    chmodSync(this.policyPath, 0o600);
   }
 
   classify(call: ToolCallShape, policy: PolicyData = this.load()): Classification {

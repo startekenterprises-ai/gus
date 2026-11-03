@@ -11,6 +11,7 @@
     }
   },
   "dependencies": {
-    "@gus/shared": "0.0.1"
+    "@gus/shared": "0.0.1",
+    "@gus/vault": "0.0.1"
   }
 }

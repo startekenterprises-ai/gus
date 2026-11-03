@@ -203,6 +203,15 @@ export class ApprovalEngine {
     return undefined;
   }
 
+  /** All currently-pending approvals, oldest first (Phase 4: the
+   *  panel's queue surface — the same records the channel shows). */
+  pending(): ApprovalRequest[] {
+    this.sweepExpired();
+    return [...this.requests.values()]
+      .filter((r) => r.status === "pending")
+      .sort((a, b) => a.createdAt - b.createdAt);
+  }
+
   /** True while any approval is awaiting the operator. Phase 3: part
    *  of the Updater's idle gate — an update never starts while an
    *  approval is parked. */

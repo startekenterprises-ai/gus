@@ -7,9 +7,9 @@
  * through the CommServer; channels never touch the sandbox directly.
  */
 import { appendFileSync } from "node:fs";
-import type { ApprovalButton, ChannelAdapter, ChannelEvent } from "@gus/shared";
+import type { ApprovalButton, ChannelAdapter, ChannelEvent, JobKind } from "@gus/shared";
 import { guardEvent, screenText } from "@gus/shared";
-import { sha256Hex } from "@gus/gate";
+import { sha256Hex, type ShieldGate } from "@gus/gate";
 import type { Governor } from "./governor.js";
 import type { JobRunner } from "./jobs.js";
 import type { CommServer } from "./comm-server.js";
@@ -52,6 +52,9 @@ export class ChannelHost {
     private jobs: JobRunner,
     private adapters: ChannelAdapter[],
     private approvals?: ApprovalEngine,
+    /** Phase 4: the Shield gate — inbound messages cross it before
+     *  they can become runtime work (spec §1.7, choke point 1). */
+    private shieldGate?: ShieldGate,
   ) {}
 
   attachComm(comm: CommServer): void {
@@ -74,9 +77,14 @@ export class ChannelHost {
    * (Phase 3: the post-promotion confirmation job). The text is ours,
    * but it goes through the same create → run → verify → settle path
    * as any operator job; kind "canary" marks it as a system check.
+   * Phase 4: onboarding's first guided job reuses the path as a
+   * "digest" — system jobs are control-plane-authored, so the inbound
+   * Shield scan (which guards OPERATOR-supplied text on its way to
+   * the agent) does not apply to them; their tool calls and results
+   * still cross the gate like everyone else's.
    */
-  runSystemJob(conversationId: string, text: string): string {
-    const job = this.jobs.create("canary", conversationId, screenText(text).redacted);
+  runSystemJob(conversationId: string, text: string, kind: JobKind = "canary"): string {
+    const job = this.jobs.create(kind, conversationId, screenText(text).redacted);
     this.jobs.transition(job.id, "running");
     this.pendingDeliveries.set(job.id, text);
     this.comm.pushUserMessage({ jobId: job.id, kind: job.kind, text });
@@ -194,6 +202,47 @@ export class ChannelHost {
           : "chat";
     const job = this.jobs.create(kind, msg.conversationId, screened.redacted);
     this.jobs.transition(job.id, "running");
+
+    // --- Phase 4: the Shield gate scans the inbound message before
+    // it can reach the runtime (spec §1.7, choke point 1). Operator
+    // COMMANDS (/stop, /approve, /update…) never reach this point —
+    // they are control-plane directives, not agent input, and are
+    // handled above. A blocked message settles its job failed-loudly
+    // WITH the Shield receipt; the runtime never sees the text.
+    if (this.shieldGate) {
+      const decision = await this.shieldGate.scanSurface("inbound-message", job.id, text);
+      if (decision.receipt) {
+        this.jobs.noteShieldReceipt(job.id, decision.receipt.receiptId);
+      }
+      if (decision.action === "block") {
+        try {
+          this.jobs.transition(
+            job.id,
+            "failed-loudly",
+            `blocked by the Agent-Shield gate at ingress: ${decision.detail}`,
+            { shieldReceiptId: decision.receipt?.receiptId },
+          );
+        } catch {
+          /* already settled — the block stands regardless */
+        }
+        await this.sendTo(
+          adapterName,
+          msg.conversationId,
+          `🛡 That message was blocked by the Agent-Shield gate before it reached the agent: ${decision.detail}. ` +
+            `Nothing ran. The job ended as failed-loudly with the Shield receipt on its record.`,
+        );
+        return;
+      }
+      if (decision.action === "flag") {
+        this.logEvent("events.jsonl", {
+          ts: Date.now(),
+          kind: "shield_flag_inbound",
+          jobId: job.id,
+          detail: decision.detail,
+        });
+      }
+    }
+
     this.pendingDeliveries.set(job.id, text);
     this.comm.pushUserMessage({ jobId: job.id, kind, text });
   }
@@ -212,6 +261,34 @@ export class ChannelHost {
     this.governor.setKilled(false, `channel:${adapterName}`);
     this.comm.broadcast({ t: "resume" });
     await this.sendTo(adapterName, conversationId, "▶️ Kill switch off. GUS is live.");
+  }
+
+  /**
+   * Phase 4: the panel's kill switch — the same Governor flag and the
+   * same broadcast as the channel's /stop, applied across every
+   * conversation: every unsettled job settles failed-loudly (never
+   * silently dropped), and the runtime is told to stop between steps.
+   */
+  killAll(by: string): { settled: number } {
+    this.governor.setKilled(true, by);
+    this.comm.broadcast({ t: "kill" });
+    let settled = 0;
+    for (const job of this.jobs.list(1000)) {
+      if (job.state === "verified-done" || job.state === "failed-loudly") continue;
+      try {
+        this.jobs.transition(job.id, "failed-loudly", "stopped by operator kill switch");
+        settled++;
+      } catch {
+        /* a job mid-settlement in a race — the kill flag still holds */
+      }
+    }
+    return { settled };
+  }
+
+  /** Phase 4: the panel's resume — clears the same flag /resume clears. */
+  resumeAll(by: string): void {
+    this.governor.setKilled(false, by);
+    this.comm.broadcast({ t: "resume" });
   }
 
   // ---- Phase 2: approval resolution (channel-side ONLY) ----

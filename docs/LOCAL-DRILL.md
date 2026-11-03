@@ -184,3 +184,86 @@ supervisor baked into the image) instead of a bare entrypoint:
   drills caught it). Verify each tag's image ID + Env after a load.
   `~/podman-root` is a build farm only; containers cannot run from
   it here (userdata chown fails on that filesystem).
+
+# Phase 4 additions (Shield-gate drill + onboarding drill)
+
+`test/promise/phase4-drill.sh` and
+`test/promise/phase4-onboarding-drill.sh` run on the same vehicle,
+with the largest substitution yet — read their evidence with these
+notes in hand:
+
+- **Recorded-replay mode for the Shield API.** The gate client runs
+  inside the control-plane container, and this VM cannot create a
+  networked container at all (`podman run` without `--network none`
+  dies mounting the netns — the gate drill logs the failed attempt at
+  its top, every run). Per the standing Phase 4 ruling, the drill
+  therefore captures the LIVE API's responses at host level for the
+  drill's exact payloads and replays them byte-for-byte:
+  `test/fixtures/record-shield.mjs` performs a real zero-form signup
+  and real `POST /v2/scan` calls for every string in
+  `test/fixtures/phase4-payloads.mjs`, asserting the expected verdict
+  class of each (a drift in the live API's answers fails the drill
+  before it starts), and `test/fixtures/shield-standin.mjs` — inside
+  the control container — replays the captured bodies for exact
+  (content_type, content) matches and 500s anything unrecorded, so
+  no verdict is ever invented. The gate's base URL is config, so the
+  wiring under test is the production code path. The receipts the
+  drill collects are genuine live-API receipts: the drill verifies
+  two of them against the live `POST /v1/receipts/verify` endpoint
+  (plus a `GET /v/<id>`) from the host. What replay mode does NOT
+  prove is in-container network reachability of the production API —
+  that is a deployment property, not a code property, and on any
+  normal Docker host the same drill topology points
+  `GUS_SHIELD_BASE_URL` at the real API unchanged. The live API
+  rate-limits bursts from fresh keys (transient no-verdict responses
+  under rapid fire), so the recorder paces and retries.
+- **The fake hostname `gus-drill`.** The live Shield's SSRF signals
+  correctly verdict a bare `fetch http://127.0.0.1/…` instruction
+  malicious (verified live during development), which would block
+  the drill's fetch scenarios at ingress for the wrong reason. The
+  containers therefore get `--add-host gus-drill:127.0.0.1`: the name
+  is public-looking to the Shield's syntactic classification, and
+  the egress allowlist names it explicitly. Every drill payload
+  using it was verified `no_signals` at ingress/tool-call surfaces
+  live, while the exfiltration page's summary is `malicious`.
+- **The panel driver.** `podman exec` is unavailable here, so the
+  harness cannot curl the panel (loopback inside the control
+  container) from the host. `test/fixtures/panel-driver.mjs` runs
+  inside the control container (via `drill4-entry.mjs`) and plays
+  the operator: it tails a step file on the shared run volume,
+  executes each request against the real panel with the real
+  operator token, and appends timed results. Step timing in the
+  onboarding evidence is the driver's — real panel round-trips, no
+  exec artifact. Its script file is the harness's side of the glass
+  (it carries the wizard's typed secrets, like Phase 0's inbound
+  file) and is deleted before the hygiene sweep, whose scope is
+  GUS's own state, workspace, and output.
+- **The model stand-in.** The onboarding walk needs a working
+  provider; the vehicle has neither egress to a real one nor a real
+  key a drill may spend. The wizard therefore chooses the bundled
+  gateway class pointed at a local OpenAI-compatible stand-in
+  (`phase4-world.mjs`), which logs `keyOk` booleans only. The real
+  code path — wizard → vault → provider class → Governor metering →
+  verified settlement — is what is exercised; the prose is canned.
+- **Two vehicle lessons the hard way.** (1) Bind-mounting the
+  recordings dir read-only straight off the drill dir left it
+  unreadable to the container user (dir mode 2770, file 0600) and
+  the stand-in served 500s — the gate then, correctly, failed to
+  provision. Drill volumes here are `:U` for a reason; the
+  recordings mount is `:U` too, and the stand-in now logs its loaded
+  recording count at boot so the failure is loud. (2) Fixtures
+  bind-mounted directly from the workspace disk are likewise
+  unreadable in-container; the skill fixtures are staged into the
+  drill dir first, like every other drill volume. Also: harness
+  greps over JSONL written by Node must use the compact
+  `JSON.stringify` spelling (`"keyOk":true`, no space) — three
+  drill assertions failed on spacing alone while the product
+  behavior was correct.
+- **Outage simulation.** The stand-in destroys scan sockets while
+  `/run/gus/shield-down` exists — a transport-level dead API, which
+  is what the fail-closed staging needs; signup is exempt (the
+  staging starts after provisioning). Approving the parked
+  credential fetch while "down" exercises the one path where a tool
+  result can arrive with the Shield unavailable, because channel
+  jobs are stopped earlier, at ingress — which is itself the
+  fail-closed property for tool calls in this topology.

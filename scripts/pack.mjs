@@ -33,7 +33,17 @@ cpSync(join(root, "packages/runtime/dist"), join(out, "runtime"), { recursive: t
 // starts them inside the control-plane container (drill use only — the
 // production entrypoint remains main.js; see test/fixtures/drill-entry.mjs).
 // Phase 3 adds drill3-entry.mjs (test servers + the slot launcher).
-for (const f of ["egress-test-server.mjs", "drill-entry.mjs", "drill3-entry.mjs"]) {
+for (const f of [
+  "egress-test-server.mjs",
+  "drill-entry.mjs",
+  "drill3-entry.mjs",
+  // Phase 4: Shield recorded-replay stand-in + world + panel driver.
+  "drill4-entry.mjs",
+  "shield-standin.mjs",
+  "phase4-world.mjs",
+  "phase4-payloads.mjs",
+  "panel-driver.mjs",
+]) {
   cpSync(join(root, "test/fixtures", f), join(out, "control-plane", f));
 }
 
@@ -43,6 +53,7 @@ const libs = [
   ["packages/vault", "vault"],
   ["packages/egress", "egress"],
   ["packages/channels/telegram", "telegram"],
+  ["packages/panel", "panel"],
 ];
 for (const [src, name] of libs) {
   const dest = join(out, "node_modules/@gus", name);

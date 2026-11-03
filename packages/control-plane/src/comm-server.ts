@@ -11,11 +11,13 @@ import { createServer, type Server, type Socket } from "node:net";
 import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import type { ControlMessage, RuntimeRequest } from "@gus/shared";
 import { GUS_VERSION, screenText } from "@gus/shared";
+import type { ShieldGate } from "@gus/gate";
 import type { Governor } from "./governor.js";
 import type { JobRunner } from "./jobs.js";
 import type { PolicyStore } from "./policy.js";
-import type { ApprovalEngine, ApprovalRequest } from "./approvals.js";
+import { canonicalize, type ApprovalEngine, type ApprovalRequest } from "./approvals.js";
 import { estimateTokens, fakeComplete, FAKE_MODEL_NAME } from "./provider.js";
+import { stubCompletion, type Provider } from "./providers.js";
 
 export interface HostHooks {
   onRuntimeHello(): void;
@@ -109,6 +111,16 @@ export class CommServer {
     private policy: PolicyStore,
     private approvals: ApprovalEngine,
     private fetchGate?: FetchGate,
+    /** Phase 4: the Shield gate (spec §1.7). Optional so the canary
+     *  runner's scratch endpoint and pre-Phase-4 wiring construct
+     *  without it; when present, every tool call and every tool result
+     *  crosses it. An unprovisioned gate steps aside by its own rules
+     *  (shield-gate.ts), so Phases 0–3 behavior is unchanged. */
+    private shieldGate?: ShieldGate,
+    /** Phase 4: resolves the active provider per model call (config
+     *  is re-read each time, so an onboarding/panel change is live on
+     *  the next call). Defaults to the deterministic stub. */
+    private providerFactory?: () => Provider,
   ) {}
 
   async start(): Promise<void> {
@@ -243,12 +255,19 @@ export class CommServer {
         this.hooks.onDenied(approval.jobId, approval.tool, note);
         return;
       }
+      // Phase 4: an approved fetch's result crosses the same Shield
+      // gate as any other — approval authorizes the ACTION; it never
+      // waives the scan of what comes back.
+      const gated = await this.gateToolResult(approval.jobId, approval.tool, approval.args, {
+        ok: true,
+        summary: fetchSummary(approval.args, r),
+      });
       this.send({
         t: "approved_execution",
         jobId: approval.jobId,
         tool: approval.tool,
         args: approval.args,
-        result: { ok: true, summary: fetchSummary(approval.args, r) },
+        result: gated,
       });
       return;
     }
@@ -258,6 +277,63 @@ export class CommServer {
       tool: approval.tool,
       args: approval.args,
     });
+  }
+
+  /** A Governor refusal on a model call: cap refusals are terminal,
+   *  receipted job outcomes (never silent stalls); kill refusals are
+   *  settled by the channel host, which owns the kill action. */
+  private refuseModel(
+    req: Extract<RuntimeRequest, { t: "model_request" }>,
+    decision: { ok: false; reason: "killed" | "cap_exceeded"; detail: string },
+  ): void {
+    if (decision.reason === "cap_exceeded") {
+      try {
+        this.jobs.transition(req.jobId, "failed-loudly", `governor cap: ${decision.detail}`);
+      } catch {
+        /* already settled/parked — the refusal stands regardless */
+      }
+      this.hooks.onCapExceeded(req.jobId, decision.detail);
+    }
+    this.send({
+      t: "model_response",
+      reqId: req.reqId,
+      ok: false,
+      reason: decision.reason,
+      detail: decision.detail,
+      tokensIn: 0,
+      tokensOut: 0,
+      costUsd: 0,
+    });
+  }
+
+  /**
+   * Phase 4 gate, tool-result surface: scan a control-plane-executed
+   * tool's result BEFORE it can reach the model. Returns the summary
+   * the runtime may relay, or a withholding notice when the gate
+   * blocks — the scanned content itself never crosses. Flagged
+   * results proceed with the flag stated in the summary.
+   */
+  private async gateToolResult(
+    jobId: string,
+    tool: string,
+    args: Record<string, unknown>,
+    result: { ok: boolean; summary: string },
+  ): Promise<{ ok: boolean; summary: string }> {
+    if (!this.shieldGate || tool !== "fetch") return result;
+    const decision = await this.shieldGate.scanSurface("tool-result", jobId, result.summary);
+    if (decision.receipt) this.jobs.noteShieldReceipt(jobId, decision.receipt.receiptId);
+    if (decision.action === "block") {
+      return {
+        ok: false,
+        summary:
+          `the fetched content was withheld by the Agent-Shield gate: ${decision.detail}. ` +
+          `Nothing from that page was shown to the agent.`,
+      };
+    }
+    if (decision.action === "flag") {
+      return { ok: result.ok, summary: `${result.summary}; shield note: ${decision.detail}` };
+    }
+    return result;
   }
 
   private async onRequest(req: RuntimeRequest): Promise<void> {
@@ -275,55 +351,125 @@ export class CommServer {
         break;
       }
       case "model_request": {
-        // The Phase 0 stub provider is deterministic, so the exact
-        // tokens of the reply are computable BEFORE authorization —
-        // the Governor's reservation therefore equals the settlement,
-        // and cap math is exact (governor.ts). Real providers estimate
-        // from prompt + output budget through the same interface.
-        const reply = fakeComplete(req.prompt);
-        const tokensIn = estimateTokens(req.prompt);
-        const tokensOut = estimateTokens(reply.text ?? JSON.stringify(reply.toolCall ?? {}));
-        const decision = this.governor.authorize(req.jobId, tokensIn, tokensOut, FAKE_MODEL_NAME);
-        if (!decision.ok) {
-          if (decision.reason === "cap_exceeded") {
-            // The cap is a terminal, receipted outcome for this job —
-            // never a silent stall. (Kill refusals are settled by the
-            // channel host, which owns the kill action.)
-            try {
-              this.jobs.transition(req.jobId, "failed-loudly", `governor cap: ${decision.detail}`);
-            } catch {
-              /* already settled/parked — the refusal stands regardless */
-            }
-            this.hooks.onCapExceeded(req.jobId, decision.detail);
+        const provider = this.providerFactory?.();
+        if (!provider || provider.kind === "stub") {
+          // The stub provider is deterministic, so the exact tokens of
+          // the reply are computable BEFORE authorization — the
+          // Governor's reservation therefore equals the settlement,
+          // and cap math is exact (governor.ts).
+          const { reply, tokensIn, tokensOut } = stubCompletion(req.prompt);
+          const decision = this.governor.authorize(req.jobId, tokensIn, tokensOut, FAKE_MODEL_NAME);
+          if (!decision.ok) {
+            this.refuseModel(req, decision);
+            break;
           }
+          const costUsd = this.governor.settle(decision.reservationId, tokensIn, tokensOut);
+          this.jobs.addUsage(req.jobId, tokensIn, tokensOut, costUsd);
+          this.hooks.onModelIssued(req.jobId, reply.text);
+          this.send({
+            t: "model_response",
+            reqId: req.reqId,
+            ok: true,
+            text: reply.text,
+            toolCall: reply.toolCall,
+            tokensIn,
+            tokensOut,
+            costUsd,
+          });
+          break;
+        }
+        // Phase 4: a real provider. Reserve against an estimate
+        // (prompt tokens + the configured output budget), spend, then
+        // settle the ACTUAL usage the provider reports. A provider
+        // failure refunds the reservation — the ledger reconciles and
+        // the job hears a provider_error, never a silent stall.
+        const estIn = estimateTokens(req.prompt);
+        const decision = this.governor.authorize(
+          req.jobId,
+          estIn,
+          provider.maxTokensOut,
+          provider.modelKey,
+        );
+        if (!decision.ok) {
+          this.refuseModel(req, decision);
+          break;
+        }
+        try {
+          const completion = await provider.complete(req.prompt);
+          const costUsd = this.governor.settle(
+            decision.reservationId,
+            completion.tokensIn,
+            completion.tokensOut,
+          );
+          this.jobs.addUsage(req.jobId, completion.tokensIn, completion.tokensOut, costUsd);
+          this.hooks.onModelIssued(req.jobId, completion.reply.text);
+          this.send({
+            t: "model_response",
+            reqId: req.reqId,
+            ok: true,
+            text: completion.reply.text,
+            toolCall: completion.reply.toolCall,
+            tokensIn: completion.tokensIn,
+            tokensOut: completion.tokensOut,
+            costUsd,
+          });
+        } catch (e) {
+          try {
+            this.governor.refund(decision.reservationId, "provider_error");
+          } catch {
+            /* reservation already closed — the refusal to spend stands */
+          }
+          const detail = screenText(e instanceof Error ? e.message : String(e)).redacted;
+          this.hooks.logRuntime("error", `provider error for job ${req.jobId}: ${detail}`);
           this.send({
             t: "model_response",
             reqId: req.reqId,
             ok: false,
-            reason: decision.reason,
-            detail: decision.detail,
+            reason: "provider_error",
+            detail,
             tokensIn: 0,
             tokensOut: 0,
             costUsd: 0,
           });
-          break;
         }
-        const costUsd = this.governor.settle(decision.reservationId, tokensIn, tokensOut);
-        this.jobs.addUsage(req.jobId, tokensIn, tokensOut, costUsd);
-        this.hooks.onModelIssued(req.jobId, reply.text);
-        this.send({
-          t: "model_response",
-          reqId: req.reqId,
-          ok: true,
-          text: reply.text,
-          toolCall: reply.toolCall,
-          tokensIn,
-          tokensOut,
-          costUsd,
-        });
         break;
       }
       case "tool_call": {
+        // --- Phase 4: the Shield gate scans the call's arguments
+        // BEFORE anything else (spec §1.7, choke point 1:
+        // scan-before-act). A block is terminal and receipted with
+        // the Shield receipt itself; the call never reaches the
+        // classifier, let alone execution.
+        if (this.shieldGate) {
+          const gateDecision = await this.shieldGate.scanSurface(
+            "tool-call",
+            req.jobId,
+            canonicalize({ tool: req.tool, args: req.args }),
+          );
+          if (gateDecision.receipt) {
+            this.jobs.noteShieldReceipt(req.jobId, gateDecision.receipt.receiptId);
+          }
+          if (gateDecision.action === "block") {
+            const note = `blocked by the Agent-Shield gate before execution: ${gateDecision.detail}`;
+            try {
+              this.jobs.transition(req.jobId, "failed-loudly", note, {
+                shieldReceiptId: gateDecision.receipt?.receiptId,
+              });
+            } catch {
+              /* already settled/parked — the block stands regardless */
+            }
+            this.hooks.onDenied(req.jobId, req.tool, note);
+            this.send({ t: "tool_result", reqId: req.reqId, status: "denied", note });
+            break;
+          }
+          if (gateDecision.action === "flag") {
+            this.hooks.logRuntime(
+              "warn",
+              `shield gate flagged tool call ${req.tool} for job ${req.jobId}: ${gateDecision.detail}`,
+            );
+          }
+        }
+
         // --- Phase 2: EVERY call is classified by the Approval Engine's
         // policy layer from tool + arguments (policy.ts). The runtime's
         // declaredClass is an input to the classifier, never the
@@ -412,12 +558,19 @@ export class CommServer {
             this.send({ t: "tool_result", reqId: req.reqId, status: "denied", note });
             break;
           }
+          // Phase 4: the fetched content crosses the Shield gate
+          // before it can reach the model's context (choke point 1,
+          // result side). A block relays only the withholding notice.
+          const gated = await this.gateToolResult(req.jobId, req.tool, req.args, {
+            ok: true,
+            summary: fetchSummary(req.args, r),
+          });
           this.send({
             t: "tool_result",
             reqId: req.reqId,
             status: "authorized",
             note: r.note,
-            result: { ok: true, summary: fetchSummary(req.args, r) },
+            result: gated,
           });
           break;
         }

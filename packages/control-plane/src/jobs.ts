@@ -78,6 +78,13 @@ export class JobRunner {
     return this.jobs.get(id);
   }
 
+  /** All jobs, newest first (Phase 4: the panel's history surface). */
+  list(limit = 200): JobRecord[] {
+    return [...this.jobs.values()]
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, limit);
+  }
+
   /** Most recent non-settled job for a conversation (kill targeting). */
   activeFor(conversationId: string): JobRecord | undefined {
     let found: JobRecord | undefined;
@@ -103,7 +110,33 @@ export class JobRunner {
     return false;
   }
 
-  transition(id: string, next: JobState, outcomeNote?: string): JobRecord {
+  /** Phase 4: attach a real Agent-Shield receipt id to this job (a
+   *  gated surface produced it). Persisted immediately — the id is the
+   *  job's durable link to gate.jsonl and the verify endpoint. */
+  noteShieldReceipt(id: string, shieldReceiptId: string): void {
+    const rec = this.jobs.get(id);
+    if (!rec) return;
+    rec.shieldReceiptIds = [...(rec.shieldReceiptIds ?? []), shieldReceiptId];
+    rec.updatedAt = Date.now();
+    this.persist(rec);
+  }
+
+  transition(
+    id: string,
+    next: JobState,
+    outcomeNote?: string,
+    opts?: {
+      /**
+       * Phase 4: settle WITH a real Agent-Shield receipt instead of
+       * issuing a local stub. Used when the settlement IS a gated
+       * event (a Shield block): the job's receipt is then the
+       * verifiable Shield receipt for the scan that stopped it. The
+       * receipts.jsonl line says so plainly (kind "agent-shield") —
+       * the stub issuer is used only where no Shield call applies.
+       */
+      shieldReceiptId?: string;
+    },
+  ): JobRecord {
     const rec = this.jobs.get(id);
     if (!rec) throw new Error(`unknown job ${id}`);
     if (!ALLOWED[rec.state].includes(next)) {
@@ -117,17 +150,31 @@ export class JobRunner {
       rec.outcomeNote = screenText(outcomeNote).redacted;
     }
     if (next === "verified-done" || next === "failed-loudly") {
-      const receipt: Receipt = this.receipts.issue({
-        jobId: rec.id,
-        state: next,
-        contentHash: rec.inputHash,
-        costUsd: rec.costUsd,
-      });
-      rec.receiptId = receipt.receiptId;
-      appendFileSync(
-        `${this.stateDir}/receipts.jsonl`,
-        JSON.stringify(receipt) + "\n",
-      );
+      if (opts?.shieldReceiptId) {
+        rec.receiptId = opts.shieldReceiptId;
+        appendFileSync(
+          `${this.stateDir}/receipts.jsonl`,
+          JSON.stringify({
+            kind: "agent-shield",
+            receiptId: opts.shieldReceiptId,
+            jobId: rec.id,
+            state: next,
+            note: "Settlement receipt is the Agent-Shield Protocol receipt of the gate scan that decided this job — verifiable via the Agent-Shield verify endpoint / /v/ page. Full receipt in gate.jsonl.",
+          }) + "\n",
+        );
+      } else {
+        const receipt: Receipt = this.receipts.issue({
+          jobId: rec.id,
+          state: next,
+          contentHash: rec.inputHash,
+          costUsd: rec.costUsd,
+        });
+        rec.receiptId = receipt.receiptId;
+        appendFileSync(
+          `${this.stateDir}/receipts.jsonl`,
+          JSON.stringify(receipt) + "\n",
+        );
+      }
     }
     this.persist(rec);
     return rec;

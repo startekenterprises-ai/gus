@@ -96,18 +96,55 @@ and store/vault/config integrity is verified byte-for-byte across
 the whole drill. Model providers and real Agent-Shield receipts land
 in Phase 4 per the foundation spec.
 
+**Phase 4 (the Shield gate + onboarding) is built**: the hosted
+Agent-Shield is wired in as the non-optional gate (spec §1.7) — the
+control plane scans inbound messages before a job reaches the
+runtime, tool-call arguments before classification (scan-before-act),
+and tool results before they can enter the model's context, with the
+signed Protocol receipt recorded on the job and in `gate.jsonl`.
+Provisioning is the zero-form free signup; the key lives in the vault
+and is attached only inside a `withSecret` callback. Once the gate is
+required by policy, an unreachable Shield is a policy decision, never
+a silent skip: fail-closed (the operator's recorded choice, and the
+default — for tool calls specifically) blocks the surface; fail-open
+proceeds flagged, with no receipt and no pretense of a scan. Skill
+installation sits behind the local scanner gate (the agent-shield-scan
+catalog ported into `@gus/gate`): a DO NOT INSTALL verdict refuses
+the install with no override; MCP configs pass the same walker.
+Provider classes (Anthropic, OpenAI-compatible, Ollama, the starter
+gateway, the offline stub) resolve per call from operator config,
+take their keys from the vault by name, and report under Governor
+price-table keys so caps price real calls like stub calls. The
+operator panel serves status, ledger, jobs with receipt links,
+approvals, the vault (names only), the skill registry, and the
+five-step onboarding wizard (Shield → Telegram token → provider →
+caps → first job), whose state file never contains a secret. The
+Phase 4 gates are two drills: the **Shield-gate drill** (an inbound
+injection blocked at ingress with its live-verified receipt; a
+fetched page carrying an exfiltration directive withheld at the
+result surface; planted skill + MCP config refused, clean skill
+installed; a fail-closed staging where an approved credential fetch
+executes but its data is withheld while the Shield is down) and the
+**onboarding drill** (a fresh install walked through the wizard only:
+5 user actions, first digest job verified-done). In the authoring VM
+the drills run the gate in recorded-replay mode — the live API's
+responses for the exact drill payloads, captured at host level and
+replayed byte-for-byte — because the drill containers have no
+egress; the receipts collected are real and are verified against the
+live verify endpoint from the host. See docs/LOCAL-DRILL.md.
+
 ## Layout
 
 ```
 packages/
   shared/          types, comm protocol, job model, S1 patterns, secret-guard
-  gate/            receipts (Phase 0: local signing stub; Phase 4: Agent-Shield)
+  gate/            receipts (local stub + the Agent-Shield client/gate, Phase 4), skill scanner
   control-plane/   Governor, Job Runner, comm server, channel host — OUTSIDE the sandbox
   runtime/         the agent loop — runs INSIDE the sandbox, owns no secrets
   channels/telegram/  first channel adapter (Bot API + offline fake-file transport)
   vault/           Vault Broker — encrypted secrets, no read API (Phase 1)
   egress/          egress proxy — allowlist, injection, screening (Phase 1)
-  panel/           Phase 4 (see README)
+  panel/           operator web panel: status, ledger, jobs, approvals, vault, skills, onboarding
   sandbox/         Dockerfiles + compose (control plane + agent sandbox)
 test/
   unit/            secret-guard, Governor/Job Runner, vault + egress tests
@@ -118,7 +155,7 @@ skills/            skill format placeholder (scanner-gated installs, Phase 4)
 ## Run the drills
 
 ```sh
-npm install && npm run build && npm test     # 61 unit tests
+npm install && npm run build && npm test     # 72 unit tests
 npm run pack                                  # assemble dist-bundle/
 docker build -f packages/sandbox/Dockerfile.control -t gus-control:dev .
 docker build -f packages/sandbox/Dockerfile.agent   -t gus-agent:dev .
@@ -126,6 +163,8 @@ bash test/promise/phase0-drill.sh             # the Phase 0 gate
 bash test/promise/phase1-drill.sh             # the Phase 1 credential red-team
 bash test/promise/phase2-drill.sh             # the Phase 2 Yue + runaway-cap drills
 bash test/promise/phase3-drill.sh             # the Phase 3 bad-update drill
+bash test/promise/phase4-drill.sh             # the Phase 4 Shield-gate drill
+bash test/promise/phase4-onboarding-drill.sh  # the Phase 4 onboarding drill
 npm run check:budget                          # ≤1 GB RAM budget, static + measured
 ```
 

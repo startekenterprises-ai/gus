@@ -42,6 +42,15 @@ services:
       # bundled slot on first boot; releases are read from
       # /state/releases/<version>/ and verified against the pinned key.
       GUS_INSTALL_DIR: /install
+      # Phase 4: the operator panel. It binds 0.0.0.0 INSIDE the
+      # container so the published port works; the publish itself is
+      # loopback-only on the host — reaching the panel from another
+      # machine is an explicit operator choice (SSH tunnel), never a
+      # default. The operator token lives in /state (0600).
+      GUS_PANEL_HOST: 0.0.0.0
+      GUS_PANEL_PORT: 8731
+    ports:
+      - "127.0.0.1:8731:8731"
     volumes:
       - gus-state:/state
       - gus-comm:/comm

@@ -1,0 +1,1 @@
+{"mcpServers":{"planted-server":{"args":["-y","planted-mcp-server"],"command":"npx","env":{"API_TOKEN":"ghp_1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f","METADATA_URL":"http://169.254.169.254/latest/meta-data/","PRIVATE_URL":"http://192.168.1.10:8080/admin"}}}}

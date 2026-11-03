@@ -29,14 +29,16 @@
  *   node main.js vault-admin <add <name> <value|->|list|remove <name>>
  * runs against the state dir and exits before any server starts.
  */
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
 import type { ChannelAdapter } from "@gus/shared";
 import { GUS_VERSION } from "@gus/shared";
 import { BotApiTransport, FakeFileTransport, TelegramAdapter } from "@gus/telegram";
-import { LocalReceiptIssuer } from "@gus/gate";
+import { LocalReceiptIssuer, ShieldClient, ShieldGate } from "@gus/gate";
 import { VaultBroker } from "@gus/vault";
 import { EgressProxy } from "@gus/egress";
+import { PanelServer, type PanelBackend } from "@gus/panel";
 import { Governor } from "./governor.js";
 import { JobRunner } from "./jobs.js";
 import { CommServer } from "./comm-server.js";
@@ -45,6 +47,9 @@ import { PolicyStore } from "./policy.js";
 import { ApprovalEngine } from "./approvals.js";
 import { Updater } from "./updater.js";
 import { runVaultAdmin } from "./vault-admin.js";
+import { loadProviderConfig, resolveProvider } from "./providers.js";
+import { Onboarding, DIGEST_PROMPT, TELEGRAM_SECRET_NAME } from "./onboarding.js";
+import { SkillInstaller } from "./skills.js";
 
 const stateDir = process.env.GUS_STATE_DIR ?? "/state";
 const socketPath = process.env.GUS_COMM_SOCKET ?? "/comm/gus.sock";
@@ -77,8 +82,19 @@ const egress = new EgressProxy({
 const channelKind = process.env.GUS_CHANNEL ?? "fake-file";
 let adapter: ChannelAdapter;
 if (channelKind === "telegram") {
-  const token = process.env.GUS_TELEGRAM_BOT_TOKEN;
-  if (!token) throw new Error("GUS_TELEGRAM_BOT_TOKEN is required for channel=telegram");
+  // Phase 4: the token may come from onboarding (panel → vault)
+  // instead of the environment. Env still wins; the vault value is
+  // read once at boot, used for the transport, never printed.
+  const token =
+    process.env.GUS_TELEGRAM_BOT_TOKEN ??
+    (await vault.withSecret(TELEGRAM_SECRET_NAME, (v) => v)) ??
+    undefined;
+  if (!token) {
+    throw new Error(
+      "GUS_TELEGRAM_BOT_TOKEN is required for channel=telegram " +
+        `(or store a "${TELEGRAM_SECRET_NAME}" secret via the panel's setup wizard)`,
+    );
+  }
   adapter = new TelegramAdapter(new BotApiTransport(token));
 } else {
   const inbound = process.env.GUS_FAKE_INBOUND ?? "/run/gus/inbound.ndjson";
@@ -93,7 +109,18 @@ if (channelKind === "telegram") {
 const policy = new PolicyStore(process.env.GUS_POLICY ?? `${stateDir}/policy.json`);
 const approvals = new ApprovalEngine(stateDir, () => policy.load().approvalTimeoutMs);
 
-const host = new ChannelHost(stateDir, governor, jobs, [adapter], approvals);
+// Phase 4: the Agent-Shield gate (spec §1.7). The API key lives in
+// the vault; before onboarding provisions one, the gate is inert
+// unless policy requires it — then it fails closed and says so. The
+// base URL is config (GUS_SHIELD_BASE_URL) so drills can point the
+// identical wiring at a stand-in when the live API is unreachable.
+const shieldGate = new ShieldGate({
+  client: new ShieldClient({ vault, baseUrl: process.env.GUS_SHIELD_BASE_URL }),
+  policy: () => policy.shieldPolicy(),
+  logPath: `${stateDir}/gate.jsonl`,
+});
+
+const host = new ChannelHost(stateDir, governor, jobs, [adapter], approvals, shieldGate);
 approvals.onExpire = (req) => host.handleApprovalExpired(req);
 const comm = new CommServer(socketPath, governor, jobs, {
   onRuntimeHello: () => host.onRuntimeHello(),
@@ -107,7 +134,7 @@ const comm = new CommServer(socketPath, governor, jobs, {
   onJobFinal: (jobId, text) => host.onJobFinal(jobId, text),
   logRuntime: (level, text) =>
     appendFileSync(`${stateDir}/runtime-log.jsonl`, JSON.stringify({ ts: Date.now(), level, text }) + "\n"),
-}, policy, approvals, egress);
+}, policy, approvals, egress, shieldGate, () => resolveProvider(stateDir, vault));
 host.attachComm(comm);
 
 // Phase 3: the Updater. Constructed always (its queries power
@@ -151,6 +178,167 @@ host.bindUpdateCommands({
     );
   },
 });
+
+// Phase 4: onboarding service + skill installer + the operator
+// panel. The panel backend delegates EVERYTHING to the engines above
+// — approvals resolve through ChannelHost.resolveApproval (the same
+// hash-bound path as Telegram buttons), the kill switch is the
+// Governor's flag, secrets go vault.add() and are never read back.
+const onboarding = new Onboarding(stateDir, {
+  vault,
+  gate: shieldGate,
+  policy,
+  governor,
+  runFirstJob: () => host.runSystemJob("onboarding", DIGEST_PROMPT, "digest"),
+});
+const skillInstaller = new SkillInstaller(stateDir);
+
+function shieldVerifyUrls(): Map<string, string> {
+  const map = new Map<string, string>();
+  try {
+    const logPath = `${stateDir}/gate.jsonl`;
+    if (!existsSync(logPath)) return map;
+    for (const line of readFileSync(logPath, "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const r = JSON.parse(line) as { receipt?: { receiptId?: string; verifyUrl?: string } };
+        if (r.receipt?.receiptId && r.receipt.verifyUrl) map.set(r.receipt.receiptId, r.receipt.verifyUrl);
+      } catch { /* skip torn lines */ }
+    }
+  } catch { /* no gate log yet */ }
+  return map;
+}
+
+const panelBackend: PanelBackend = {
+  status: () => {
+    const cfg = loadProviderConfig(stateDir);
+    const spend = governor.spendSummary();
+    const sp = policy.shieldPolicy();
+    return {
+      version: GUS_VERSION,
+      killed: governor.isKilled(),
+      shield: {
+        provisioned: shieldGate.provisioned(),
+        required: sp.required,
+        onUnavailable: sp.onUnavailable,
+        baseUrl: shieldGate.client.baseUrl,
+      },
+      provider: { id: cfg.provider, model: cfg.model },
+      pendingApprovals: approvals.pending().length,
+      spendTodayUsd: spend.todayUsd,
+      spendMonthUsd: spend.monthUsd,
+    };
+  },
+  ledger: () => ({
+    entries: governor.recentEntries(200) as unknown as Record<string, unknown>[],
+    audit: governor.audit(),
+    summary: { ...governor.spendSummary(), caps: governor.config() as unknown as Record<string, unknown> },
+  }),
+  jobs: () => {
+    const urls = shieldVerifyUrls();
+    return jobs.list(50).map((j) => ({
+      id: j.id,
+      kind: j.kind,
+      state: j.state,
+      createdAt: j.createdAt,
+      updatedAt: j.updatedAt,
+      costUsd: j.costUsd,
+      tokensIn: j.tokensIn,
+      tokensOut: j.tokensOut,
+      outcomeNote: j.outcomeNote,
+      receiptId: j.receiptId,
+      receiptVerifyUrl: j.receiptId?.startsWith("rcpt_")
+        ? (urls.get(j.receiptId) ?? `${shieldGate.client.baseUrl}/v/${j.receiptId}`)
+        : undefined,
+      shieldReceipts: (j.shieldReceiptIds ?? []).map((id) => ({
+        receiptId: id,
+        verifyUrl: urls.get(id),
+      })),
+    }));
+  },
+  approvals: () =>
+    approvals.pending().map((r) => ({
+      id: r.id,
+      jobId: r.jobId,
+      summary: r.summary,
+      reason: r.reason,
+      createdAt: r.createdAt,
+      expiresAt: r.expiresAt,
+    })),
+  resolveApproval: async (id, approve) => {
+    const req = approvals.get(id);
+    if (!req || req.status !== "pending") {
+      return { ok: false, detail: `Approval ${id} is not pending. Nothing was executed.` };
+    }
+    await host.resolveApproval(adapter.name, req.conversationId, id, approve, "panel");
+    const after = approvals.get(id);
+    return after && after.status !== "pending"
+      ? { ok: true, detail: approve ? "Approved — executing exactly that." : "Denied. Nothing ran." }
+      : { ok: false, detail: "The approval could not be resolved (kill switch on, or it just expired). Nothing was executed." };
+  },
+  setKilled: async (on) => {
+    if (on) {
+      const { settled } = host.killAll("panel");
+      return { ok: true, detail: `Kill switch ON — GUS is stopped. ${settled} unsettled job(s) settled failed-loudly.` };
+    }
+    host.resumeAll("panel");
+    return { ok: true, detail: "Kill switch OFF — GUS is live." };
+  },
+  vaultNames: () => vault.listNames(),
+  storeSecret: (name, value) => {
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)) {
+      return { ok: false, detail: "Secret names are lowercase letters, digits, dashes and underscores (max 64 chars)." };
+    }
+    if (!value) return { ok: false, detail: "The value is empty — nothing was stored." };
+    try {
+      vault.add(name, value);
+      return { ok: true, detail: `Stored "${name}" in the vault. The value is never shown again, anywhere.` };
+    } catch (e) {
+      return { ok: false, detail: `Could not store: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  },
+  onboarding: () => onboarding.view(),
+  onboardingShield: (payload) => onboarding.shield(payload.onUnavailable),
+  onboardingTelegram: async (payload) => onboarding.telegram(payload.token),
+  onboardingProvider: async (payload) => onboarding.provider(payload),
+  onboardingCaps: async (payload) => onboarding.caps(payload),
+  onboardingFirstJob: async () => onboarding.firstJob(),
+  skills: () => skillInstaller.listInstalled(),
+  installSkill: async (payload) => skillInstaller.install(payload.path ?? ""),
+};
+
+// The operator token: a 0600 file in control-plane state, minted on
+// first boot. The value is never printed — the operator opens the
+// panel with the token file (or an SSH-tunneled ?t= link made from it).
+const panelTokenPath = `${stateDir}/panel-token`;
+let panelToken = "";
+try {
+  if (existsSync(panelTokenPath)) panelToken = readFileSync(panelTokenPath, "utf8").trim();
+} catch { /* fall through to minting */ }
+if (!panelToken) {
+  panelToken = randomBytes(24).toString("hex");
+  writeFileSync(panelTokenPath, panelToken + "\n", { mode: 0o600 });
+}
+const panelPort = Number(process.env.GUS_PANEL_PORT ?? "8731") || 8731;
+const panel = new PanelServer(panelBackend, {
+  token: panelToken,
+  host: process.env.GUS_PANEL_HOST ?? "127.0.0.1",
+  port: panelPort,
+  onError: (e) =>
+    appendFileSync(
+      `${stateDir}/runtime-log.jsonl`,
+      JSON.stringify({ ts: Date.now(), level: "warn", text: `panel could not bind: ${e.message} (control plane continues without it)` }) + "\n",
+    ),
+});
+await panel.start();
+appendFileSync(
+  `${stateDir}/runtime-log.jsonl`,
+  JSON.stringify({
+    ts: Date.now(),
+    level: "info",
+    text: `panel listening on ${process.env.GUS_PANEL_HOST ?? "127.0.0.1"}:${panel.port ?? panelPort} (operator token: ${panelTokenPath})`,
+  }) + "\n",
+);
 
 await comm.start();
 await host.start();
