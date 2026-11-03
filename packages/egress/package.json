@@ -1,0 +1,1 @@
+{"dependencies":{"@gus/shared":"0.0.1","@gus/vault":"0.0.1"},"exports":{".":{"default":"./dist/index.js","types":"./dist/index.d.ts"}},"license":"Apache-2.0","name":"@gus/egress","private":true,"type":"module","version":"0.0.1"}

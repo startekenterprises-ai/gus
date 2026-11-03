@@ -20,9 +20,35 @@ export interface HostHooks {
   onModelIssued(jobId: string, text: string | undefined): void;
   noteAuthorizedWrite(jobId: string, path: string, content: string): void;
   onParked(jobId: string, tool: string): void;
+  onDenied(jobId: string, tool: string, note: string): void;
   onJobUpdate(jobId: string, note: string): void;
   onJobFinal(jobId: string, text: string): Promise<void>;
   logRuntime(level: string, text: string): void;
+}
+
+/**
+ * The egress gate the comm server delegates `fetch` tool calls to
+ * (Phase 1). Structurally the @gus/egress EgressProxy; declared here so
+ * the comm layer depends on the contract, not the package. The runtime
+ * never sees this interface — it only receives the outcome.
+ */
+export interface FetchGate {
+  fetch(
+    req: {
+      url: string;
+      method?: string;
+      headers?: Record<string, string>;
+      body?: string;
+      secretName?: string;
+    },
+    ctx: { jobId: string },
+  ): Promise<{
+    ok: boolean;
+    verdict: string;
+    status?: number;
+    body?: string;
+    note?: string;
+  }>;
 }
 
 export class CommServer {
@@ -35,6 +61,7 @@ export class CommServer {
     private governor: Governor,
     private jobs: JobRunner,
     private hooks: HostHooks,
+    private fetchGate?: FetchGate,
   ) {}
 
   async start(): Promise<void> {
@@ -137,6 +164,74 @@ export class CommServer {
         break;
       }
       case "tool_call": {
+        // --- Phase 1: vault_read — refused by construction. There is no
+        // vault read API for the sandbox; asking is itself the red-team
+        // signal. The job fails loudly (denial is a terminal, receipted
+        // outcome — never a silent drop, never a park).
+        if (req.tool === "vault_read") {
+          const note =
+            "the Vault Broker has no read API — secrets are used via egress injection, never read";
+          this.hooks.logRuntime(
+            "warn",
+            `vault_read attempt refused for job ${req.jobId} (name: ${String(req.args.name ?? "?")})`,
+          );
+          try {
+            this.jobs.transition(req.jobId, "failed-loudly", `denied tool vault_read: ${note}`);
+          } catch {
+            /* already settled/parked — refusal stands regardless */
+          }
+          this.hooks.onDenied(req.jobId, req.tool, note);
+          this.send({ t: "tool_result", reqId: req.reqId, status: "denied", note });
+          break;
+        }
+        // --- Phase 1: fetch — executed HERE, in the egress proxy. The
+        // sandbox has no network; the proxy enforces allowlist, outbound
+        // screening, and vault injection, and the screened result rides
+        // back with the authorization.
+        if (req.tool === "fetch") {
+          if (!this.fetchGate) {
+            const note = "egress proxy is not configured in this control plane";
+            this.send({ t: "tool_result", reqId: req.reqId, status: "denied", note });
+            break;
+          }
+          const r = await this.fetchGate.fetch(
+            {
+              url: String(req.args.url ?? ""),
+              method: typeof req.args.method === "string" ? req.args.method : undefined,
+              headers:
+                req.args.headers && typeof req.args.headers === "object"
+                  ? (req.args.headers as Record<string, string>)
+                  : undefined,
+              body: typeof req.args.body === "string" ? req.args.body : undefined,
+              secretName:
+                typeof req.args.secretName === "string" ? req.args.secretName : undefined,
+            },
+            { jobId: req.jobId },
+          );
+          if (!r.ok) {
+            const note = `egress ${r.verdict}: ${r.note ?? "request refused"}`;
+            try {
+              this.jobs.transition(req.jobId, "failed-loudly", note);
+            } catch {
+              /* already settled/parked — refusal stands regardless */
+            }
+            this.hooks.onDenied(req.jobId, req.tool, note);
+            this.send({ t: "tool_result", reqId: req.reqId, status: "denied", note });
+            break;
+          }
+          const summary =
+            `fetch ${String(req.args.url ?? "")} -> HTTP ${r.status ?? "?"}; ` +
+            `body: ${(r.body ?? "").slice(0, 500)}` +
+            (r.note ? `; notes: ${r.note}` : "");
+          this.send({
+            t: "tool_result",
+            reqId: req.reqId,
+            status: "authorized",
+            note: r.note,
+            result: { ok: true, summary },
+          });
+          break;
+        }
         const cls = req.declaredClass;
         if (cls === "destructive" || cls === "external-send" || cls === "pay") {
           try {

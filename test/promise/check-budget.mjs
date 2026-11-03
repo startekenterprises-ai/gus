@@ -27,19 +27,22 @@ if (limits.length < 2 || declared > BUDGET_MB) {
   failed = true;
 }
 
-const metricsPath = join(root, "drill/phase0/metrics.json");
-if (existsSync(metricsPath)) {
-  const m = JSON.parse(readFileSync(metricsPath, "utf8"));
-  const totalMb = (m.controlRssKb + m.sandboxRssKb) / 1024;
-  console.log(
-    `drill-measured RSS: control ${(m.controlRssKb / 1024).toFixed(1)} MB + sandbox ${(m.sandboxRssKb / 1024).toFixed(1)} MB = ${totalMb.toFixed(1)} MB`,
-  );
-  if (totalMb > BUDGET_MB) {
-    console.error("FAIL: measured RSS exceeds the 1 GB budget");
-    failed = true;
+for (const phase of ["phase0", "phase1"]) {
+  const metricsPath = join(root, "drill", phase, "metrics.json");
+  if (existsSync(metricsPath)) {
+    const m = JSON.parse(readFileSync(metricsPath, "utf8"));
+    const totalMb = (m.controlRssKb + m.sandboxRssKb) / 1024;
+    console.log(
+      `${phase} drill-measured RSS: control ${(m.controlRssKb / 1024).toFixed(1)} MB + sandbox ${(m.sandboxRssKb / 1024).toFixed(1)} MB = ${totalMb.toFixed(1)} MB`,
+    );
+    if (totalMb > BUDGET_MB) {
+      console.error(`FAIL: ${phase} measured RSS exceeds the 1 GB budget`);
+      failed = true;
+    }
   }
-} else {
-  console.log("no drill metrics found (run test/promise/phase0-drill.sh) — static check only");
+}
+if (!existsSync(join(root, "drill/phase0/metrics.json"))) {
+  console.log("no drill metrics found (run the promise drills) — static check only");
 }
 
 process.exit(failed ? 1 : 0);

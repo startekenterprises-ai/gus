@@ -102,6 +102,11 @@ export type ControlMessage =
       /** "authorized" | "needs_approval" | "denied" | "killed" */
       status: string;
       note?: string;
+      /** Phase 1: when the CONTROL PLANE executed the tool itself (the
+       *  fetch tool runs in the egress proxy — the sandbox has no network
+       *  to execute it with), the outcome travels with the authorization.
+       *  The runtime uses it verbatim and never executes locally. */
+      result?: { ok: boolean; summary: string };
     }
   | {
       /** Post-condition check, executed by the runtime's checker code. */

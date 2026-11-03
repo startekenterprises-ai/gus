@@ -71,13 +71,41 @@ async function runTurn(jobId: string, text: string): Promise<void> {
           { t: "tool_call", reqId: `tc${++seq}`, jobId, tool: tc.tool, declaredClass: tc.declaredClass, args: tc.args },
           (m) => m.t === "tool_result",
         );
+        if (auth.status === "denied") {
+          // The control plane has already settled this job failed-loudly
+          // and notified the operator; the job_final below is a formality
+          // the host will ignore (job already settled). The denial is the
+          // outcome — nothing executed, nothing parked.
+          send({
+            t: "job_final",
+            jobId,
+            text: `Denied by the control plane: ${auth.note ?? "the action was refused"}`,
+          });
+          return;
+        }
         if (auth.status !== "authorized") {
           send({ t: "job_update", jobId, note: `parked:${auth.status}` });
           return; // job is parked in needs-approval by the control plane
         }
-        const outcome = await executeTool(ws, tc.tool, tc.args, signal, () =>
-          send({ t: "heartbeat", jobId }),
-        );
+        // If the control plane executed the tool itself (Phase 1: fetch
+        // runs in the egress proxy — this sandbox has no network), the
+        // outcome arrives with the authorization. Otherwise execute the
+        // fixed local tool code.
+        let outcome;
+        if (auth.result) {
+          outcome = auth.result;
+        } else {
+          try {
+            outcome = await executeTool(ws, tc.tool, tc.args, signal, () =>
+              send({ t: "heartbeat", jobId }),
+            );
+          } catch (e) {
+            outcome = {
+              ok: false,
+              summary: `tool error: ${e instanceof Error ? e.message : String(e)}`,
+            };
+          }
+        }
         send({ t: "tool_report", reqId: `tr${++seq}`, jobId, ok: outcome.ok, summary: outcome.summary });
         if (signal.aborted) {
           send({ t: "job_update", jobId, note: "aborted:killed" });

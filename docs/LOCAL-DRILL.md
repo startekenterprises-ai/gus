@@ -61,3 +61,33 @@ Consequences to keep in mind when reading the drill evidence:
   `dist-bundle/`, same entrypoints, same users, same hardening flags
   (read-only rootfs, `cap_drop: ALL`, `no-new-privileges`,
   `network_mode: none` for the sandbox).
+
+# Phase 1 additions (credential red-team drill)
+
+`test/promise/phase1-drill.sh` runs on the same vehicle, with three
+further substitutions to know about when reading its evidence:
+
+- **The "outside world" shares the control plane's container.** The
+  drill's test API (127.0.0.1:8901) and attacker sink (127.0.0.2:8902)
+  need to live in the control plane's network namespace (the proxy
+  fetches loopback; the sandbox has no network). A second container
+  cannot join that namespace here — `setns` across user namespaces is
+  denied, the same limitation that rules out `podman exec` — so the
+  test servers start inside the control-plane container via the
+  drill-only entrypoint `test/fixtures/drill-entry.mjs` (packed into
+  the bundle by `scripts/pack.mjs`; production entrypoint remains
+  `main.js`). The proxy still crosses a real HTTP boundary, and the
+  fixture's processes ride inside the control container's measured RSS
+  (disclosed in the drill output; a few MB).
+- **Vault encryption is ChaCha20-Poly1305, not age/XChaCha.** Node's
+  built-in crypto provides `chacha20-poly1305` (12-byte nonce form)
+  with no external dependency; the spec's property — authenticated
+  encryption under an operator-held 0600 key file, ciphertext-only at
+  rest — is unchanged. See `packages/vault/README.md`.
+- **Container cleanup removes by ID.** A wedged never-started container
+  in this environment can survive a name-based `podman rm -f` while
+  reporting success; the Phase 1 drill resolves names to IDs and
+  removes by ID.
+- The podman vfs store on this VM's 2 GB `/var/tmp` tmpfs fills fast
+  (every layer is a full copy): remove stale `gus-*` images before
+  rebuilding, and `podman image prune` between build rounds.

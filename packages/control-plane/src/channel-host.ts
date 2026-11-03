@@ -39,8 +39,8 @@ export class ChannelHost {
   async start(): Promise<void> {
     // Boot sweep: jobs left queued/running by a previous control-plane
     // incarnation must not hang silently (must-have 5).
-    // (JobRunner has no iterator in Phase 0; the drill starts from fresh
-    // state. The sweep lands with the store iterator in Phase 1.)
+    // (JobRunner has no iterator yet; the drill starts from fresh
+    // state. The sweep remains deferred past Phase 1.)
     for (const a of this.adapters) {
       await a.start((ev) => void this.onEvent(a.name, ev));
     }
@@ -88,7 +88,11 @@ export class ChannelHost {
       return;
     }
 
-    const kind = /^slow job$/i.test(text) ? "slow-demo" : "chat";
+    const kind = /^slow job$/i.test(text)
+      ? "slow-demo"
+      : /^fetch\b/i.test(text)
+        ? "fetch-summarize"
+        : "chat";
     const job = this.jobs.create(kind, msg.conversationId, screened.redacted);
     this.jobs.transition(job.id, "running");
     this.pendingDeliveries.set(job.id, text);
@@ -138,6 +142,16 @@ export class ChannelHost {
       job.conversationId,
       `⏸ Job parked: "${tool}" needs your approval before anything runs. Nothing was executed. (Approval resolution lands in Phase 2.)`,
       );
+  }
+
+  onDenied(jobId: string, tool: string, note: string): void {
+    const job = this.jobs.get(jobId);
+    if (!job) return;
+    void this.sendTo(
+      this.adapters[0]?.name ?? "telegram",
+      job.conversationId,
+      `🚫 Denied by the control plane: "${tool}" was refused (${note}). The job ended as failed-loudly with a receipt.`,
+    );
   }
 
   onJobUpdate(jobId: string, note: string): void {

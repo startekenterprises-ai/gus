@@ -13,6 +13,8 @@
   "dependencies": {
     "@gus/shared": "0.0.1",
     "@gus/gate": "0.0.1",
+    "@gus/vault": "0.0.1",
+    "@gus/egress": "0.0.1",
     "@gus/telegram": "0.0.1"
   }
 }

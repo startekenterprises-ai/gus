@@ -41,9 +41,20 @@ loop, separate control plane (Governor + Job Runner), channel adapter
 interface with a Telegram adapter (incl. an offline fake transport),
 secret-guard wired at channel ingress/egress, and the Phase 0 gate
 drill proving sandboxing, control-plane separation, kill switch, and
-secret refusal. Model providers, the vault/egress broker, real
-Agent-Shield receipts, approvals resolution, and updates land in
-Phases 1–4 per the foundation spec.
+secret refusal.
+
+**Phase 1 (vault & egress) is built**: the Vault Broker (encrypted at
+rest, no read API — secrets are referenced by name and used only via
+injection) and the egress proxy (allowlist, outbound screening, auth
+injection at the edge, response scrubbing, per-call receipts), with a
+sandbox `fetch` tool executed by the control plane through the proxy.
+The Phase 1 gate is the credential red-team drill: a canary secret
+survives direct vault asks, non-allowlisted fetches, echo/redirect/body
+smuggling, state scraping, and prompt-injected instructions in fetched
+content — appearing nowhere outside the vault's ciphertext and the one
+intended in-flight request. Model providers, real Agent-Shield
+receipts, approval resolution, and updates land in Phases 2–4 per the
+foundation spec.
 
 ## Layout
 
@@ -54,11 +65,12 @@ packages/
   control-plane/   Governor, Job Runner, comm server, channel host — OUTSIDE the sandbox
   runtime/         the agent loop — runs INSIDE the sandbox, owns no secrets
   channels/telegram/  first channel adapter (Bot API + offline fake-file transport)
-  vault/ egress/   Phase 1 (see READMEs)
+  vault/           Vault Broker — encrypted secrets, no read API (Phase 1)
+  egress/          egress proxy — allowlist, injection, screening (Phase 1)
   panel/           Phase 4 (see README)
   sandbox/         Dockerfiles + compose (control plane + agent sandbox)
 test/
-  unit/            secret-guard + Governor/Job Runner tests
+  unit/            secret-guard, Governor/Job Runner, vault + egress tests
   promise/         gate drills + resource-budget check (the Promise Suite)
 skills/            skill format placeholder (scanner-gated installs, Phase 4)
 ```
@@ -66,11 +78,12 @@ skills/            skill format placeholder (scanner-gated installs, Phase 4)
 ## Run the Phase 0 drill
 
 ```sh
-npm install && npm run build && npm test     # 13 unit tests
+npm install && npm run build && npm test     # 32 unit tests
 npm run pack                                  # assemble dist-bundle/
 docker build -f packages/sandbox/Dockerfile.control -t gus-control:dev .
 docker build -f packages/sandbox/Dockerfile.agent   -t gus-agent:dev .
 bash test/promise/phase0-drill.sh             # the Phase 0 gate
+bash test/promise/phase1-drill.sh             # the Phase 1 credential red-team
 npm run check:budget                          # ≤1 GB RAM budget, static + measured
 ```
 

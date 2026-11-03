@@ -16,10 +16,18 @@ mkdirSync(join(out, "node_modules/@gus"), { recursive: true });
 
 cpSync(join(root, "packages/control-plane/dist"), join(out, "control-plane"), { recursive: true });
 cpSync(join(root, "packages/runtime/dist"), join(out, "runtime"), { recursive: true });
+// Phase 1 drill fixtures: the egress test servers + the entrypoint that
+// starts them inside the control-plane container (drill use only — the
+// production entrypoint remains main.js; see test/fixtures/drill-entry.mjs).
+for (const f of ["egress-test-server.mjs", "drill-entry.mjs"]) {
+  cpSync(join(root, "test/fixtures", f), join(out, "control-plane", f));
+}
 
 const libs = [
   ["packages/shared", "shared"],
   ["packages/gate", "gate"],
+  ["packages/vault", "vault"],
+  ["packages/egress", "egress"],
   ["packages/channels/telegram", "telegram"],
 ];
 for (const [src, name] of libs) {

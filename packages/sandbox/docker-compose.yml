@@ -4,7 +4,11 @@
 # - agent-sandbox has NO network (network_mode: none). Its only bridge to
 #   the world is the unix socket on the comm volume, which leads to the
 #   control plane — never to the internet, never to a model, never to a
-#   secret.
+#   secret. Since Phase 1 the sandbox's fetches are executed BY the
+#   control plane's egress proxy (allowlist + vault injection + response
+#   screening) and the screened result is relayed back over the socket:
+#   the sandbox's only network path is the proxy, and it is a relay, not
+#   a route.
 # - control-plane holds all state (ledger/jobs/receipts/kill flag) on its
 #   own volume the sandbox cannot see, and is the only process that talks
 #   to channels and (in later phases) providers.
@@ -21,6 +25,11 @@ services:
       GUS_FAKE_INBOUND: /run/gus/inbound.ndjson
       GUS_FAKE_OUTBOUND: /run/gus/outbound.ndjson
       GUS_TELEGRAM_BOT_TOKEN: ${GUS_TELEGRAM_BOT_TOKEN:-}
+      # Phase 1: Vault Broker + egress proxy (control-plane side only).
+      # The vault store + host key live in /state, which the sandbox
+      # cannot see. A missing egress-policy.json is a deny-all policy.
+      GUS_VAULT_KEY_FILE: /state/vault.key
+      GUS_EGRESS_POLICY: /state/egress-policy.json
     volumes:
       - gus-state:/state
       - gus-comm:/comm

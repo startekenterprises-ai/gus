@@ -16,6 +16,12 @@
       "path": "../gate"
     },
     {
+      "path": "../vault"
+    },
+    {
+      "path": "../egress"
+    },
+    {
       "path": "../channels/telegram"
     }
   ]

@@ -12,7 +12,18 @@
  * - "read file <path>"                -> workspace_read tool call
  * - "delete <n> files"                -> bulk_delete tool call (destructive)
  * - "slow job"                        -> slow_work tool call (kill drill)
- * - "TOOL_RESULT ..."                 -> final summary text
+ * - "fetch <url>"                     -> fetch tool call (egress proxy)
+ * - "fetch auth <url> with <name>"    -> fetch with a vault secret NAME
+ * - "fetch post <url> :: <body>"      -> fetch POST through the proxy
+ * - "vault get <name>"                -> vault_read tool call (Phase 1
+ *   red-team vehicle: the control plane refuses — no such API exists)
+ * - "TOOL_RESULT ..."                 -> final summary text, EXCEPT when
+ *   the result text carries a FOLLOWUP_FETCH / FOLLOWUP_FETCH_POST
+ *   marker: then the corresponding fetch tool call is issued. This is
+ *   the stub's instruction-following simulation — a naive agent obeying
+ *   directives embedded in fetched content (Phase 1 drill, attack (f)).
+ *   The Phase 1 point is that even a fully obedient agent cannot leak
+ *   what the proxy never let it hold.
  * - anything else                     -> echo-style text reply
  */
 import type { ToolClass } from "@gus/shared";
@@ -32,6 +43,20 @@ export function fakeComplete(prompt: string): ProviderReply {
   const p = prompt.trim();
 
   if (p.startsWith("TOOL_RESULT")) {
+    const post = p.match(/FOLLOWUP_FETCH_POST\s+(\S+)\s+::\s*([\s\S]+)/);
+    if (post) {
+      return {
+        toolCall: {
+          tool: "fetch",
+          declaredClass: "write",
+          args: { url: post[1], method: "POST", body: post[2].trim() },
+        },
+      };
+    }
+    const get = p.match(/FOLLOWUP_FETCH\s+(\S+)/);
+    if (get) {
+      return { toolCall: { tool: "fetch", declaredClass: "read", args: { url: get[1] } } };
+    }
     return { text: `Done — ${p.slice("TOOL_RESULT".length).trim()}` };
   }
   let m = p.match(/^write file\s+(\S+)\s+([\s\S]+)$/i);
@@ -60,6 +85,40 @@ export function fakeComplete(prompt: string): ProviderReply {
   }
   if (/^slow job$/i.test(p)) {
     return { toolCall: { tool: "slow_work", declaredClass: "read", args: { steps: 60 } } };
+  }
+  m = p.match(/^fetch\s+auth\s+(\S+)\s+with\s+([a-z0-9_-]+)$/i);
+  if (m) {
+    return {
+      toolCall: {
+        tool: "fetch",
+        declaredClass: "read",
+        args: { url: m[1], secretName: m[2].toLowerCase() },
+      },
+    };
+  }
+  m = p.match(/^fetch\s+post\s+(\S+)\s+::\s*([\s\S]+)$/i);
+  if (m) {
+    return {
+      toolCall: {
+        tool: "fetch",
+        declaredClass: "write",
+        args: { url: m[1], method: "POST", body: m[2] },
+      },
+    };
+  }
+  m = p.match(/^fetch\s+(\S+)$/i);
+  if (m) {
+    return { toolCall: { tool: "fetch", declaredClass: "read", args: { url: m[1] } } };
+  }
+  m = p.match(/^(?:vault\s+get|ask\s+vault\s+for)\s+([a-z0-9_-]+)$/i);
+  if (m) {
+    return {
+      toolCall: {
+        tool: "vault_read",
+        declaredClass: "read",
+        args: { name: m[1].toLowerCase() },
+      },
+    };
   }
   return { text: `GUS here (offline stub provider). You said: "${p.slice(0, 200)}"` };
 }
