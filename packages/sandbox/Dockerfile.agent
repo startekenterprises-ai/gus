@@ -2,11 +2,19 @@
 # The hardening is in the compose/run flags, not this file: read-only
 # rootfs, cap-drop ALL, no-new-privileges, no network. This image assumes
 # all of them.
+#
+# Two layouts ship in the image (see Dockerfile.control): the flat
+# legacy layout at /app (default ENTRYPOINT) and the Phase 3 slot
+# layout under /app/slots with the slot launcher, which runs the
+# runtime from the install volume's live slot — and a second,
+# canary runtime from a staged slot when the updater asks for one.
 ARG BASE=node:24-alpine
 FROM ${BASE}
 WORKDIR /app
 COPY dist-bundle/runtime/ ./
 COPY dist-bundle/node_modules/ ./node_modules/
+COPY dist-bundle/ ./slots/A/
+COPY --chmod=644 packages/sandbox/launcher.mjs ./launcher.mjs
 ENV GUS_COMM_SOCKET=/comm/gus.sock GUS_WORKSPACE=/workspace
 USER gus
 ENTRYPOINT ["node", "main.js"]

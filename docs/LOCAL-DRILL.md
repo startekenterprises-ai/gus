@@ -123,3 +123,64 @@ drill-entry test world as Phase 1. Phase-2-specific notes:
   a hop counter is not the spend brake (the Governor is), and the
   runaway drill needs a loop that only the cap can stop. The ceiling
   remains as a liveness backstop.
+
+# Phase 3 additions (bad-update drill)
+
+`test/promise/phase3-drill.sh` runs on the same vehicle. Phase 3
+changes the boot topology — the containers now run the slot
+**launcher** (`packages/sandbox/launcher.mjs`, a fixed non-versioned
+supervisor baked into the image) instead of a bare entrypoint:
+
+- **Topology:** the control container's entrypoint is the fixture
+  `test/fixtures/drill3-entry.mjs`, which starts the egress test
+  servers and then the launcher in the control role — the test world
+  must survive control-plane restarts, because promotion IS a
+  control-plane restart. The sandbox container's entrypoint is the
+  launcher in the sandbox role. Both launchers follow
+  `<install>/current.json` on a new shared **install volume**
+  (host dir mode 0777, sandbox mounts it `:ro`): slot A is seeded
+  from the image on first boot; updates stage into slot B and the
+  pointer flips. The images also still carry the legacy flat layout
+  (default `ENTRYPOINT ["node","main.js"]`), which is what the
+  Phase 0–2 drills boot — all three stay green on the same images.
+- **Shared volumes must NOT use `:U`:** comm and install are mounted
+  without it and pre-created mode 0777. A `:U` bind mount re-chowns
+  the shared tree to whichever container mounted it last, in that
+  container's userns range — the other container then gets EACCES on
+  the comm socket (and `existsSync` returns false on EACCES, which
+  made the control plane report "flat layout" while its pointer sat
+  unreadable). Single-container volumes (state, run, apilog,
+  workspace) keep `:U`, as in Phases 0–2.
+- **Canary scratch workspace:** the sandbox launcher's canary child
+  defaults to `/tmp/gus-canary-ws`; this vehicle's tmpfs is not
+  writable by the container user, so the drill passes
+  `GUS_CANARY_WORKSPACE=/workspace/.canary-ws` (the sandbox-owned
+  volume). That EACCES caught a real bug, now fixed: the launcher
+  treats canary setup failure as non-fatal (logs and skips) instead
+  of dying and taking the live runtime's supervisor with it.
+- **Releases are built host-side** with `test/fixtures/
+  gen-update-key.mjs` (Ed25519 keypair; the PRIVATE key stays in the
+  drill dir on the host and never enters a container) and
+  `test/fixtures/make-release.mjs` (version-patches the packed
+  `dist-bundle` — the stub greeting is the visible change — then
+  signs a manifest). The public key is pinned into state as
+  `update-pubkey.pem`. Four of the five drill releases are genuinely
+  signed bad builds (crashy runtime, write-tamper, crashy control
+  plane) plus one altered after signing: signature checks alone
+  cannot catch a bad build, which is the point of the drill.
+- **The fake-file transport now starts at end-of-file** on boot: a
+  restarted control plane (promotion, watchdog rollback) must not
+  replay the whole inbound transcript as new jobs.
+- **Image store discipline in this VM:** `podman` here means
+  `podman --storage-driver vfs --root /var/tmp/podman-root`, and
+  /var/tmp is a 2 GB tmpfs in which vfs stores a full ~128 MB copy
+  per image layer while buildah leaks its per-step containers
+  ("identifier is not a container"). Builds therefore run in a
+  second store on the roomy disk (`--root ~/podman-root`) and the
+  finished images are transferred with `podman save`/`load` **one
+  image at a time**: a combined two-image load aliased both tags
+  onto the control image (the Phase 3 drill still passed — its
+  launcher topology is image-agnostic — but the flat-entrypoint
+  drills caught it). Verify each tag's image ID + Env after a load.
+  `~/podman-root` is a build farm only; containers cannot run from
+  it here (userdata chown fails on that filesystem).

@@ -28,11 +28,23 @@ type PendingCheck =
   | { type: "write"; path: string; expectedDigest: string }
   | { type: "absent"; paths: string[] };
 
+/**
+ * The Phase 3 update surface the host delegates to (implemented over
+ * the Updater in main.ts; declared here so the host never imports the
+ * updater). startUpdate creates the update job and kicks the pipeline,
+ * returning the immediate ack the operator sees.
+ */
+export interface UpdateCommands {
+  startUpdate(conversationId: string, version: string): string;
+  versionText(): string;
+}
+
 export class ChannelHost {
   private comm!: CommServer;
   private pendingDeliveries = new Map<string, string>();
   private pendingChecks = new Map<string, PendingCheck>();
   private lastModelHash = new Map<string, string>();
+  private updateCommands?: UpdateCommands;
 
   constructor(
     private stateDir: string,
@@ -44,6 +56,31 @@ export class ChannelHost {
 
   attachComm(comm: CommServer): void {
     this.comm = comm;
+  }
+
+  /** Phase 3: wire the /update and /version channel commands. */
+  bindUpdateCommands(cmds: UpdateCommands): void {
+    this.updateCommands = cmds;
+  }
+
+  /** Operator notification on the primary adapter (updater notices,
+   *  confirmations). Same egress screening as every outbound text. */
+  async notifyOperator(conversationId: string, text: string): Promise<void> {
+    await this.sendTo(this.adapters[0]?.name ?? "telegram", conversationId, text);
+  }
+
+  /**
+   * Create a job through the live pipeline without a channel event
+   * (Phase 3: the post-promotion confirmation job). The text is ours,
+   * but it goes through the same create → run → verify → settle path
+   * as any operator job; kind "canary" marks it as a system check.
+   */
+  runSystemJob(conversationId: string, text: string): string {
+    const job = this.jobs.create("canary", conversationId, screenText(text).redacted);
+    this.jobs.transition(job.id, "running");
+    this.pendingDeliveries.set(job.id, text);
+    this.comm.pushUserMessage({ jobId: job.id, kind: job.kind, text });
+    return job.id;
   }
 
   async start(): Promise<void> {
@@ -114,6 +151,33 @@ export class ChannelHost {
     const cmd = text.match(/^\/(approve|deny)\s+(\S+)$/);
     if (cmd) {
       return this.resolveApproval(adapterName, msg.conversationId, cmd[2], cmd[1] === "approve", "channel-command");
+    }
+
+    // Phase 3 operator commands. /version is a pure status read — it
+    // answers even while the kill switch is on. /update starts the
+    // boring-update pipeline (the Updater owns every stage after the
+    // ack); while killed it is refused like all other work.
+    if (text === "/version") {
+      await this.sendTo(
+        adapterName,
+        msg.conversationId,
+        this.updateCommands?.versionText() ?? "Version info is unavailable in this deployment.",
+      );
+      return;
+    }
+    const upd = text.match(/^\/update\s+(\S+)$/);
+    if (upd) {
+      if (!this.updateCommands) {
+        await this.sendTo(adapterName, msg.conversationId, "Updates aren't wired up in this deployment. Nothing was changed.");
+        return;
+      }
+      if (this.governor.isKilled()) {
+        await this.sendTo(adapterName, msg.conversationId, "⏹ Kill switch is ON — updates don't run while GUS is stopped. Send /resume first.");
+        return;
+      }
+      const ack = this.updateCommands.startUpdate(msg.conversationId, upd[1]);
+      await this.sendTo(adapterName, msg.conversationId, ack);
+      return;
     }
 
     if (this.governor.isKilled()) {

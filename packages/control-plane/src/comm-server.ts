@@ -7,10 +7,10 @@
  * store, the vault, or the kill flag — it can only ask for model calls
  * (Governor-gated), tool authorizations (class-gated), and verifications.
  */
-import { createServer, type Socket } from "node:net";
+import { createServer, type Server, type Socket } from "node:net";
 import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import type { ControlMessage, RuntimeRequest } from "@gus/shared";
-import { screenText } from "@gus/shared";
+import { GUS_VERSION, screenText } from "@gus/shared";
 import type { Governor } from "./governor.js";
 import type { JobRunner } from "./jobs.js";
 import type { PolicyStore } from "./policy.js";
@@ -94,8 +94,12 @@ function fetchSummary(
 
 export class CommServer {
   private conn: Socket | null = null;
+  private server?: Server;
   private verifyWaiters = new Map<string, (v: { ok: boolean; digest?: string }) => void>();
   private seq = 0;
+  /** Runtime version from the most recent `hello` on this socket. */
+  private runtimeVersionSeen?: string;
+  private versionWaiters: { version: string; resolve: (ok: boolean) => void }[] = [];
 
   constructor(
     private socketPath: string,
@@ -110,11 +114,54 @@ export class CommServer {
   async start(): Promise<void> {
     if (existsSync(this.socketPath)) unlinkSync(this.socketPath);
     const server = createServer((sock) => this.onConnection(sock));
+    this.server = server;
     await new Promise<void>((resolve) => server.listen(this.socketPath, resolve));
     // The sandbox runs under a different uid namespace; the socket file
     // must be connectable across it. The comm volume is private to the
     // two containers, so 0777 on the socket is the intended posture.
     chmodSync(this.socketPath, 0o777);
+  }
+
+  /** Stop listening and remove the socket file. Used by the canary
+   *  runner (Phase 3), which hosts a short-lived second comm endpoint
+   *  for a candidate runtime and must not leave it behind. */
+  async close(): Promise<void> {
+    this.conn?.destroy();
+    this.conn = null;
+    const server = this.server;
+    this.server = undefined;
+    if (server) {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    if (existsSync(this.socketPath)) unlinkSync(this.socketPath);
+    for (const w of this.versionWaiters.splice(0)) w.resolve(false);
+  }
+
+  /** The runtime version most recently announced on this socket. */
+  get runtimeVersion(): string | undefined {
+    return this.runtimeVersionSeen;
+  }
+
+  /**
+   * Resolve true once a runtime hello announces `version` on this
+   * socket (immediately, if the last hello already did); false on
+   * timeout. Phase 3: the Updater's health check for a candidate
+   * runtime and its post-promotion live confirmation both reduce to
+   * this question.
+   */
+  waitRuntimeVersion(version: string, timeoutMs: number): Promise<boolean> {
+    if (this.runtimeVersionSeen === version) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const waiter = { version, resolve };
+      this.versionWaiters.push(waiter);
+      setTimeout(() => {
+        const i = this.versionWaiters.indexOf(waiter);
+        if (i >= 0) {
+          this.versionWaiters.splice(i, 1);
+          resolve(false);
+        }
+      }, timeoutMs);
+    });
   }
 
   private onConnection(sock: Socket): void {
@@ -216,7 +263,14 @@ export class CommServer {
   private async onRequest(req: RuntimeRequest): Promise<void> {
     switch (req.t) {
       case "hello": {
-        this.send({ t: "welcome", controlVersion: "0.0.1", killed: this.governor.isKilled() });
+        this.runtimeVersionSeen = req.runtimeVersion;
+        for (const w of [...this.versionWaiters]) {
+          if (w.version === req.runtimeVersion) {
+            this.versionWaiters.splice(this.versionWaiters.indexOf(w), 1);
+            w.resolve(true);
+          }
+        }
+        this.send({ t: "welcome", controlVersion: GUS_VERSION, killed: this.governor.isKilled() });
         this.hooks.onRuntimeHello();
         break;
       }

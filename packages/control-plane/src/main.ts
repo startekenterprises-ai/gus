@@ -18,13 +18,21 @@
  *                       strict built-in policy, by design)
  *   Governor caps:      <state>/governor.json (re-read per call; a
  *                       missing file is the conservative default caps)
+ *   Phase 3 (Updater):  GUS_INSTALL_DIR (default /install; the slot
+ *                       pointer there is what makes updates available),
+ *                       GUS_RELEASES_DIR (default <state>/releases —
+ *                       release bundles are read from <dir>/<version>/),
+ *                       GUS_UPDATE_PUBKEY (default <state>/update-pubkey.pem;
+ *                       no pinned key = updates refuse, by design)
  *
  * Operator vault admin (never reachable from the sandbox):
  *   node main.js vault-admin <add <name> <value|->|list|remove <name>>
  * runs against the state dir and exits before any server starts.
  */
 import { appendFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import type { ChannelAdapter } from "@gus/shared";
+import { GUS_VERSION } from "@gus/shared";
 import { BotApiTransport, FakeFileTransport, TelegramAdapter } from "@gus/telegram";
 import { LocalReceiptIssuer } from "@gus/gate";
 import { VaultBroker } from "@gus/vault";
@@ -35,6 +43,7 @@ import { CommServer } from "./comm-server.js";
 import { ChannelHost } from "./channel-host.js";
 import { PolicyStore } from "./policy.js";
 import { ApprovalEngine } from "./approvals.js";
+import { Updater } from "./updater.js";
 import { runVaultAdmin } from "./vault-admin.js";
 
 const stateDir = process.env.GUS_STATE_DIR ?? "/state";
@@ -101,8 +110,53 @@ const comm = new CommServer(socketPath, governor, jobs, {
 }, policy, approvals, egress);
 host.attachComm(comm);
 
+// Phase 3: the Updater. Constructed always (its queries power
+// /version), but the pipeline only runs in a slots layout — with no
+// install pointer (the legacy flat containers of Phases 0–2) begin()
+// refuses plainly. Promotion restarts THIS process via requestSelfExit:
+// the slot launcher boots whatever the pointer names.
+const updater = new Updater(
+  stateDir,
+  process.env.GUS_INSTALL_DIR ?? "/install",
+  process.env.GUS_RELEASES_DIR ?? `${stateDir}/releases`,
+  process.env.GUS_UPDATE_PUBKEY ?? `${stateDir}/update-pubkey.pem`,
+  dirname(socketPath),
+  jobs,
+  governor,
+  approvals,
+  policy,
+  comm,
+  egress,
+);
+updater.bindHost({
+  notify: (conversationId, text) => host.notifyOperator(conversationId, text),
+  requestSelfExit: () => {
+    // Give the just-sent notice a beat to land, then exit cleanly;
+    // the launcher starts the pointer's slot.
+    setTimeout(() => process.exit(0), 300);
+  },
+  pushConfirmationJob: (conversationId) => host.runSystemJob(conversationId, "hello — update confirmation check"),
+});
+host.bindUpdateCommands({
+  startUpdate: (conversationId, version) => {
+    const job = jobs.create("update", conversationId, `update to ${version}`);
+    jobs.transition(job.id, "running");
+    return updater.begin(job.id, version, conversationId);
+  },
+  versionText: () => {
+    const { pointer, runtimeVersion } = updater.versionInfo();
+    return (
+      `GUS control plane v${GUS_VERSION} · agent runtime v${runtimeVersion ?? "(not connected)"}` +
+      (pointer ? ` · slot ${pointer.slot} live (v${pointer.version})` : " · flat layout (no install slots)")
+    );
+  },
+});
+
 await comm.start();
 await host.start();
+// Settle anything a previous incarnation left in flight — above all a
+// promotion this process was booted to confirm (updater.ts).
+void updater.bootReconcile(GUS_VERSION);
 appendFileSync(
   `${stateDir}/runtime-log.jsonl`,
   JSON.stringify({ ts: Date.now(), level: "info", text: `control plane up; channel=${adapter.name} transport=${channelKind} killed=${governor.isKilled()}` }) + "\n",

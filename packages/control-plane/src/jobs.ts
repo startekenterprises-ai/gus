@@ -89,6 +89,20 @@ export class JobRunner {
     return found;
   }
 
+  /**
+   * True while any job other than `exceptId` is unsettled (queued,
+   * running, or parked). Phase 3: the Updater's idle gate — an update
+   * never starts while work is in flight, and a parked (needs-approval)
+   * job counts as in flight.
+   */
+  hasActiveJobsExcept(exceptId: string): boolean {
+    for (const j of this.jobs.values()) {
+      if (j.id === exceptId) continue;
+      if (j.state !== "verified-done" && j.state !== "failed-loudly") return true;
+    }
+    return false;
+  }
+
   transition(id: string, next: JobState, outcomeNote?: string): JobRecord {
     const rec = this.jobs.get(id);
     if (!rec) throw new Error(`unknown job ${id}`);

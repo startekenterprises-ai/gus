@@ -1,11 +1,21 @@
 # GUS control plane image (operator-trusted; runs OUTSIDE the sandbox).
 # ARG BASE lets offline dev environments substitute a locally built Node
 # base; production uses the pinned upstream image.
+#
+# Two layouts ship in the image:
+#   - flat (legacy, Phases 0–2 drills): main.js + node_modules at /app,
+#     started by the default ENTRYPOINT;
+#   - slots (Phase 3): the whole bundle as slot A under /app/slots,
+#     plus the non-versioned slot launcher at /app/launcher.mjs. The
+#     launcher seeds the install volume from /app/slots on first boot
+#     and thereafter runs whatever slot the install pointer names.
 ARG BASE=node:24-alpine
 FROM ${BASE}
 WORKDIR /app
 COPY dist-bundle/control-plane/ ./
 COPY dist-bundle/node_modules/ ./node_modules/
+COPY dist-bundle/ ./slots/A/
+COPY --chmod=644 packages/sandbox/launcher.mjs ./launcher.mjs
 ENV GUS_STATE_DIR=/state GUS_COMM_SOCKET=/comm/gus.sock
 USER gus
 ENTRYPOINT ["node", "main.js"]

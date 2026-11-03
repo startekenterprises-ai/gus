@@ -67,8 +67,34 @@ drills: the **Yue drill** (a bulk delete parks with no confirm
 instruction anywhere in context; STOP freezes a running loop; replay,
 forgery, bare-text "approve", and timeout all execute nothing) and the
 **runaway-cap drill** (a looping job is cut at the cap exactly, ledger
-reconciled, next job unaffected). Model providers, real Agent-Shield
-receipts, and updates land in Phases 3–4 per the foundation spec.
+reconciled, next job unaffected).
+
+**Phase 3 (boring updates) is built**: the Updater lives in the
+control plane (the sandbox never updates itself). A release is a
+versioned bundle with an Ed25519-signed manifest (local release key
+for now, honestly labeled like the receipt stub); the flow is verify
+signature + every file hash → snapshot operator config → stage into
+the idle A/B slot → **canary replay**: the candidate runtime boots
+alongside the live one and replays the recorded scenarios (chat
+round-trip, workspace write+verify, allowlisted fetch, approval park)
+→ only on a full pass does the version pointer flip, and the new
+control plane must still confirm itself live before the update
+settles. Updates never start while a job is running or an approval
+is parked; they wait. The data rule is stated in one line: **code and
+config roll back; data never does** — the append-only stores
+(ledger, jobs, approvals, receipts, vault) are never copied or
+restored by an update, only prefix-checked for integrity. Both
+containers boot through a small non-versioned slot launcher whose
+watchdog flips the pointer back if a promoted control plane dies
+before confirming. The Phase 3 gate is the **bad-update drill**: a
+real v0.3 → v0.4 update lands mid-job without interrupting it; a
+tampered bundle is rejected before staging; a crashy release and a
+subtly broken one (its write path returns wrong content, caught by
+the digest post-condition) are rolled back before going live; a
+crashy control plane is rolled back by the watchdog after promotion;
+and store/vault/config integrity is verified byte-for-byte across
+the whole drill. Model providers and real Agent-Shield receipts land
+in Phase 4 per the foundation spec.
 
 ## Layout
 
@@ -89,15 +115,17 @@ test/
 skills/            skill format placeholder (scanner-gated installs, Phase 4)
 ```
 
-## Run the Phase 0 drill
+## Run the drills
 
 ```sh
-npm install && npm run build && npm test     # 32 unit tests
+npm install && npm run build && npm test     # 61 unit tests
 npm run pack                                  # assemble dist-bundle/
 docker build -f packages/sandbox/Dockerfile.control -t gus-control:dev .
 docker build -f packages/sandbox/Dockerfile.agent   -t gus-agent:dev .
 bash test/promise/phase0-drill.sh             # the Phase 0 gate
 bash test/promise/phase1-drill.sh             # the Phase 1 credential red-team
+bash test/promise/phase2-drill.sh             # the Phase 2 Yue + runaway-cap drills
+bash test/promise/phase3-drill.sh             # the Phase 3 bad-update drill
 npm run check:budget                          # ≤1 GB RAM budget, static + measured
 ```
 

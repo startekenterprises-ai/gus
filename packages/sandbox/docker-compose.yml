@@ -1,4 +1,4 @@
-# GUS Phase 0 topology — canonical Docker form (real hosts).
+# GUS topology — canonical Docker form (real hosts).
 #
 # The security story in one file:
 # - agent-sandbox has NO network (network_mode: none). Its only bridge to
@@ -12,6 +12,13 @@
 # - control-plane holds all state (ledger/jobs/receipts/kill flag) on its
 #   own volume the sandbox cannot see, and is the only process that talks
 #   to channels and (in later phases) providers.
+# - Since Phase 3 both services boot through the slot launcher
+#   (packages/sandbox/launcher.mjs): the versioned code lives in A/B
+#   slots on the gus-install volume, the pointer there names the live
+#   slot, and the Updater (control plane) stages, verifies, canaries,
+#   and flips — or rolls back — without ever mutating the running slot.
+#   The install volume is mounted READ-ONLY into the sandbox: the
+#   runtime can execute its slot but can never update itself.
 # - Both run under the resource budget from the spec (§0 rule 4):
 #   governor + vault + one sandbox steady-state <= 1 GB RAM.
 services:
@@ -20,6 +27,7 @@ services:
       context: ../..
       dockerfile: packages/sandbox/Dockerfile.control
     image: gus-control:dev
+    entrypoint: ["node", "/app/launcher.mjs", "control"]
     environment:
       GUS_CHANNEL: ${GUS_CHANNEL:-fake-file}
       GUS_FAKE_INBOUND: /run/gus/inbound.ndjson
@@ -30,10 +38,15 @@ services:
       # cannot see. A missing egress-policy.json is a deny-all policy.
       GUS_VAULT_KEY_FILE: /state/vault.key
       GUS_EGRESS_POLICY: /state/egress-policy.json
+      # Phase 3: Updater. The launcher seeds /install from the image's
+      # bundled slot on first boot; releases are read from
+      # /state/releases/<version>/ and verified against the pinned key.
+      GUS_INSTALL_DIR: /install
     volumes:
       - gus-state:/state
       - gus-comm:/comm
       - gus-run:/run/gus
+      - gus-install:/install
     mem_limit: 256m
     cpus: 1.0
     restart: "no"
@@ -43,6 +56,7 @@ services:
       context: ../..
       dockerfile: packages/sandbox/Dockerfile.agent
     image: gus-agent:dev
+    entrypoint: ["node", "/app/launcher.mjs", "sandbox"]
     network_mode: none
     read_only: true
     cap_drop:
@@ -51,9 +65,13 @@ services:
       - no-new-privileges:true
     tmpfs:
       - /tmp:size=32m
+    environment:
+      GUS_INSTALL_DIR: /install
+      GUS_COMM_DIR: /comm
     volumes:
       - gus-comm:/comm
       - gus-workspace:/workspace
+      - gus-install:/install:ro
     mem_limit: 512m
     cpus: 1.0
     restart: "no"
@@ -65,3 +83,4 @@ volumes:
   gus-comm:
   gus-workspace:
   gus-run:
+  gus-install:

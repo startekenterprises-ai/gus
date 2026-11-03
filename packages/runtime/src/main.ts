@@ -15,6 +15,7 @@
  */
 import { createConnection, type Socket } from "node:net";
 import type { ControlMessage, RuntimeRequest } from "@gus/shared";
+import { GUS_VERSION } from "@gus/shared";
 import { Workspace, executeTool } from "./tools.js";
 
 const SOCKET = process.env.GUS_COMM_SOCKET ?? "/comm/gus.sock";
@@ -221,7 +222,7 @@ function onMessage(m: ControlMessage): void {
 
 function connect(): void {
   sock = createConnection(SOCKET, () => {
-    send({ t: "hello", runtimeVersion: "0.0.1" });
+    send({ t: "hello", runtimeVersion: GUS_VERSION });
   });
   sock.on("data", (chunk) => {
     buf += chunk.toString("utf8");

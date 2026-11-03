@@ -203,6 +203,17 @@ export class ApprovalEngine {
     return undefined;
   }
 
+  /** True while any approval is awaiting the operator. Phase 3: part
+   *  of the Updater's idle gate — an update never starts while an
+   *  approval is parked. */
+  hasPending(): boolean {
+    this.sweepExpired();
+    for (const r of this.requests.values()) {
+      if (r.status === "pending") return true;
+    }
+    return false;
+  }
+
   /**
    * The replay/forge check: an executable approval exists ONLY if a
    * request for this job+tool is in `approved` state AND its recorded

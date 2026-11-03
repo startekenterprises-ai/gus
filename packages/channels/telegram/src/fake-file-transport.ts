@@ -18,6 +18,7 @@ import type { TelegramTransport } from "./telegram.js";
 
 export class FakeFileTransport implements TelegramTransport {
   private consumed = 0;
+  private initialized = false;
 
   constructor(
     private inboundPath: string,
@@ -27,6 +28,19 @@ export class FakeFileTransport implements TelegramTransport {
   async getUpdates(offset: number, _timeoutSec: number): Promise<unknown[]> {
     if (!existsSync(this.inboundPath)) return [];
     const lines = readFileSync(this.inboundPath, "utf8").split("\n").filter(Boolean);
+    if (!this.initialized) {
+      // Restart semantics: the inbound file is a transcript of
+      // everything ever typed, but a freshly started control plane
+      // must only consume what arrives AFTER it starts — otherwise a
+      // restart (routine since Phase 3, whose updater restarts the
+      // control plane to promote a release) would replay the entire
+      // history as new jobs. So the first poll starts at end-of-file:
+      // history is evidence, not a queue. (The real Bot API transport
+      // gets the equivalent from Telegram's server-side offsets.)
+      this.consumed = lines.length;
+      this.initialized = true;
+      return [];
+    }
     const fresh = lines.slice(this.consumed);
     this.consumed = lines.length;
     return fresh.map((l) => JSON.parse(l));
