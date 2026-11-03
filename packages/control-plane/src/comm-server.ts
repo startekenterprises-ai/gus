@@ -18,6 +18,7 @@ import type { PolicyStore } from "./policy.js";
 import { canonicalize, type ApprovalEngine, type ApprovalRequest } from "./approvals.js";
 import { estimateTokens, fakeComplete, FAKE_MODEL_NAME } from "./provider.js";
 import { stubCompletion, type Provider } from "./providers.js";
+import { isGmailTool } from "./gmail.js";
 
 export interface HostHooks {
   onRuntimeHello(): void;
@@ -61,6 +62,21 @@ export interface FetchGate {
     body?: string;
     note?: string;
   }>;
+}
+
+/**
+ * The Gmail gate the comm server delegates `gmail_*` tool calls to
+ * (Phase 6). Structurally the GmailService (gmail.ts); declared here
+ * so the comm layer depends on the contract, not the pack. Like
+ * fetch, gmail executes HERE — the OAuth credential never crosses to
+ * the sandbox, which only ever receives the verified outcome.
+ */
+export interface GmailGate {
+  execute(
+    jobId: string,
+    tool: string,
+    args: Record<string, unknown>,
+  ): Promise<{ ok: boolean; summary: string; refused?: boolean }>;
 }
 
 /** Shape runtime fetch args into the FetchGate's request form. */
@@ -121,6 +137,10 @@ export class CommServer {
      *  is re-read each time, so an onboarding/panel change is live on
      *  the next call). Defaults to the deterministic stub. */
     private providerFactory?: () => Provider,
+    /** Phase 6: the Gmail pack's executor. Optional so pre-Phase-6
+     *  wiring constructs without it; gmail calls then refuse plainly
+     *  ("pack not configured") instead of ever reaching the runtime. */
+    private gmailGate?: GmailGate,
   ) {}
 
   async start(): Promise<void> {
@@ -268,6 +288,36 @@ export class CommServer {
         tool: approval.tool,
         args: approval.args,
         result: gated,
+      });
+      return;
+    }
+    if (isGmailTool(approval.tool)) {
+      // Phase 6: an approved gmail action executes HERE, in the
+      // control plane (the OAuth credential cannot cross to the
+      // sandbox), with the EXACT stored arguments — the outcome rides
+      // back with the approved_execution, like an approved fetch.
+      if (!this.gmailGate) {
+        const note = "the Gmail pack is not configured in this control plane";
+        try {
+          this.jobs.transition(approval.jobId, "failed-loudly", note);
+        } catch { /* settled already */ }
+        this.hooks.onDenied(approval.jobId, approval.tool, note);
+        return;
+      }
+      const r = await this.gmailGate.execute(approval.jobId, approval.tool, approval.args);
+      if (r.refused) {
+        try {
+          this.jobs.transition(approval.jobId, "failed-loudly", r.summary);
+        } catch { /* settled already */ }
+        this.hooks.onDenied(approval.jobId, approval.tool, r.summary);
+        return;
+      }
+      this.send({
+        t: "approved_execution",
+        jobId: approval.jobId,
+        tool: approval.tool,
+        args: approval.args,
+        result: r,
       });
       return;
     }
@@ -571,6 +621,41 @@ export class CommServer {
             status: "authorized",
             note: r.note,
             result: gated,
+          });
+          break;
+        }
+        // --- Phase 6: gmail_* executes HERE, in the control plane,
+        // like fetch (the OAuth credential never crosses to the
+        // sandbox). The service Shield-scans inbound content,
+        // secret-guards outbound content, and verifies every outcome
+        // before its summary rides back with the authorization.
+        if (isGmailTool(req.tool)) {
+          if (!this.gmailGate) {
+            const note = "the Gmail pack is not configured in this control plane";
+            this.send({ t: "tool_result", reqId: req.reqId, status: "denied", note });
+            break;
+          }
+          const r = await this.gmailGate.execute(req.jobId, req.tool, req.args);
+          if (r.refused) {
+            // Hard refusal (secret-guard, transport failure): the
+            // egress-refusal shape — terminal, receipted, loud.
+            try {
+              this.jobs.transition(req.jobId, "failed-loudly", r.summary);
+            } catch {
+              /* already settled/parked — refusal stands regardless */
+            }
+            this.hooks.onDenied(req.jobId, req.tool, r.summary);
+            this.send({ t: "tool_result", reqId: req.reqId, status: "denied", note: r.summary });
+            break;
+          }
+          // Otherwise the outcome rides back as the result — including
+          // a Shield-withheld read (ok:false), exactly like a blocked
+          // fetch result: the job continues, the content never crossed.
+          this.send({
+            t: "tool_result",
+            reqId: req.reqId,
+            status: "authorized",
+            result: r,
           });
           break;
         }

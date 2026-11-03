@@ -31,6 +31,7 @@
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { screenText } from "@gus/shared";
 import { sha256Hex } from "@gus/gate";
+import { gmailMessageIds, gmailRecipients } from "./gmail.js";
 
 export type ApprovalStatus = "pending" | "approved" | "denied" | "expired" | "consumed";
 
@@ -100,6 +101,40 @@ export function describeAction(tool: string, args: Record<string, unknown>): str
       return typeof args.secretName === "string"
         ? `${base} using the stored credential "${args.secretName}" (injected by the egress proxy — the agent never sees the value)`
         : base;
+    }
+    // Phase 6 (Gmail pack): summaries enumerate the EXACT message IDs
+    // and recipients — that enumeration is the Yue rule made visible;
+    // an approval that cannot say precisely what it covers does not
+    // get granted.
+    case "gmail_delete": {
+      const ids = gmailMessageIds(args);
+      return `Delete ${ids.length} Gmail message(s) ${args.permanent === true ? "PERMANENTLY" : "(move to trash)"}: ${ids.join(", ") || "(none named)"}`;
+    }
+    case "gmail_label":
+    case "gmail_archive":
+    case "gmail_spam": {
+      const ids = gmailMessageIds(args);
+      const what =
+        tool === "gmail_archive"
+          ? "Archive (remove from inbox)"
+          : tool === "gmail_spam"
+            ? "Report as spam"
+            : `Change labels (+[${[...(Array.isArray(args.addLabelIds) ? args.addLabelIds.map(String) : []), ...(typeof args.label === "string" ? [args.label] : [])].join(", ")}] -[${Array.isArray(args.removeLabelIds) ? args.removeLabelIds.map(String).join(", ") : ""}])`;
+      return `${what} on ${ids.length} Gmail message(s): ${ids.join(", ") || "(none named)"}`;
+    }
+    case "gmail_send": {
+      const to = gmailRecipients(args);
+      return `Send email to ${to.join(", ") || "(no recipients named)"} — subject "${String(args.subject ?? "")}" (${String(args.body ?? "").length} chars)`;
+    }
+    case "gmail_reply": {
+      const to = gmailRecipients(args);
+      return `Reply in Gmail thread of message ${String(args.messageId ?? "?")} to ${to.length ? to.join(", ") : "the original sender"} — subject "${String(args.subject ?? "(thread subject)")}" (${String(args.body ?? "").length} chars)`;
+    }
+    case "gmail_block_sender":
+      return `Block Gmail sender ${String(args.from ?? args.address ?? "?")} (their future mail skips the inbox and lands in spam)`;
+    case "gmail_draft": {
+      const to = gmailRecipients(args);
+      return `Create a Gmail draft to ${to.join(", ") || "(no recipients named)"} — subject "${String(args.subject ?? "")}" (draft only, not sent)`;
     }
     default:
       return `Run ${tool} with ${canonicalize(args).slice(0, 200)}`;

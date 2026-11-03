@@ -28,6 +28,10 @@
  * Operator vault admin (never reachable from the sandbox):
  *   node main.js vault-admin <add <name> <value|->|list|remove <name>>
  * runs against the state dir and exits before any server starts.
+ * Phase 6 (Gmail pack): node main.js gmail-admin <status|revoke>
+ * likewise; the pack's OAuth credential is the vault secret
+ * "gmail-oauth" (docs/gmail-pack.md), its learned directory is
+ * <state>/gmail-directory.json.
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
@@ -48,6 +52,7 @@ import { ApprovalEngine } from "./approvals.js";
 import { Updater } from "./updater.js";
 import { runVaultAdmin } from "./vault-admin.js";
 import { loadProviderConfig, resolveProvider } from "./providers.js";
+import { GmailDirectory, GmailService, HttpGmailTransport, runGmailAdmin } from "./gmail.js";
 import { Onboarding, DIGEST_PROMPT, TELEGRAM_SECRET_NAME } from "./onboarding.js";
 import { SkillInstaller } from "./skills.js";
 import { startHeartbeat } from "./heartbeat.js";
@@ -63,6 +68,15 @@ const vault = new VaultBroker(
 
 if (process.argv[2] === "vault-admin") {
   process.exit(runVaultAdmin(process.argv.slice(3), vault));
+}
+
+// Phase 6: the Gmail pack's learned directory (known correspondents +
+// blocked senders). Constructed before the gmail-admin branch so the
+// CLI can report/revoke against the same file the service maintains.
+const gmailDirectory = new GmailDirectory(`${stateDir}/gmail-directory.json`);
+
+if (process.argv[2] === "gmail-admin") {
+  process.exit(runGmailAdmin(process.argv.slice(3), vault, gmailDirectory));
 }
 
 const governor = new Governor(stateDir);
@@ -107,7 +121,9 @@ if (channelKind === "telegram") {
 // its file on every classification; approval timeouts come from the
 // same file, re-read at creation time. Expiry settles parked jobs via
 // the host (timeout = deny, failed-loudly, receipted).
-const policy = new PolicyStore(process.env.GUS_POLICY ?? `${stateDir}/policy.json`);
+const policy = new PolicyStore(process.env.GUS_POLICY ?? `${stateDir}/policy.json`, {
+  gmailDirectoryPath: `${stateDir}/gmail-directory.json`,
+});
 const approvals = new ApprovalEngine(stateDir, () => policy.load().approvalTimeoutMs);
 
 // Phase 4: the Agent-Shield gate (spec §1.7). The API key lives in
@@ -119,6 +135,18 @@ const shieldGate = new ShieldGate({
   client: new ShieldClient({ vault, baseUrl: process.env.GUS_SHIELD_BASE_URL }),
   policy: () => policy.shieldPolicy(),
   logPath: `${stateDir}/gate.jsonl`,
+});
+
+// Phase 6: the Gmail pack. Executes in this process (like the egress
+// proxy): the OAuth credential stays in the vault, inbound mail is
+// Shield-scanned before it can reach the model, outbound mail passes
+// the secret-guard, and the classifier reads the same directory file
+// this service maintains. Until the operator stores a "gmail-oauth"
+// secret, every pack call fails loudly with the setup pointer.
+const gmail = new GmailService(new HttpGmailTransport(vault), {
+  directory: gmailDirectory,
+  shield: shieldGate,
+  vault,
 });
 
 const host = new ChannelHost(stateDir, governor, jobs, [adapter], approvals, shieldGate);
@@ -135,7 +163,7 @@ const comm = new CommServer(socketPath, governor, jobs, {
   onJobFinal: (jobId, text) => host.onJobFinal(jobId, text),
   logRuntime: (level, text) =>
     appendFileSync(`${stateDir}/runtime-log.jsonl`, JSON.stringify({ ts: Date.now(), level, text }) + "\n"),
-}, policy, approvals, egress, shieldGate, () => resolveProvider(stateDir, vault));
+}, policy, approvals, egress, shieldGate, () => resolveProvider(stateDir, vault), gmail);
 host.attachComm(comm);
 
 // Phase 3: the Updater. Constructed always (its queries power
