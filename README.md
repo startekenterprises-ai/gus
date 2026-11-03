@@ -52,9 +52,23 @@ The Phase 1 gate is the credential red-team drill: a canary secret
 survives direct vault asks, non-allowlisted fetches, echo/redirect/body
 smuggling, state scraping, and prompt-injected instructions in fetched
 content — appearing nowhere outside the vault's ciphertext and the one
-intended in-flight request. Model providers, real Agent-Shield
-receipts, approval resolution, and updates land in Phases 2–4 per the
-foundation spec.
+intended in-flight request.
+
+**Phase 2 (Governor & approvals) is built**: the Governor complete —
+per-task/per-day/per-month USD caps over a versioned price table
+(operator-owned config the sandbox cannot write), enforced by
+reservation against an append-only ledger that reconciles exactly
+(reserves = settles + refunds) — and the Approval Engine: every tool
+call classified in the control plane from tool + arguments, approvals
+parked as durable control-plane state, bound to the hash of the exact
+arguments, single-use, timeout = deny, resolvable only from the
+channel (buttons or /approve /deny commands). The Phase 2 gate is two
+drills: the **Yue drill** (a bulk delete parks with no confirm
+instruction anywhere in context; STOP freezes a running loop; replay,
+forgery, bare-text "approve", and timeout all execute nothing) and the
+**runaway-cap drill** (a looping job is cut at the cap exactly, ledger
+reconciled, next job unaffected). Model providers, real Agent-Shield
+receipts, and updates land in Phases 3–4 per the foundation spec.
 
 ## Layout
 

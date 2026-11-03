@@ -13,6 +13,11 @@
  *   GUS_EGRESS_POLICY   egress allowlist + injection bindings
  *                       (default: <state>/egress-policy.json; a missing
  *                       file is a deny-all policy, by design)
+ *   GUS_POLICY          approval policy file (default:
+ *                       <state>/policy.json; a missing file is the
+ *                       strict built-in policy, by design)
+ *   Governor caps:      <state>/governor.json (re-read per call; a
+ *                       missing file is the conservative default caps)
  *
  * Operator vault admin (never reachable from the sandbox):
  *   node main.js vault-admin <add <name> <value|->|list|remove <name>>
@@ -28,6 +33,8 @@ import { Governor } from "./governor.js";
 import { JobRunner } from "./jobs.js";
 import { CommServer } from "./comm-server.js";
 import { ChannelHost } from "./channel-host.js";
+import { PolicyStore } from "./policy.js";
+import { ApprovalEngine } from "./approvals.js";
 import { runVaultAdmin } from "./vault-admin.js";
 
 const stateDir = process.env.GUS_STATE_DIR ?? "/state";
@@ -70,18 +77,28 @@ if (channelKind === "telegram") {
   adapter = new TelegramAdapter(new FakeFileTransport(inbound, outbound));
 }
 
-const host = new ChannelHost(stateDir, governor, jobs, [adapter]);
+// Phase 2: the Approval Engine + policy store. Policy is re-read from
+// its file on every classification; approval timeouts come from the
+// same file, re-read at creation time. Expiry settles parked jobs via
+// the host (timeout = deny, failed-loudly, receipted).
+const policy = new PolicyStore(process.env.GUS_POLICY ?? `${stateDir}/policy.json`);
+const approvals = new ApprovalEngine(stateDir, () => policy.load().approvalTimeoutMs);
+
+const host = new ChannelHost(stateDir, governor, jobs, [adapter], approvals);
+approvals.onExpire = (req) => host.handleApprovalExpired(req);
 const comm = new CommServer(socketPath, governor, jobs, {
   onRuntimeHello: () => host.onRuntimeHello(),
   onModelIssued: (jobId, text) => host.onModelIssued(jobId, text),
   noteAuthorizedWrite: (jobId, path, content) => host.noteAuthorizedWrite(jobId, path, content),
-  onParked: (jobId, tool) => host.onParked(jobId, tool),
+  onApprovalRequested: (req) => host.onApprovalRequested(req),
+  noteApprovedExecution: (jobId, tool, args) => host.noteApprovedExecution(jobId, tool, args),
   onDenied: (jobId, tool, note) => host.onDenied(jobId, tool, note),
+  onCapExceeded: (jobId, detail) => host.onCapExceeded(jobId, detail),
   onJobUpdate: (jobId, note) => host.onJobUpdate(jobId, note),
   onJobFinal: (jobId, text) => host.onJobFinal(jobId, text),
   logRuntime: (level, text) =>
     appendFileSync(`${stateDir}/runtime-log.jsonl`, JSON.stringify({ ts: Date.now(), level, text }) + "\n"),
-}, egress);
+}, policy, approvals, egress);
 host.attachComm(comm);
 
 await comm.start();

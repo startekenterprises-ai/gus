@@ -13,14 +13,24 @@ import type { ControlMessage, RuntimeRequest } from "@gus/shared";
 import { screenText } from "@gus/shared";
 import type { Governor } from "./governor.js";
 import type { JobRunner } from "./jobs.js";
+import type { PolicyStore } from "./policy.js";
+import type { ApprovalEngine, ApprovalRequest } from "./approvals.js";
 import { estimateTokens, fakeComplete, FAKE_MODEL_NAME } from "./provider.js";
 
 export interface HostHooks {
   onRuntimeHello(): void;
   onModelIssued(jobId: string, text: string | undefined): void;
   noteAuthorizedWrite(jobId: string, path: string, content: string): void;
-  onParked(jobId: string, tool: string): void;
+  /** Phase 2: an approval was created and the job parked — the host
+   *  presents the request (with buttons) on the channel. */
+  onApprovalRequested(req: ApprovalRequest): void;
+  /** Phase 2: an approved action is about to execute — the host records
+   *  the post-condition check to verify once the job finalizes. */
+  noteApprovedExecution(jobId: string, tool: string, args: Record<string, unknown>): void;
   onDenied(jobId: string, tool: string, note: string): void;
+  /** Phase 2: the Governor refused a model call at a spend cap and the
+   *  job was settled failed-loudly — the host notifies the operator. */
+  onCapExceeded(jobId: string, detail: string): void;
   onJobUpdate(jobId: string, note: string): void;
   onJobFinal(jobId: string, text: string): Promise<void>;
   logRuntime(level: string, text: string): void;
@@ -51,6 +61,37 @@ export interface FetchGate {
   }>;
 }
 
+/** Shape runtime fetch args into the FetchGate's request form. */
+function fetchArgsFrom(args: Record<string, unknown>): {
+  url: string;
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+  secretName?: string;
+} {
+  return {
+    url: String(args.url ?? ""),
+    method: typeof args.method === "string" ? args.method : undefined,
+    headers:
+      args.headers && typeof args.headers === "object"
+        ? (args.headers as Record<string, string>)
+        : undefined,
+    body: typeof args.body === "string" ? args.body : undefined,
+    secretName: typeof args.secretName === "string" ? args.secretName : undefined,
+  };
+}
+
+function fetchSummary(
+  args: Record<string, unknown>,
+  r: { status?: number; body?: string; note?: string },
+): string {
+  return (
+    `fetch ${String(args.url ?? "")} -> HTTP ${r.status ?? "?"}; ` +
+    `body: ${(r.body ?? "").slice(0, 500)}` +
+    (r.note ? `; notes: ${r.note}` : "")
+  );
+}
+
 export class CommServer {
   private conn: Socket | null = null;
   private verifyWaiters = new Map<string, (v: { ok: boolean; digest?: string }) => void>();
@@ -61,6 +102,8 @@ export class CommServer {
     private governor: Governor,
     private jobs: JobRunner,
     private hooks: HostHooks,
+    private policy: PolicyStore,
+    private approvals: ApprovalEngine,
     private fetchGate?: FetchGate,
   ) {}
 
@@ -115,6 +158,61 @@ export class CommServer {
     });
   }
 
+  /**
+   * Execute an operator-approved action (Phase 2). Called ONLY by the
+   * ChannelHost after a channel resolution. The approval is consumed
+   * FIRST (single-use, even if execution then fails), the job un-parks,
+   * and the EXACT stored arguments are sent to the runtime — or, for
+   * fetch, executed here in the egress proxy with the outcome relayed.
+   * There is deliberately no runtime-request path that reaches this
+   * method.
+   */
+  async executeApproval(approval: ApprovalRequest): Promise<void> {
+    this.approvals.consume(approval.id);
+    try {
+      this.jobs.transition(approval.jobId, "running");
+    } catch {
+      // The job is no longer parked (killed or settled in the race
+      // window). The approval is burned — consumed above — and the
+      // action does NOT execute. Fail closed, always.
+      return;
+    }
+    this.hooks.noteApprovedExecution(approval.jobId, approval.tool, approval.args);
+    if (approval.tool === "fetch") {
+      if (!this.fetchGate) {
+        const note = "egress proxy is not configured in this control plane";
+        try {
+          this.jobs.transition(approval.jobId, "failed-loudly", note);
+        } catch { /* settled already */ }
+        this.hooks.onDenied(approval.jobId, approval.tool, note);
+        return;
+      }
+      const r = await this.fetchGate.fetch(fetchArgsFrom(approval.args), { jobId: approval.jobId });
+      if (!r.ok) {
+        const note = `egress ${r.verdict}: ${r.note ?? "request refused"}`;
+        try {
+          this.jobs.transition(approval.jobId, "failed-loudly", note);
+        } catch { /* settled already */ }
+        this.hooks.onDenied(approval.jobId, approval.tool, note);
+        return;
+      }
+      this.send({
+        t: "approved_execution",
+        jobId: approval.jobId,
+        tool: approval.tool,
+        args: approval.args,
+        result: { ok: true, summary: fetchSummary(approval.args, r) },
+      });
+      return;
+    }
+    this.send({
+      t: "approved_execution",
+      jobId: approval.jobId,
+      tool: approval.tool,
+      args: approval.args,
+    });
+  }
+
   private async onRequest(req: RuntimeRequest): Promise<void> {
     switch (req.t) {
       case "hello": {
@@ -123,9 +221,27 @@ export class CommServer {
         break;
       }
       case "model_request": {
-        const est = estimateTokens(req.prompt) + 64;
-        const decision = this.governor.authorize(req.jobId, est);
+        // The Phase 0 stub provider is deterministic, so the exact
+        // tokens of the reply are computable BEFORE authorization —
+        // the Governor's reservation therefore equals the settlement,
+        // and cap math is exact (governor.ts). Real providers estimate
+        // from prompt + output budget through the same interface.
+        const reply = fakeComplete(req.prompt);
+        const tokensIn = estimateTokens(req.prompt);
+        const tokensOut = estimateTokens(reply.text ?? JSON.stringify(reply.toolCall ?? {}));
+        const decision = this.governor.authorize(req.jobId, tokensIn, tokensOut, FAKE_MODEL_NAME);
         if (!decision.ok) {
+          if (decision.reason === "cap_exceeded") {
+            // The cap is a terminal, receipted outcome for this job —
+            // never a silent stall. (Kill refusals are settled by the
+            // channel host, which owns the kill action.)
+            try {
+              this.jobs.transition(req.jobId, "failed-loudly", `governor cap: ${decision.detail}`);
+            } catch {
+              /* already settled/parked — the refusal stands regardless */
+            }
+            this.hooks.onCapExceeded(req.jobId, decision.detail);
+          }
           this.send({
             t: "model_response",
             reqId: req.reqId,
@@ -138,18 +254,8 @@ export class CommServer {
           });
           break;
         }
-        const reply = fakeComplete(req.prompt);
-        const tokensIn = estimateTokens(req.prompt);
-        const tokensOut = estimateTokens(reply.text ?? JSON.stringify(reply.toolCall ?? {}));
-        this.governor.record({
-          ts: Date.now(),
-          jobId: req.jobId,
-          model: FAKE_MODEL_NAME,
-          tokensIn,
-          tokensOut,
-          costUsd: 0,
-        });
-        this.jobs.addUsage(req.jobId, tokensIn, tokensOut, 0);
+        const costUsd = this.governor.settle(decision.reservationId, tokensIn, tokensOut);
+        this.jobs.addUsage(req.jobId, tokensIn, tokensOut, costUsd);
         this.hooks.onModelIssued(req.jobId, reply.text);
         this.send({
           t: "model_response",
@@ -159,55 +265,88 @@ export class CommServer {
           toolCall: reply.toolCall,
           tokensIn,
           tokensOut,
-          costUsd: 0,
+          costUsd,
         });
         break;
       }
       case "tool_call": {
-        // --- Phase 1: vault_read — refused by construction. There is no
-        // vault read API for the sandbox; asking is itself the red-team
-        // signal. The job fails loudly (denial is a terminal, receipted
-        // outcome — never a silent drop, never a park).
-        if (req.tool === "vault_read") {
-          const note =
-            "the Vault Broker has no read API — secrets are used via egress injection, never read";
-          this.hooks.logRuntime(
-            "warn",
-            `vault_read attempt refused for job ${req.jobId} (name: ${String(req.args.name ?? "?")})`,
-          );
+        // --- Phase 2: EVERY call is classified by the Approval Engine's
+        // policy layer from tool + arguments (policy.ts). The runtime's
+        // declaredClass is an input to the classifier, never the
+        // decision: the control plane re-derives the class itself.
+        const cls = this.policy.classify({
+          tool: req.tool,
+          declaredClass: req.declaredClass,
+          args: req.args,
+        });
+
+        if (cls.action === "deny") {
+          // Denial is a terminal, receipted outcome — never a silent
+          // drop, never a park. (Phase 1's vault_read refusal lives
+          // here now: it is the classifier's hard-deny entry.)
+          if (req.tool === "vault_read") {
+            this.hooks.logRuntime(
+              "warn",
+              `vault_read attempt refused for job ${req.jobId} (name: ${String(req.args.name ?? "?")})`,
+            );
+          }
           try {
-            this.jobs.transition(req.jobId, "failed-loudly", `denied tool vault_read: ${note}`);
+            this.jobs.transition(req.jobId, "failed-loudly", `denied tool ${req.tool}: ${cls.reason}`);
           } catch {
             /* already settled/parked — refusal stands regardless */
           }
-          this.hooks.onDenied(req.jobId, req.tool, note);
-          this.send({ t: "tool_result", reqId: req.reqId, status: "denied", note });
+          this.hooks.onDenied(req.jobId, req.tool, cls.reason);
+          this.send({ t: "tool_result", reqId: req.reqId, status: "denied", note: cls.reason });
           break;
         }
-        // --- Phase 1: fetch — executed HERE, in the egress proxy. The
-        // sandbox has no network; the proxy enforces allowlist, outbound
-        // screening, and vault injection, and the screened result rides
-        // back with the authorization.
+
+        if (cls.action === "needs-approval") {
+          // Park: the approval record (with the exact screened
+          // arguments + their hash) is created BEFORE the job parks;
+          // the host presents it on the channel. The runtime's turn
+          // ends here — it cannot wait on, poll, or influence the
+          // resolution.
+          const job = this.jobs.get(req.jobId);
+          let approval: ApprovalRequest;
+          try {
+            approval = this.approvals.create({
+              jobId: req.jobId,
+              conversationId: job?.conversationId ?? "",
+              tool: req.tool,
+              args: req.args,
+              reason: cls.reason,
+            });
+          } catch (e) {
+            const note = `could not park for approval: ${e instanceof Error ? e.message : String(e)}`;
+            this.send({ t: "tool_result", reqId: req.reqId, status: "denied", note });
+            break;
+          }
+          try {
+            this.jobs.transition(req.jobId, "needs-approval", `tool ${req.tool} requires approval: ${cls.reason}`);
+          } catch {
+            /* already parked/settled — the park stands regardless */
+          }
+          this.hooks.onApprovalRequested(approval);
+          this.send({
+            t: "tool_result",
+            reqId: req.reqId,
+            status: "needs_approval",
+            note: `parked for approval ${approval.id}: nothing executed`,
+          });
+          break;
+        }
+
+        // --- allowed: fetch executes HERE, in the egress proxy (Phase
+        // 1). The sandbox has no network; the proxy enforces allowlist,
+        // outbound screening, and vault injection, and the screened
+        // result rides back with the authorization.
         if (req.tool === "fetch") {
           if (!this.fetchGate) {
             const note = "egress proxy is not configured in this control plane";
             this.send({ t: "tool_result", reqId: req.reqId, status: "denied", note });
             break;
           }
-          const r = await this.fetchGate.fetch(
-            {
-              url: String(req.args.url ?? ""),
-              method: typeof req.args.method === "string" ? req.args.method : undefined,
-              headers:
-                req.args.headers && typeof req.args.headers === "object"
-                  ? (req.args.headers as Record<string, string>)
-                  : undefined,
-              body: typeof req.args.body === "string" ? req.args.body : undefined,
-              secretName:
-                typeof req.args.secretName === "string" ? req.args.secretName : undefined,
-            },
-            { jobId: req.jobId },
-          );
+          const r = await this.fetchGate.fetch(fetchArgsFrom(req.args), { jobId: req.jobId });
           if (!r.ok) {
             const note = `egress ${r.verdict}: ${r.note ?? "request refused"}`;
             try {
@@ -219,28 +358,13 @@ export class CommServer {
             this.send({ t: "tool_result", reqId: req.reqId, status: "denied", note });
             break;
           }
-          const summary =
-            `fetch ${String(req.args.url ?? "")} -> HTTP ${r.status ?? "?"}; ` +
-            `body: ${(r.body ?? "").slice(0, 500)}` +
-            (r.note ? `; notes: ${r.note}` : "");
           this.send({
             t: "tool_result",
             reqId: req.reqId,
             status: "authorized",
             note: r.note,
-            result: { ok: true, summary },
+            result: { ok: true, summary: fetchSummary(req.args, r) },
           });
-          break;
-        }
-        const cls = req.declaredClass;
-        if (cls === "destructive" || cls === "external-send" || cls === "pay") {
-          try {
-            this.jobs.transition(req.jobId, "needs-approval", `tool ${req.tool} (${cls}) requires approval`);
-          } catch {
-            /* already parked/settled — authorization still refused */
-          }
-          this.hooks.onParked(req.jobId, req.tool);
-          this.send({ t: "tool_result", reqId: req.reqId, status: "needs_approval", note: "parked by Approval Engine stub (Phase 0): nothing executed" });
           break;
         }
         if (req.tool === "workspace_write") {

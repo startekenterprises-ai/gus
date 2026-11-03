@@ -7,22 +7,31 @@
  * through the CommServer; channels never touch the sandbox directly.
  */
 import { appendFileSync } from "node:fs";
-import type { ChannelAdapter, ChannelEvent } from "@gus/shared";
+import type { ApprovalButton, ChannelAdapter, ChannelEvent } from "@gus/shared";
 import { guardEvent, screenText } from "@gus/shared";
 import { sha256Hex } from "@gus/gate";
 import type { Governor } from "./governor.js";
 import type { JobRunner } from "./jobs.js";
 import type { CommServer } from "./comm-server.js";
+import type { ApprovalEngine, ApprovalRequest } from "./approvals.js";
 
 const SECRET_WARNING = (classes: string[]) =>
   `⚠️ That looked like a secret (${classes.join(", ")}), so I refused it: ` +
   `I didn't forward it to the agent, store it, or put it in any log. ` +
   `If it was real, rotate it now — I can't unsend what other people in this chat may already have seen.`;
 
+/** A post-condition the control plane will verify before a job may
+ *  settle verified-done: a written file's content hash, or the absence
+ *  of deleted files. Set when a write/delete is authorized (directly or
+ *  via approval); checked by fixed runtime code, never by the model. */
+type PendingCheck =
+  | { type: "write"; path: string; expectedDigest: string }
+  | { type: "absent"; paths: string[] };
+
 export class ChannelHost {
   private comm!: CommServer;
   private pendingDeliveries = new Map<string, string>();
-  private pendingWrites = new Map<string, { path: string; expectedDigest: string }>();
+  private pendingChecks = new Map<string, PendingCheck>();
   private lastModelHash = new Map<string, string>();
 
   constructor(
@@ -30,6 +39,7 @@ export class ChannelHost {
     private governor: Governor,
     private jobs: JobRunner,
     private adapters: ChannelAdapter[],
+    private approvals?: ApprovalEngine,
   ) {}
 
   attachComm(comm: CommServer): void {
@@ -52,7 +62,12 @@ export class ChannelHost {
 
   /** All outbound channel text passes egress screening — no exceptions,
    *  including our own static notices. */
-  private async sendTo(adapterName: string, conversationId: string, text: string): Promise<void> {
+  private async sendTo(
+    adapterName: string,
+    conversationId: string,
+    text: string,
+    buttons?: ApprovalButton[],
+  ): Promise<void> {
     const adapter = this.adapters.find((a) => a.name === adapterName) ?? this.adapters[0];
     if (!adapter) return;
     const screened = screenText(text);
@@ -60,16 +75,25 @@ export class ChannelHost {
       ? text
       : "[message withheld by secret-guard: it contained what looked like a secret]";
     if (!screened.clean) this.logEvent("guard.jsonl", guardEvent("egress", screened));
-    await adapter.send({ conversationId, text: out });
+    await adapter.send({ conversationId, text: out, buttons });
   }
 
   private async onEvent(adapterName: string, ev: ChannelEvent): Promise<void> {
     if (ev.type === "button") {
-      // Approval resolution is Phase 2. Presses are acknowledged and
-      // logged; parked jobs stay parked (nothing executes on a press yet).
+      // Phase 2: button presses resolve approvals. The button id IS the
+      // resolution: "approve:<id>" / "deny:<id>", minted by the Approval
+      // Engine when the job parked. A press naming no live approval —
+      // forged, replayed, or stale — resolves nothing and is logged.
       const adapter = this.adapters.find((a) => a.name === adapterName);
-      await adapter?.ackButton?.(ev.press.callbackId, "Approvals land in Phase 2 — job stays parked.");
-      this.logEvent("events.jsonl", { ts: Date.now(), kind: "button_press_phase0", buttonId: ev.press.buttonId });
+      const m = ev.press.buttonId.match(/^(approve|deny):(.+)$/);
+      if (!m) {
+        await adapter?.ackButton?.(ev.press.callbackId, "Unknown button — nothing happened.");
+        this.logEvent("events.jsonl", { ts: Date.now(), kind: "button_unknown", buttonId: ev.press.buttonId });
+        return;
+      }
+      const [, action, id] = m;
+      await adapter?.ackButton?.(ev.press.callbackId, action === "approve" ? "Approved." : "Denied.");
+      await this.resolveApproval(adapterName, ev.press.conversationId, id, action === "approve", "channel-button");
       return;
     }
     const msg = ev.message;
@@ -82,6 +106,15 @@ export class ChannelHost {
     const text = msg.text.trim();
     if (text === "/stop") return this.kill(adapterName, msg.conversationId, `channel:${adapterName}`);
     if (text === "/resume") return this.resume(adapterName, msg.conversationId);
+    // Approval resolution by command — the text fallback for adapters
+    // without buttons. It must name the approval id exactly; a bare
+    // "approve" in chat is just a chat message and resolves NOTHING
+    // (it becomes an ordinary job, below). Resolution is deliberately
+    // impossible to trigger by accident or by the agent's phrasing.
+    const cmd = text.match(/^\/(approve|deny)\s+(\S+)$/);
+    if (cmd) {
+      return this.resolveApproval(adapterName, msg.conversationId, cmd[2], cmd[1] === "approve", "channel-command");
+    }
 
     if (this.governor.isKilled()) {
       await this.sendTo(adapterName, msg.conversationId, "⏹ Kill switch is ON. Nothing is running. Send /resume to bring GUS back.");
@@ -90,9 +123,11 @@ export class ChannelHost {
 
     const kind = /^slow job$/i.test(text)
       ? "slow-demo"
-      : /^fetch\b/i.test(text)
-        ? "fetch-summarize"
-        : "chat";
+      : /^loop spend$/i.test(text)
+        ? "loop-demo"
+        : /^fetch\b/i.test(text)
+          ? "fetch-summarize"
+          : "chat";
     const job = this.jobs.create(kind, msg.conversationId, screened.redacted);
     this.jobs.transition(job.id, "running");
     this.pendingDeliveries.set(job.id, text);
@@ -115,6 +150,95 @@ export class ChannelHost {
     await this.sendTo(adapterName, conversationId, "▶️ Kill switch off. GUS is live.");
   }
 
+  // ---- Phase 2: approval resolution (channel-side ONLY) ----
+
+  /**
+   * Resolve a pending approval from a channel event. This is the ONLY
+   * resolution path in the system: buttons and /approve//deny commands
+   * handled here. The runtime has no equivalent — see comm.ts.
+   */
+  async resolveApproval(
+    adapterName: string,
+    conversationId: string,
+    id: string,
+    approve: boolean,
+    via: string,
+  ): Promise<void> {
+    if (!this.approvals) return;
+    const req = this.approvals.get(id);
+    if (!req || req.status !== "pending") {
+      this.logEvent("events.jsonl", {
+        ts: Date.now(),
+        kind: "approval_resolve_rejected",
+        id,
+        status: req?.status ?? "unknown",
+        via,
+      });
+      await this.sendTo(
+        adapterName,
+        conversationId,
+        `That approval (${id}) is no longer pending${req ? ` — it is ${req.status}` : ""}. Nothing was executed.`,
+      );
+      return;
+    }
+    if (approve && this.governor.isKilled()) {
+      await this.sendTo(
+        adapterName,
+        conversationId,
+        "⏹ Kill switch is ON — approvals cannot execute while GUS is stopped. The request stays parked until it expires.",
+      );
+      return;
+    }
+    try {
+      this.approvals.resolve(id, approve ? "approved" : "denied", via);
+    } catch (e) {
+      await this.sendTo(
+        adapterName,
+        conversationId,
+        `That approval could not be resolved (${e instanceof Error ? e.message : String(e)}). Nothing was executed.`,
+      );
+      return;
+    }
+    this.logEvent("events.jsonl", {
+      ts: Date.now(),
+      kind: approve ? "approval_approved" : "approval_denied",
+      id,
+      jobId: req.jobId,
+      via,
+    });
+    if (!approve) {
+      try {
+        this.jobs.transition(req.jobId, "failed-loudly", `denied by operator: ${req.summary}`);
+      } catch {
+        /* job already settled (kill raced us) — the denial stands */
+      }
+      await this.sendTo(
+        adapterName,
+        conversationId,
+        `🚫 Denied: "${req.summary}". Nothing ran. The job ended as failed-loudly with a receipt.`,
+      );
+      return;
+    }
+    await this.sendTo(adapterName, conversationId, `✅ Approved: "${req.summary}". Executing exactly that now.`);
+    await this.comm.executeApproval(req);
+  }
+
+  /** Approval Engine expiry callback: timeout = deny. The parked job
+   *  settles failed-loudly (with receipt) and the operator hears why. */
+  handleApprovalExpired(req: ApprovalRequest): void {
+    try {
+      this.jobs.transition(req.jobId, "failed-loudly", `approval timed out — treated as denied: ${req.summary}`);
+    } catch {
+      /* job already settled — expiry still recorded on the request */
+    }
+    this.logEvent("events.jsonl", { ts: Date.now(), kind: "approval_expired", id: req.id, jobId: req.jobId });
+    void this.sendTo(
+      this.adapters[0]?.name ?? "telegram",
+      req.conversationId,
+      `⌛ Approval expired (no answer in time = denied): "${req.summary}". Nothing ran. The job ended as failed-loudly with a receipt.`,
+    );
+  }
+
   // ---- callbacks from CommServer ----
 
   onRuntimeHello(): void {
@@ -131,17 +255,52 @@ export class ChannelHost {
   }
 
   noteAuthorizedWrite(jobId: string, path: string, content: string): void {
-    this.pendingWrites.set(jobId, { path, expectedDigest: sha256Hex(content) });
+    this.pendingChecks.set(jobId, { type: "write", path, expectedDigest: sha256Hex(content) });
   }
 
-  onParked(jobId: string, tool: string): void {
+  /** Phase 2: an approved action is about to execute — record the same
+   *  post-condition an authorized one gets, so approval can never become
+   *  a verification bypass. */
+  noteApprovedExecution(jobId: string, tool: string, args: Record<string, unknown>): void {
+    if (tool === "workspace_write") {
+      this.pendingChecks.set(jobId, {
+        type: "write",
+        path: String(args.path ?? ""),
+        expectedDigest: sha256Hex(String(args.content ?? "")),
+      });
+    } else if (tool === "bulk_delete" && Array.isArray(args.paths)) {
+      this.pendingChecks.set(jobId, { type: "absent", paths: args.paths.map(String) });
+    }
+  }
+
+  onApprovalRequested(req: ApprovalRequest): void {
+    const job = this.jobs.get(req.jobId);
+    if (!job) return;
+    const secs = Math.max(1, Math.round((req.expiresAt - Date.now()) / 1000));
+    const buttons: ApprovalButton[] = [
+      { id: `approve:${req.id}`, label: "✅ Approve" },
+      { id: `deny:${req.id}`, label: "🚫 Deny" },
+    ];
+    void this.sendTo(
+      this.adapters[0]?.name ?? "telegram",
+      job.conversationId,
+      `⏸ Job parked — this needs your approval before anything runs: "${req.summary}". ` +
+        `Why: ${req.reason}. Nothing was executed. ` +
+        `Tap Approve/Deny, or reply /approve ${req.id} or /deny ${req.id}. ` +
+        `No answer within ${secs}s counts as a denial.`,
+      buttons,
+    );
+  }
+
+  onCapExceeded(jobId: string, detail: string): void {
     const job = this.jobs.get(jobId);
     if (!job) return;
     void this.sendTo(
       this.adapters[0]?.name ?? "telegram",
       job.conversationId,
-      `⏸ Job parked: "${tool}" needs your approval before anything runs. Nothing was executed. (Approval resolution lands in Phase 2.)`,
-      );
+      `💸 Governor cap reached — the job was stopped by the spend ceiling, not by the agent: ${detail}. ` +
+        `It ended as failed-loudly with a receipt; the ledger shows every charge.`,
+    );
   }
 
   onDenied(jobId: string, tool: string, note: string): void {
@@ -173,8 +332,8 @@ export class ChannelHost {
 
     let verified = false;
     let note: string;
-    const pending = this.pendingWrites.get(jobId);
-    if (pending) {
+    const pending = this.pendingChecks.get(jobId);
+    if (pending && pending.type === "write") {
       const v = await this.comm.verify(jobId, {
         tool: "workspace_read",
         args: { path: pending.path },
@@ -183,7 +342,17 @@ export class ChannelHost {
       note = verified
         ? "post-condition ok: workspace file content hash matches the authorized write"
         : "post-condition FAILED: workspace file hash mismatch or unreadable";
-      this.pendingWrites.delete(jobId);
+      this.pendingChecks.delete(jobId);
+    } else if (pending && pending.type === "absent") {
+      const v = await this.comm.verify(jobId, {
+        tool: "workspace_absent",
+        args: { paths: pending.paths },
+      });
+      verified = v.ok;
+      note = verified
+        ? `post-condition ok: approved deletion verified — ${pending.paths.length} file(s) are absent`
+        : "post-condition FAILED: a file approved for deletion is still present";
+      this.pendingChecks.delete(jobId);
     } else {
       verified = this.lastModelHash.get(jobId) === sha256Hex(text);
       note = verified

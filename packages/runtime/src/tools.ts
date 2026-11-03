@@ -12,7 +12,7 @@
  * root; `..` escapes and absolute paths outside it are refused.
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve, sep } from "node:path";
 
 export function sha256Hex(text: string): string {
@@ -48,6 +48,21 @@ export class Workspace {
   digest(path: string): string {
     return sha256Hex(this.read(path));
   }
+
+  exists(path: string): boolean {
+    return existsSync(this.jail(path));
+  }
+
+  /** Delete one file inside the jail. Returns true if a file was
+   *  removed, false if it was already absent. Escapes throw, exactly
+   *  like every other jail operation — an approval (Phase 2) authorizes
+   *  the ACTION; it never widens the jail. */
+  delete(path: string): boolean {
+    const full = this.jail(path);
+    if (!existsSync(full)) return false;
+    unlinkSync(full);
+    return true;
+  }
 }
 
 export interface ToolOutcome {
@@ -74,6 +89,34 @@ export async function executeTool(
     case "workspace_read": {
       const content = ws.read(String(args.path));
       return { ok: true, summary: `read ${String(args.path)} (${content.length} chars)` };
+    }
+    case "bulk_delete": {
+      // Only ever runs after control-plane authorization — in practice
+      // after an operator approval bound to these exact paths (the
+      // classifier parks destructive calls by construction). Deletes
+      // exactly the listed paths, inside the jail, nothing else.
+      const paths = Array.isArray(args.paths) ? args.paths.map(String) : [];
+      if (paths.length === 0) {
+        return { ok: false, summary: "bulk_delete refused: no concrete paths in the approved arguments" };
+      }
+      const removed: string[] = [];
+      const absent: string[] = [];
+      for (const p of paths) {
+        if (signal.aborted) return { ok: false, summary: `bulk_delete aborted by kill switch after ${removed.length} deletion(s)` };
+        if (ws.delete(p)) removed.push(p);
+        else absent.push(p);
+      }
+      return {
+        ok: true,
+        summary: `deleted ${removed.length} file(s) [${removed.join(", ")}]${absent.length ? `; already absent: [${absent.join(", ")}]` : ""}`,
+      };
+    }
+    case "loop_charge": {
+      // Phase 2 runaway-drill vehicle: one paid model call per turn hop,
+      // forever. The tool itself is free and instant — the SPEND is the
+      // model calls the loop provokes, and stopping it is the
+      // Governor's job, not this tool's and not the model's.
+      return { ok: true, summary: "LOOP_TICK charged." };
     }
     case "slow_work": {
       const steps = Number(args.steps ?? 60);

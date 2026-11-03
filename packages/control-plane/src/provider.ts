@@ -11,6 +11,13 @@
  * - "write file <path> <content...>"  -> workspace_write tool call
  * - "read file <path>"                -> workspace_read tool call
  * - "delete <n> files"                -> bulk_delete tool call (destructive)
+ * - "delete files <p1> <p2> ..."      -> bulk_delete with concrete paths
+ *   (Phase 2: the approval drill vehicle — approve/deny/replay all need
+ *   exact, checkable arguments)
+ * - "loop spend"                      -> loop_charge tool call, repeated
+ *   forever on every TOOL_RESULT (Phase 2 runaway drill vehicle: an
+ *   agent loop that will issue paid model calls until something OUTSIDE
+ *   the model stops it — that something is the Governor)
  * - "slow job"                        -> slow_work tool call (kill drill)
  * - "fetch <url>"                     -> fetch tool call (egress proxy)
  * - "fetch auth <url> with <name>"    -> fetch with a vault secret NAME
@@ -43,6 +50,14 @@ export function fakeComplete(prompt: string): ProviderReply {
   const p = prompt.trim();
 
   if (p.startsWith("TOOL_RESULT")) {
+    if (p.startsWith("TOOL_RESULT loop_charge:")) {
+      // The runaway loop: never satisfied, never stops on its own. Only
+      // the Governor's cap (or the kill switch) ends this job — which is
+      // exactly the Phase 2 drill's point.
+      return {
+        toolCall: { tool: "loop_charge", declaredClass: "read", args: {} },
+      };
+    }
     const post = p.match(/FOLLOWUP_FETCH_POST\s+(\S+)\s+::\s*([\s\S]+)/);
     if (post) {
       return {
@@ -82,6 +97,19 @@ export function fakeComplete(prompt: string): ProviderReply {
         args: { count: Number(m[1]) },
       },
     };
+  }
+  m = p.match(/^delete\s+files?\s+(\S+(?:\s+\S+)*)$/i);
+  if (m) {
+    return {
+      toolCall: {
+        tool: "bulk_delete",
+        declaredClass: "destructive",
+        args: { paths: m[1].split(/\s+/) },
+      },
+    };
+  }
+  if (/^loop spend$/i.test(p)) {
+    return { toolCall: { tool: "loop_charge", declaredClass: "read", args: {} } };
   }
   if (/^slow job$/i.test(p)) {
     return { toolCall: { tool: "slow_work", declaredClass: "read", args: { steps: 60 } } };

@@ -33,6 +33,7 @@ export type JobKind =
   | "workspace-file" // v1 job type 3
   | "reminder" // v1 job type 4
   | "slow-demo" // Phase 0 drill vehicle: a long-running job for the kill test
+  | "loop-demo" // Phase 2 drill vehicle: an unbounded paid-call loop for the runaway-cap test
   | "canary"
   | "update";
 

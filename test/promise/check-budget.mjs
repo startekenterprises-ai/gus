@@ -27,7 +27,7 @@ if (limits.length < 2 || declared > BUDGET_MB) {
   failed = true;
 }
 
-for (const phase of ["phase0", "phase1"]) {
+for (const phase of ["phase0", "phase1", "phase2"]) {
   const metricsPath = join(root, "drill", phase, "metrics.json");
   if (existsSync(metricsPath)) {
     const m = JSON.parse(readFileSync(metricsPath, "utf8"));

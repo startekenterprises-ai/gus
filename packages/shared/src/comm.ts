@@ -115,5 +115,22 @@ export type ControlMessage =
       jobId: string;
       check: { tool: string; args: Record<string, unknown> };
     }
+  | {
+      /** Phase 2: execute a tool call the operator approved on the
+       *  channel. Carries the EXACT approved arguments from the Approval
+       *  Engine's durable record — never anything the runtime composed.
+       *  The approval itself was consumed by the control plane before
+       *  this message was sent (single-use). When the control plane
+       *  executed the tool itself (fetch runs in the egress proxy), the
+       *  outcome travels in `result` and the runtime executes nothing.
+       *  Note the asymmetry, by design: there is NO runtime->control
+       *  message that requests, extends, or resolves an approval. The
+       *  sandbox can be parked; it can never unpark itself. */
+      t: "approved_execution";
+      jobId: string;
+      tool: string;
+      args: Record<string, unknown>;
+      result?: { ok: boolean; summary: string };
+    }
   | { t: "kill" }
   | { t: "resume" };

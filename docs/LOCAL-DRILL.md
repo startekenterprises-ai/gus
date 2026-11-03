@@ -91,3 +91,35 @@ further substitutions to know about when reading its evidence:
 - The podman vfs store on this VM's 2 GB `/var/tmp` tmpfs fills fast
   (every layer is a full copy): remove stale `gus-*` images before
   rebuilding, and `podman image prune` between build rounds.
+
+# Phase 2 additions (Yue drill + runaway-cap drill)
+
+`test/promise/phase2-drill.sh` runs on the same vehicle and the same
+drill-entry test world as Phase 1. Phase-2-specific notes:
+
+- **Three more operator state files** join the drill's state dir:
+  `policy.json` (approval policy: bulk threshold, 12 s approval timeout
+  chosen so the timeout section runs in drill time), `governor.json`
+  (caps + price table; the drill rewrites it mid-run to tighten the
+  per-task cap to $0.50 for the runaway section — legal because the
+  Governor re-reads its config on every authorization, which is also
+  how a real operator edit takes effect), and the stores the code
+  creates (`approvals.jsonl`, `ledger.jsonl`).
+- **The harness plays the operator on the real channel path:**
+  approvals are resolved by appending Bot API-shaped `callback_query`
+  updates (button presses) and `/approve <id>` message updates to the
+  fake transport's inbound file — the same adapter parsing production
+  uses. The Phase 1 drill gained the same helper: fetches naming a
+  vault secret park under Phase 2 policy, so its harness now approves
+  them before the original assertions run (all 29 Phase 1 checks are
+  unchanged and green).
+- **Exact cap arithmetic:** the stub provider is deterministic, so the
+  comm server computes a call's exact tokens before authorizing;
+  reservation estimate == settlement. The runaway section asserts from
+  the ledger file itself: settled total $0.484 ≤ $0.50 cap, and
+  $0.484 + the $0.05 steady per-call cost > $0.50 — the refused call is
+  provably the first that would have exceeded the cap.
+- **The runtime hop ceiling was raised 6 → 1000** as part of Phase 2:
+  a hop counter is not the spend brake (the Governor is), and the
+  runaway drill needs a loop that only the cap can stop. The ceiling
+  remains as a liveness backstop.

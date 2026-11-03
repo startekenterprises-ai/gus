@@ -46,12 +46,31 @@ function request<T extends ControlMessage>(req: RuntimeRequest, match: (m: Contr
   });
 }
 
+/**
+ * Turn hop ceiling. Raised from the Phase 0 value of 6 in Phase 2 —
+ * deliberately: a hop counter is NOT the spend brake. The Governor's
+ * caps (control plane, outside this sandbox) are the brake, and the
+ * runaway drill proves a loop dies at the cap, not at an arbitrary
+ * iteration count. The ceiling remains only as a liveness backstop.
+ */
+const MAX_HOPS = 1000;
+
 async function runTurn(jobId: string, text: string): Promise<void> {
   const signal = { aborted: killed };
   currentTurn = { jobId, signal };
   try {
-    let prompt = text;
-    for (let hop = 0; hop < 6; hop++) {
+    await driveLoop(jobId, text, signal);
+  } finally {
+    if (currentTurn?.jobId === jobId) currentTurn = null;
+  }
+}
+
+/** The turn loop proper: model -> authorize -> execute -> report ->
+ *  model(TOOL_RESULT ...) -> ... -> job_final. Shared by fresh turns
+ *  and by continuations after an approved execution (Phase 2). */
+async function driveLoop(jobId: string, initialPrompt: string, signal: { aborted: boolean }): Promise<void> {
+    let prompt = initialPrompt;
+    for (let hop = 0; hop < MAX_HOPS; hop++) {
       if (signal.aborted) {
         send({ t: "job_update", jobId, note: "aborted:killed" });
         return;
@@ -120,9 +139,6 @@ async function runTurn(jobId: string, text: string): Promise<void> {
       }
     }
     send({ t: "job_update", jobId, note: "turn hop limit reached" });
-  } finally {
-    if (currentTurn?.jobId === jobId) currentTurn = null;
-  }
 }
 
 function onMessage(m: ControlMessage): void {
@@ -134,6 +150,45 @@ function onMessage(m: ControlMessage): void {
     case "user_message":
       void runTurn(m.jobId, m.text);
       break;
+    case "approved_execution": {
+      // Phase 2: the operator approved this exact action on the channel
+      // and the control plane consumed the approval before sending
+      // this. Execute the STORED arguments (or take the control plane's
+      // own outcome for proxy-executed tools), report, and continue the
+      // job's turn from the tool result so the job can settle through
+      // the normal verification path. The runtime can receive this
+      // message; it has no way to send anything resembling it.
+      void (async () => {
+        const signal = { aborted: killed };
+        currentTurn = { jobId: m.jobId, signal };
+        try {
+          let outcome: { ok: boolean; summary: string };
+          if (m.result) {
+            outcome = m.result;
+          } else {
+            try {
+              outcome = await executeTool(ws, m.tool, m.args, signal, () =>
+                send({ t: "heartbeat", jobId: m.jobId }),
+              );
+            } catch (e) {
+              outcome = {
+                ok: false,
+                summary: `tool error: ${e instanceof Error ? e.message : String(e)}`,
+              };
+            }
+          }
+          send({ t: "tool_report", reqId: `tr${++seq}`, jobId: m.jobId, ok: outcome.ok, summary: outcome.summary });
+          if (signal.aborted) {
+            send({ t: "job_update", jobId: m.jobId, note: "aborted:killed" });
+            return;
+          }
+          await driveLoop(m.jobId, `TOOL_RESULT ${m.tool}: ${outcome.summary}`, signal);
+        } finally {
+          if (currentTurn?.jobId === m.jobId) currentTurn = null;
+        }
+      })();
+      break;
+    }
     case "kill":
       killed = true;
       if (currentTurn) currentTurn.signal.aborted = true;
@@ -148,6 +203,11 @@ function onMessage(m: ControlMessage): void {
         if (m.check.tool === "workspace_read") {
           const digest = ws.digest(String(m.check.args.path));
           send({ t: "verify_result", reqId: m.reqId, ok: true, digest });
+        } else if (m.check.tool === "workspace_absent") {
+          // Deletion post-condition: every approved path must be gone.
+          const paths = Array.isArray(m.check.args.paths) ? m.check.args.paths.map(String) : [];
+          const absent = paths.every((p) => !ws.exists(p));
+          send({ t: "verify_result", reqId: m.reqId, ok: absent, note: absent ? "all absent" : "some present" });
         } else {
           send({ t: "verify_result", reqId: m.reqId, ok: false, note: `no checker for ${m.check.tool}` });
         }
