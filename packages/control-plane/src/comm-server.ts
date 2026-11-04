@@ -19,6 +19,7 @@ import { canonicalize, type ApprovalEngine, type ApprovalRequest } from "./appro
 import { estimateTokens, fakeComplete, FAKE_MODEL_NAME } from "./provider.js";
 import { stubCompletion, type Provider } from "./providers.js";
 import { isGmailTool } from "./gmail.js";
+import { isMacTool } from "./mac.js";
 
 export interface HostHooks {
   onRuntimeHello(): void;
@@ -72,6 +73,22 @@ export interface FetchGate {
  * the sandbox, which only ever receives the verified outcome.
  */
 export interface GmailGate {
+  execute(
+    jobId: string,
+    tool: string,
+    args: Record<string, unknown>,
+  ): Promise<{ ok: boolean; summary: string; refused?: boolean }>;
+}
+
+/**
+ * The Mac gate the comm server delegates `mac_*` tool calls to
+ * (Phase 7). Structurally the MacService (mac.ts); declared here for
+ * the same reason as the GmailGate: the comm layer depends on the
+ * contract, not the pack. Like gmail, mac executes HERE — the sandbox
+ * has no desktop to drive, and only ever receives the verified
+ * outcome.
+ */
+export interface MacGate {
   execute(
     jobId: string,
     tool: string,
@@ -141,6 +158,10 @@ export class CommServer {
      *  wiring constructs without it; gmail calls then refuse plainly
      *  ("pack not configured") instead of ever reaching the runtime. */
     private gmailGate?: GmailGate,
+    /** Phase 7: the Mac pack's executor. Same optionality contract
+     *  as the GmailGate: absent = plain refusal, never a path to the
+     *  runtime. */
+    private macGate?: MacGate,
   ) {}
 
   async start(): Promise<void> {
@@ -305,6 +326,37 @@ export class CommServer {
         return;
       }
       const r = await this.gmailGate.execute(approval.jobId, approval.tool, approval.args);
+      if (r.refused) {
+        try {
+          this.jobs.transition(approval.jobId, "failed-loudly", r.summary);
+        } catch { /* settled already */ }
+        this.hooks.onDenied(approval.jobId, approval.tool, r.summary);
+        return;
+      }
+      this.send({
+        t: "approved_execution",
+        jobId: approval.jobId,
+        tool: approval.tool,
+        args: approval.args,
+        result: r,
+      });
+      return;
+    }
+    if (isMacTool(approval.tool)) {
+      // Phase 7: an approved mac action executes HERE, in the
+      // control plane, through the host adapter, with the EXACT
+      // stored arguments — the sandbox has no desktop to drive, and
+      // the verified outcome rides back with the approved_execution,
+      // like an approved gmail action.
+      if (!this.macGate) {
+        const note = "the Mac pack is not configured in this control plane";
+        try {
+          this.jobs.transition(approval.jobId, "failed-loudly", note);
+        } catch { /* settled already */ }
+        this.hooks.onDenied(approval.jobId, approval.tool, note);
+        return;
+      }
+      const r = await this.macGate.execute(approval.jobId, approval.tool, approval.args);
       if (r.refused) {
         try {
           this.jobs.transition(approval.jobId, "failed-loudly", r.summary);
@@ -651,6 +703,43 @@ export class CommServer {
           // Otherwise the outcome rides back as the result — including
           // a Shield-withheld read (ok:false), exactly like a blocked
           // fetch result: the job continues, the content never crossed.
+          this.send({
+            t: "tool_result",
+            reqId: req.reqId,
+            status: "authorized",
+            result: r,
+          });
+          break;
+        }
+        // --- Phase 7: mac_* executes HERE, in the control plane,
+        // like gmail (the sandbox has no desktop to drive). The
+        // service enforces the fs/shell jail, Shield-scans what
+        // crosses back toward the model, secret-guards typed text,
+        // and verifies every post-condition before its summary
+        // rides back with the authorization.
+        if (isMacTool(req.tool)) {
+          if (!this.macGate) {
+            const note = "the Mac pack is not configured in this control plane";
+            this.send({ t: "tool_result", reqId: req.reqId, status: "denied", note });
+            break;
+          }
+          const r = await this.macGate.execute(req.jobId, req.tool, req.args);
+          if (r.refused) {
+            // Hard refusal (jail escape at execution, secret-guard,
+            // adapter failure, unverifiable post-condition): the
+            // egress-refusal shape — terminal, receipted, loud.
+            try {
+              this.jobs.transition(req.jobId, "failed-loudly", r.summary);
+            } catch {
+              /* already settled/parked — refusal stands regardless */
+            }
+            this.hooks.onDenied(req.jobId, req.tool, r.summary);
+            this.send({ t: "tool_result", reqId: req.reqId, status: "denied", note: r.summary });
+            break;
+          }
+          // A Shield-withheld observation/read (ok:false) rides back
+          // as the result, like a blocked fetch: the job continues,
+          // the content never crossed.
           this.send({
             t: "tool_result",
             reqId: req.reqId,

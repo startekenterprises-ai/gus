@@ -203,6 +203,14 @@ that belong to the maintainer, not more foundation code. Per-phase
 build detail and drill evidence live in `docs/LOCAL-DRILL.md` and the
 `drill/` evidence logs.
 
+Two capability packs have landed on the foundation since: the Gmail
+pack (Phase 6 — mail under the same classify/approve/verify model,
+with the Yue rule in code), and the Mac-control pack (Phase 7 — a
+resident Mac GUS can observe and drive, with approved work-directory
+and shell-allowlist jails, shipped Nova policy defaults, and launchd
+host artifacts; see `docs/mac-resident.md`). The native Mac host
+bridge and its acceptance drill land with the first resident install.
+
 ## License
 
 Apache-2.0 — see `LICENSE` and `NOTICE`. "GUS" and the product

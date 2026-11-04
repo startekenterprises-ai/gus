@@ -53,6 +53,7 @@ import { Updater } from "./updater.js";
 import { runVaultAdmin } from "./vault-admin.js";
 import { loadProviderConfig, resolveProvider } from "./providers.js";
 import { GmailDirectory, GmailService, HttpGmailTransport, runGmailAdmin } from "./gmail.js";
+import { MacService, UnavailableMacHostAdapter } from "./mac.js";
 import { Onboarding, DIGEST_PROMPT, TELEGRAM_SECRET_NAME } from "./onboarding.js";
 import { SkillInstaller } from "./skills.js";
 import { startHeartbeat } from "./heartbeat.js";
@@ -149,6 +150,19 @@ const gmail = new GmailService(new HttpGmailTransport(vault), {
   vault,
 });
 
+// Phase 7: the Mac-control pack. Executes in this process (like the
+// Gmail pack): the classifier applies the Nova Always/Once model, the
+// service enforces the fs/shell jail from the policy's mac section,
+// and every executed action verifies its post-condition against the
+// host. The host adapter is the residency install's seam — until the
+// native bridge lands (docs/mac-resident.md), the unavailable adapter
+// refuses every mac_* execution plainly and loudly.
+const mac = new MacService(new UnavailableMacHostAdapter(), {
+  workDirs: () => policy.load().mac.workDirs,
+  shield: shieldGate,
+  vault,
+});
+
 const host = new ChannelHost(stateDir, governor, jobs, [adapter], approvals, shieldGate);
 approvals.onExpire = (req) => host.handleApprovalExpired(req);
 const comm = new CommServer(socketPath, governor, jobs, {
@@ -163,7 +177,7 @@ const comm = new CommServer(socketPath, governor, jobs, {
   onJobFinal: (jobId, text) => host.onJobFinal(jobId, text),
   logRuntime: (level, text) =>
     appendFileSync(`${stateDir}/runtime-log.jsonl`, JSON.stringify({ ts: Date.now(), level, text }) + "\n"),
-}, policy, approvals, egress, shieldGate, () => resolveProvider(stateDir, vault), gmail);
+}, policy, approvals, egress, shieldGate, () => resolveProvider(stateDir, vault), gmail, mac);
 host.attachComm(comm);
 
 // Phase 3: the Updater. Constructed always (its queries power

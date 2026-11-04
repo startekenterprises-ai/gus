@@ -25,6 +25,12 @@
  *      generic class floor, because Always must be able to cover
  *      in-scope thread replies while the hard lines still park every
  *      delete, bulk action, and first-time send.
+ *   2c. Phase 7: mac_* tools are classified by classifyMac — the Mac
+ *      pack's permission model (the shipped Nova template's Always set
+ *      in code + policy data: observation, app/window focus, fs inside
+ *      the approved work dirs, allowlisted shell in those dirs;
+ *      everything else is a Once). It runs in the same slot for the
+ *      same reason, and it applies the declared-class floor itself.
  *   3. Built-in approval triggers: destructive / external-send / pay
  *      class floor; credential use (fetch naming a vault secret);
  *      writes whose path escapes the workspace jail; bulk operations
@@ -48,6 +54,12 @@ import {
   isGmailTool,
   normalizeAddress,
 } from "./gmail.js";
+import {
+  classifyShellCommand,
+  isMacTool,
+  macJailContains,
+  macResolveJailed,
+} from "./mac.js";
 
 export type PolicyAction = "allow" | "deny" | "needs-approval";
 
@@ -117,6 +129,17 @@ export interface PolicyData {
    *  scopes: group name → addresses and/or domains ("@example.com"
    *  or "example.com" entries match by domain). */
   groups: Record<string, string[]>;
+  /** Phase 7: the Mac pack's operator data — the approved work
+   *  directories (the fs/shell jail) and the shell allowlist. Empty
+   *  defaults are strict: no work dirs = every mac fs path and shell
+   *  cwd is outside the jail, so those calls park. */
+  mac: MacPolicyData;
+}
+
+/** Phase 7 policy data for the Mac-control pack (mac.ts). */
+export interface MacPolicyData {
+  workDirs: string[];
+  shellAllowlist: string[];
 }
 
 export const DEFAULT_POLICY: PolicyData = {
@@ -127,6 +150,7 @@ export const DEFAULT_POLICY: PolicyData = {
   shield: { ...DEFAULT_SHIELD_POLICY },
   standingApprovals: [],
   groups: {},
+  mac: { workDirs: [], shellAllowlist: [] },
 };
 
 export interface ToolCallShape {
@@ -235,6 +259,20 @@ function parseGroups(raw: unknown): Record<string, string[]> {
   return out;
 }
 
+/** Parse the Phase 7 mac section defensively: non-string entries are
+ *  dropped, and a missing section is the strict empty default — a
+ *  typo in the operator's file must fail toward prompting, never
+ *  toward a wider jail or a longer allowlist. */
+function parseMac(raw: unknown): MacPolicyData {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { workDirs: [], shellAllowlist: [] };
+  }
+  const m = raw as Partial<MacPolicyData>;
+  const strings = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && x.length > 0) : [];
+  return { workDirs: strings(m.workDirs), shellAllowlist: strings(m.shellAllowlist) };
+}
+
 export class PolicyStore {
   constructor(
     private policyPath: string,
@@ -259,6 +297,7 @@ export class PolicyStore {
           shield: parseShield(raw.shield),
           standingApprovals: parseStandingApprovals(raw.standingApprovals),
           groups: parseGroups(raw.groups),
+          mac: parseMac(raw.mac),
         };
       }
     } catch {
@@ -451,6 +490,118 @@ export class PolicyStore {
   }
 
   /**
+   * Phase 7 classification for mac_* tools — the Mac pack's
+   * permission model, mirroring the scope's Nova policy defaults:
+   *
+   *   Always (proceed): mac.observe; mac.open_app / mac.focus_window;
+   *   mac.fs.read / mac.fs.write whose path resolves inside the
+   *   operator's approved work dirs; mac.shell.run commands that are
+   *   allowlisted end-to-end AND run in a work dir.
+   *   Once (park): all input injection (click / type / key / scroll /
+   *   picker) — driving another app's UI is approved per exact
+   *   action until the receipt history earns more; fs paths outside
+   *   the jail (the jail still applies at execution); shell that is
+   *   non-allowlisted, chained past the allowlist, destructive,
+   *   deleting, installing, publishing, or credential-adjacent
+   *   (classifyShellCommand, mac.ts — deletes park under the Yue
+   *   rule and are never allowlist-coverable).
+   *
+   * The declared-class floor is applied first, here, because this
+   * branch replaces the generic step-3 triggers for mac tools: a
+   * call the runtime declares destructive / external-send / pay
+   * parks whatever the tool is. Never (deny rules) already won in
+   * classify() before this branch is reached.
+   */
+  private classifyMac(call: ToolCallShape, policy: PolicyData): Classification {
+    const { tool, declaredClass, args } = call;
+    const park = (reason: string, effectiveClass: ToolClass = declaredClass): Classification => ({
+      action: "needs-approval",
+      effectiveClass,
+      reason,
+    });
+
+    if (declaredClass === "destructive" || declaredClass === "external-send" || declaredClass === "pay") {
+      return park(
+        `${declaredClass} actions always need operator approval (policy v${policy.version}) — the declared class is a floor the Mac pack cannot classify below`,
+      );
+    }
+
+    switch (tool) {
+      case "mac.observe":
+        return {
+          action: "allow",
+          effectiveClass: "read",
+          reason: "mac observation (read class): the desktop view is Shield-scanned in the control plane before it can reach the model",
+        };
+      case "mac.open_app":
+      case "mac.focus_window":
+        return {
+          action: "allow",
+          effectiveClass: "write",
+          reason: `${tool === "mac.open_app" ? "opening an app" : "focusing a window"} on the resident Mac (the Nova policy's always set); the service verifies the front app afterwards`,
+        };
+      case "mac.fs.read":
+      case "mac.fs.write": {
+        const raw = typeof args.path === "string" ? args.path : "";
+        if (!raw) {
+          return park(`${tool} names no path — a file approval must name the exact file it touches`);
+        }
+        const resolved = macResolveJailed(raw, policy.mac.workDirs);
+        if (resolved !== null) {
+          return {
+            action: "allow",
+            effectiveClass: tool === "mac.fs.read" ? "read" : "write",
+            reason: `${tool} inside an approved work directory (${resolved}) — the pack jail holds at execution`,
+          };
+        }
+        if (policy.mac.workDirs.length === 0) {
+          return park(
+            `${tool} path "${raw}" cannot be jailed: the policy names no approved Mac work directories — file access parks until the operator sets mac.workDirs`,
+            "destructive",
+          );
+        }
+        return park(
+          `${tool} path "${raw}" is outside the approved Mac work directories — approval required (the pack jail still applies at execution)`,
+          "destructive",
+        );
+      }
+      case "mac.shell.run": {
+        const command = typeof args.command === "string" ? args.command : "";
+        if (!command.trim()) {
+          return park("mac.shell.run names no command — a shell approval must name exactly what runs", "destructive");
+        }
+        const workDirs = policy.mac.workDirs;
+        const cwdRaw = typeof args.cwd === "string" && args.cwd ? args.cwd : (workDirs[0] ?? "");
+        const cwdOk =
+          cwdRaw !== "" &&
+          macJailContains(cwdRaw.startsWith("/") ? cwdRaw : `${workDirs[0] ?? ""}/${cwdRaw}`, workDirs);
+        if (!cwdOk) {
+          return park(
+            `mac.shell.run working directory "${cwdRaw || "(none)"}" is outside the approved Mac work directories — shell runs only inside the jail`,
+            "destructive",
+          );
+        }
+        const verdict = classifyShellCommand(command, policy.mac.shellAllowlist);
+        if (verdict.action === "allow") {
+          return { action: "allow", effectiveClass: "write", reason: verdict.reason };
+        }
+        return park(verdict.reason, verdict.severity);
+      }
+      case "mac.click":
+      case "mac.type":
+      case "mac.key":
+      case "mac.scroll":
+      case "mac.picker.select":
+        return park(
+          `${tool} injects input into the live desktop — input injection always needs a one-time approval bound to the exact target/text (Phase 7: driving other apps' UIs is Once until the receipt history earns more)`,
+          "write",
+        );
+      default:
+        return park(`unrecognized mac tool "${tool}" — parked by default`, declaredClass);
+    }
+  }
+
+  /**
    * Operator-surface write of the Shield section (onboarding records
    * the provisioning + the operator's fail-mode choice here). Merges
    * into the existing file so hand-authored rules survive; creates the
@@ -499,6 +650,13 @@ export class PolicyStore {
     // own classifier decides the rest for gmail_* tools.
     if (isGmailTool(tool)) {
       return this.classifyGmail(call, policy);
+    }
+
+    // 2c. Phase 7: the Mac pack's permission model (the Nova Always
+    // set vs Once-parks, with the declared-class floor applied inside
+    // classifyMac). Never already won above.
+    if (isMacTool(tool)) {
+      return this.classifyMac(call, policy);
     }
 
     // 3. Built-in approval triggers.

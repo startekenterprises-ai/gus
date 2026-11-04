@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  GUS control plane — launchd agent template (Phase 7, Mac resident).
+
+  install.sh renders the __PLACEHOLDERS__ into
+  ~/Library/LaunchAgents/com.startekenterprises.gus.control-plane.plist.
+  The control plane holds the vault, the Governor ledger, the policy
+  file, and the approval store. It is the ONLY GUS process that may
+  hold secrets; the runtime agent (its own plist) holds none.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.startekenterprises.gus.control-plane</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE_BIN__</string>
+    <string>__REPO_DIR__/packages/control-plane/dist/main.js</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO_DIR__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    <key>GUS_STATE_DIR</key>
+    <string>__STATE_DIR__</string>
+    <key>GUS_COMM_SOCKET</key>
+    <string>__COMM_DIR__/gus.sock</string>
+    <!-- Approvals ride Telegram. The bot token is NOT here: it lives
+         in the vault (stored via the setup wizard as telegram-bot)
+         or, failing that, in GUS_TELEGRAM_BOT_TOKEN set by hand. -->
+    <key>GUS_CHANNEL</key>
+    <string>telegram</string>
+  </dict>
+
+  <!-- Start at login, restart on exit — a resident agent is boring
+       about being up. Crashes surface in the log + the boot sweep,
+       never as a silently absent agent. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>__STATE_DIR__/logs/control-plane.log</string>
+  <key>StandardErrorPath</key>
+  <string>__STATE_DIR__/logs/control-plane.log</string>
+</dict>
+</plist>

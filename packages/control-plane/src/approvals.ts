@@ -136,6 +136,39 @@ export function describeAction(tool: string, args: Record<string, unknown>): str
       const to = gmailRecipients(args);
       return `Create a Gmail draft to ${to.join(", ") || "(no recipients named)"} — subject "${String(args.subject ?? "")}" (draft only, not sent)`;
     }
+    // Phase 7 (Mac pack): summaries name the exact app, target,
+    // path, or command — an operator approving from a phone must be
+    // able to see precisely what their tap will do on the Mac.
+    case "mac.observe":
+      return "Observe the Mac desktop (front app, window, focused element, accessibility text) — read-only";
+    case "mac.click": {
+      const target =
+        typeof args.element === "string" && args.element
+          ? `element "${args.element}"`
+          : `point (${String(args.x ?? "?")}, ${String(args.y ?? "?")})`;
+      return `Click ${target} on the Mac`;
+    }
+    case "mac.type": {
+      const text = String(args.text ?? "");
+      const preview = text.length > 60 ? `${text.slice(0, 60)}…` : text;
+      return `Type ${text.length} chars into the focused Mac app: ${JSON.stringify(preview)}`;
+    }
+    case "mac.key":
+      return `Press key "${String(args.combo ?? args.key ?? "?")}" on the Mac`;
+    case "mac.scroll":
+      return `Scroll ${String(args.direction ?? "?")} by ${String(args.amount ?? "?")} on the Mac`;
+    case "mac.open_app":
+      return `Open the app "${String(args.app ?? "?")}" on the Mac`;
+    case "mac.focus_window":
+      return `Focus ${typeof args.title === "string" && args.title ? `the window "${args.title}"` : `the app "${String(args.app ?? "?")}"`} on the Mac`;
+    case "mac.fs.read":
+      return `Read the Mac file "${String(args.path ?? "?")}"`;
+    case "mac.fs.write":
+      return `Write the Mac file "${String(args.path ?? "?")}" (${String(args.content ?? "").length} chars)`;
+    case "mac.shell.run":
+      return `Run a shell command on the Mac in ${String(args.cwd ?? "(default work dir)")}: ${String(args.command ?? "?")}`;
+    case "mac.picker.select":
+      return `Select "${String(args.path ?? "?")}" in the Mac file picker`;
     default:
       return `Run ${tool} with ${canonicalize(args).slice(0, 200)}`;
   }
