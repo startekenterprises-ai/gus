@@ -1,0 +1,33 @@
+// swift-tools-version: 5.9
+//
+// GUS.app + GusMacHost (Phase 8) — the native Mac side of GUS.
+//
+// Two executables, no third-party dependencies:
+//   - GusMacHost: the long-lived helper behind the control plane's
+//     MacHostAdapter seam. Newline-delimited JSON over a unix socket
+//     (~/.gus/comm/mac-host.sock); Accessibility for observe/click/
+//     focus, CGEvent for input, ScreenCaptureKit for screenshots.
+//   - GUS: the menu-bar app shell. It launches GusMacHost from inside
+//     the bundle (so Accessibility / Screen Recording grants attach
+//     to GUS.app), shows status, starts/stops the launchd agents,
+//     and hosts the first-run permissions window.
+//
+// Deployment target macOS 14 (the resident iMac runs Sequoia via
+// OpenCore; nothing here needs a macOS 15-only API).
+//
+// Build on a Mac with:  swift build -c release
+// Package a DMG with:   ./build-dmg.sh
+import PackageDescription
+
+let package = Package(
+    name: "GusMacApp",
+    platforms: [.macOS(.v14)],
+    products: [
+        .executable(name: "GusMacHost", targets: ["GusMacHost"]),
+        .executable(name: "GUS", targets: ["GusApp"]),
+    ],
+    targets: [
+        .executableTarget(name: "GusMacHost", path: "Sources/GusMacHost"),
+        .executableTarget(name: "GusApp", path: "Sources/GusApp"),
+    ]
+)

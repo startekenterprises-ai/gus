@@ -16,6 +16,13 @@ there: the blast radius is the box, and the box holds nothing precious.
 > real Mac), and the Telegram bot token. Until the bridge lands, the
 > control plane wires an adapter that refuses every `mac_*`
 > execution plainly — nothing pretends a desktop exists.
+>
+> Phase 8 update (2026-11-05): the bridge now exists in the repo —
+> the Swift `GusMacHost` helper, the GUS.app shell, DMG packaging,
+> and the Node `NativeMacHostAdapter` the control plane wires when
+> the helper is present. See **docs/mac-app.md**. The Swift side is
+> Mac-only and compiles/verifies in the install sitting; what
+> remains of this section's "sitting's build" is that sitting.
 
 ## What runs where
 
@@ -123,15 +130,20 @@ readFile / writeFile / shellRun / pickerSelect). The repo ships:
 
 - `FakeMacHostAdapter` — an in-memory desktop the unit suite and
   drills run against; the service code path is identical.
-- `UnavailableMacHostAdapter` — what `main.ts` wires today: refuses
-  plainly until the bridge lands.
+- `UnavailableMacHostAdapter` — refuses plainly; still what hosts
+  without the helper get.
+- `NativeMacHostAdapter` (Phase 8, `mac-native.ts`) — what
+  `main.ts` wires when the helper is present (`GUS_MAC_HOST=1` or
+  the helper socket exists): desktop calls delegate over a unix
+  socket to the native helper; files and shell execute locally.
 
 The bridge itself is a small native helper on the resident Mac
 (Accessibility API for observe/click/focus, synthetic events for
 input, the file dialog for picker) implementing the same interface —
 including the canonical action receipts (`macActionReceipt`) the
 service verifies against, and honest probe state (front app, focused
-window/element, picker selection).
+window/element, picker selection). Phase 8 ships it as the Swift
+`GusMacHost` inside GUS.app — full detail in docs/mac-app.md.
 
 ## Acceptance drill
 
