@@ -13,7 +13,10 @@
  *    failed-loudly outcomes).
  *  - fs/shell stay local: readFile/writeFile round-trip on disk, and
  *    shellRun returns the exit code as a result (non-zero is data,
- *    verified by the service — not a throw).
+ *    verified by the service — not a throw). The adapter spawns
+ *    /bin/zsh by default (the resident Mac); the tests pass the
+ *    shell that exists on the host running them (/bin/zsh, else
+ *    /bin/sh) so the same end-to-end exercise runs on Linux CI.
  *  - The main.ts wiring rule (createMacHostAdapter): native only
  *    when GUS_MAC_HOST=1 or the helper socket exists; the plainly
  *    refusing unavailable adapter everywhere else.
@@ -62,8 +65,21 @@ after(() => {
   mock?.kill();
 });
 
-function adapter(extra: { timeoutMs?: number } = {}): NativeMacHostAdapter {
-  return new NativeMacHostAdapter({ socketPath, helperPath: noHelper, ...extra });
+/**
+ * Shell the adapter spawns for shellRun on THIS host: the production
+ * /bin/zsh when it exists (the resident Mac, this VM), else /bin/sh.
+ * The adapter defaults to /bin/zsh — right on macOS, wrong on a
+ * Linux CI runner that has no zsh (spawn fails, so the adapter's
+ * designed 127 comes back as data and the exit-code assertion
+ * fails). The test passes the shell that exists here instead of
+ * hard-coding either one. Production behavior is untouched;
+ * GUS_TEST_SHELL forces a specific shell for the portability check.
+ */
+const testShell =
+  process.env.GUS_TEST_SHELL ?? (existsSync("/bin/zsh") ? "/bin/zsh" : "/bin/sh");
+
+function adapter(extra: { timeoutMs?: number; shellPath?: string } = {}): NativeMacHostAdapter {
+  return new NativeMacHostAdapter({ socketPath, helperPath: noHelper, shellPath: testShell, ...extra });
 }
 
 // ------------------------------------------------------- delegated calls
@@ -137,6 +153,16 @@ test("native: shellRun runs the exact command and returns the exit code as data"
   assert.match(ok.stdout, /hello-shell/);
   const bad = await a.shellRun("exit 3", dir);
   assert.equal(bad.exitCode, 3, "a non-zero exit is a result the service verifies, not a throw");
+});
+
+test("native: shellRun honours the shellPath override (the /bin/sh path CI exercises)", async () => {
+  assert.ok(existsSync("/bin/sh"), "/bin/sh must exist for this check");
+  const a = new NativeMacHostAdapter({ socketPath, helperPath: noHelper, shellPath: "/bin/sh" });
+  const ok = await a.shellRun("echo hello-sh", dir);
+  assert.equal(ok.exitCode, 0);
+  assert.match(ok.stdout, /hello-sh/);
+  const bad = await a.shellRun("exit 3", dir);
+  assert.equal(bad.exitCode, 3, "the override shell returns the exit code as data too");
 });
 
 // ---------------------------------------------------------------- wiring

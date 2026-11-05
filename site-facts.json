@@ -1,1 +1,7 @@
-{"gus":{"testsPassing":144,"testsTotal":144,"version":"0.3.0"}}
+{
+  "gus": {
+    "testsPassing": 145,
+    "testsTotal": 145,
+    "version": "0.3.0"
+  }
+}
