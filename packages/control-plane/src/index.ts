@@ -5,6 +5,7 @@ export * from "./approvals.js";
 export * from "./provider.js";
 export * from "./comm-server.js";
 export * from "./channel-host.js";
+export * from "./channel-setup.js";
 export * from "./slots.js";
 export * from "./release.js";
 export * from "./canary.js";

@@ -38,7 +38,6 @@ import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
 import type { ChannelAdapter } from "@gus/shared";
 import { GUS_VERSION } from "@gus/shared";
-import { BotApiTransport, FakeFileTransport, TelegramAdapter } from "@gus/telegram";
 import { LocalReceiptIssuer, ShieldClient, ShieldGate } from "@gus/gate";
 import { VaultBroker } from "@gus/vault";
 import { EgressProxy } from "@gus/egress";
@@ -55,7 +54,8 @@ import { loadProviderConfig, resolveProvider } from "./providers.js";
 import { GmailDirectory, GmailService, HttpGmailTransport, runGmailAdmin } from "./gmail.js";
 import { MacService } from "./mac.js";
 import { createMacHostAdapter } from "./mac-native.js";
-import { Onboarding, DIGEST_PROMPT, TELEGRAM_SECRET_NAME } from "./onboarding.js";
+import { Onboarding, DIGEST_PROMPT } from "./onboarding.js";
+import { resolveChannelAdapter } from "./channel-setup.js";
 import { SkillInstaller } from "./skills.js";
 import { startHeartbeat } from "./heartbeat.js";
 
@@ -96,28 +96,34 @@ const egress = new EgressProxy({
   issuer: receipts,
 });
 
-const channelKind = process.env.GUS_CHANNEL ?? "fake-file";
-let adapter: ChannelAdapter;
-if (channelKind === "telegram") {
-  // Phase 4: the token may come from onboarding (panel → vault)
-  // instead of the environment. Env still wins; the vault value is
-  // read once at boot, used for the transport, never printed.
-  const token =
-    process.env.GUS_TELEGRAM_BOT_TOKEN ??
-    (await vault.withSecret(TELEGRAM_SECRET_NAME, (v) => v)) ??
-    undefined;
-  if (!token) {
-    throw new Error(
-      "GUS_TELEGRAM_BOT_TOKEN is required for channel=telegram " +
-        `(or store a "${TELEGRAM_SECRET_NAME}" secret via the panel's setup wizard)`,
-    );
-  }
-  adapter = new TelegramAdapter(new BotApiTransport(token));
-} else {
-  const inbound = process.env.GUS_FAKE_INBOUND ?? "/run/gus/inbound.ndjson";
-  const outbound = process.env.GUS_FAKE_OUTBOUND ?? "/run/gus/outbound.ndjson";
-  adapter = new TelegramAdapter(new FakeFileTransport(inbound, outbound));
+/** The control plane's runtime log: JSON lines in the state dir —
+ *  the same shape the panel-binding and boot-sweep entries below use. */
+function runtimeLog(level: "info" | "warn" | "error", text: string): void {
+  appendFileSync(
+    `${stateDir}/runtime-log.jsonl`,
+    JSON.stringify({ ts: Date.now(), level, text }) + "\n",
+  );
 }
+
+// Channel resolution (channel-setup.ts): telegram WITH a token — env
+// first, the vault's "telegram-bot" secret (stored by the panel's
+// setup wizard) as fallback — is a live TelegramAdapter, exactly as
+// before. Telegram with NO token yet no longer throws: startup
+// continues with an unconfigured stand-in adapter and one loud
+// warning, so the setup panel binds and the first-run wizard can
+// store the token. (The throw crash-looped fresh installs under the
+// Mac app's launchd KeepAlive before the panel ever came up — the
+// panel is the only place the token can be stored, so throwing made
+// onboarding impossible without CLI knowledge.)
+const channelKind = process.env.GUS_CHANNEL ?? "fake-file";
+const adapter: ChannelAdapter = resolveChannelAdapter({
+  channelKind,
+  envToken: process.env.GUS_TELEGRAM_BOT_TOKEN,
+  fakeInbound: process.env.GUS_FAKE_INBOUND,
+  fakeOutbound: process.env.GUS_FAKE_OUTBOUND,
+  readVaultSecret: (name) => vault.withSecret(name, (v) => v),
+  log: runtimeLog,
+}).adapter;
 
 // Phase 2: the Approval Engine + policy store. Policy is re-read from
 // its file on every classification; approval timeouts come from the
