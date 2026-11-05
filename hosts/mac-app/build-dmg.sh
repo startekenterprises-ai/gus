@@ -107,7 +107,7 @@ ln -s /Applications "$DMG_STAGE/Applications"
 
 DMG="$OUT_DIR/GUS-$VERSION.dmg"
 rm -f "$DMG"
-echo "build-dmg: creating $DMG…"
+echo "build-dmg: creating ${DMG} ..."
 hdiutil create -volname "GUS $VERSION" -srcfolder "$DMG_STAGE" -ov -format UDZO "$DMG"
 
 echo
