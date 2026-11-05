@@ -119,7 +119,41 @@ export class ChannelHost {
       ? text
       : "[message withheld by secret-guard: it contained what looked like a secret]";
     if (!screened.clean) this.logEvent("guard.jsonl", guardEvent("egress", screened));
-    await adapter.send({ conversationId, text: out, buttons });
+    try {
+      await adapter.send({ conversationId, text: out, buttons });
+    } catch (e) {
+      // A failed send must never take the control plane down. Field
+      // bug (2026-11-05): a panel-started job finished and its result
+      // send to Telegram failed with "chat not found" (the operator
+      // had not opened a chat with the bot yet); the throw escaped
+      // onJobFinal and killed the process. The job itself had already
+      // settled — only the notification was lost. No silent failure:
+      // the loss is logged at error level and in events.jsonl, the
+      // same treatment the unconfigured stand-in gives its sends.
+      const detail = e instanceof Error ? e.message : String(e);
+      console.error(
+        `gus channel-host: send via ${adapter.name} to ${conversationId} FAILED (message NOT delivered): ${detail}`,
+      );
+      this.logEvent("events.jsonl", { ts: Date.now(), kind: "send_failed", adapter: adapter.name, error: detail });
+    }
+  }
+
+  /** Button acks are cosmetic (a toast in the operator's client); a
+   *  failed ack must neither crash the host nor block the resolution
+   *  the press asked for. Same containment as sendTo. */
+  private async ackSafely(
+    adapter: ChannelAdapter | undefined,
+    callbackId: string,
+    note: string,
+  ): Promise<void> {
+    if (!adapter?.ackButton) return;
+    try {
+      await adapter.ackButton(callbackId, note);
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      console.error(`gus channel-host: button ack via ${adapter.name} FAILED: ${detail}`);
+      this.logEvent("events.jsonl", { ts: Date.now(), kind: "ack_failed", adapter: adapter.name, error: detail });
+    }
   }
 
   private async onEvent(adapterName: string, ev: ChannelEvent): Promise<void> {
@@ -131,12 +165,12 @@ export class ChannelHost {
       const adapter = this.adapters.find((a) => a.name === adapterName);
       const m = ev.press.buttonId.match(/^(approve|deny):(.+)$/);
       if (!m) {
-        await adapter?.ackButton?.(ev.press.callbackId, "Unknown button — nothing happened.");
+        await this.ackSafely(adapter, ev.press.callbackId, "Unknown button — nothing happened.");
         this.logEvent("events.jsonl", { ts: Date.now(), kind: "button_unknown", buttonId: ev.press.buttonId });
         return;
       }
       const [, action, id] = m;
-      await adapter?.ackButton?.(ev.press.callbackId, action === "approve" ? "Approved." : "Denied.");
+      await this.ackSafely(adapter, ev.press.callbackId, action === "approve" ? "Approved." : "Denied.");
       await this.resolveApproval(adapterName, ev.press.conversationId, id, action === "approve", "channel-button");
       return;
     }
