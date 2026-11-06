@@ -359,6 +359,13 @@ export interface MacObservation {
   focusedElement?: string;
   /** The accessibility tree (or its digest form) as plain text. */
   text: string;
+  /** v0.6: the screen frame as base64 PNG, present ONLY when the
+   *  host holds Screen Recording permission (the native helper
+   *  omits it otherwise). Carried for the operator panel's Watch
+   *  view; the pack's model-facing path (MacService.observe) builds
+   *  its summary from `text` alone and never forwards this — a
+   *  frame is for the operator's eyes, not the model's context. */
+  screenshotPngBase64?: string;
 }
 
 export interface MacProbe {
@@ -452,6 +459,10 @@ export class FakeMacHostAdapter implements MacHostAdapter {
     windowTitle: "Desktop",
     focusedElement: undefined as string | undefined,
     pickerSelection: undefined as string | undefined,
+    /** v0.6: set to a base64 PNG to simulate a host WITH Screen
+     *  Recording granted; left undefined the fake behaves like a
+     *  host without the grant (observations carry no frame). */
+    screenshotPngBase64: undefined as string | undefined,
   };
 
   constructor(seedFiles: Record<string, string> = {}) {
@@ -474,6 +485,9 @@ export class FakeMacHostAdapter implements MacHostAdapter {
       text:
         `front app: ${this.state.frontApp}; window: ${this.state.windowTitle}` +
         (this.state.focusedElement ? `; focused: ${this.state.focusedElement}` : ""),
+      ...(this.state.screenshotPngBase64
+        ? { screenshotPngBase64: this.state.screenshotPngBase64 }
+        : {}),
     };
   }
 

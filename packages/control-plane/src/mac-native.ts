@@ -198,12 +198,19 @@ export class NativeMacHostAdapter implements MacHostAdapter {
       windowTitle?: string;
       focusedElement?: string;
       text: string;
+      screenshotPngBase64?: string;
     }>("observe", {});
     return {
       app: r.app,
       windowTitle: r.windowTitle,
       focusedElement: r.focusedElement,
       text: r.text,
+      // v0.6: the helper includes the frame only when Screen
+      // Recording is granted; pass it through for the panel's
+      // Watch view (MacService never forwards it to the model).
+      ...(typeof r.screenshotPngBase64 === "string" && r.screenshotPngBase64
+        ? { screenshotPngBase64: r.screenshotPngBase64 }
+        : {}),
     };
   }
 

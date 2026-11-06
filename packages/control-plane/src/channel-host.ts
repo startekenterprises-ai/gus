@@ -58,6 +58,17 @@ export class ChannelHost {
   private lastModelHash = new Map<string, string>();
   private modelRefusals = new Map<string, string>();
   private updateCommands?: UpdateCommands;
+  /** v0.6: which adapter each conversation arrived on. Deliveries
+   *  the host originates (job results, park notices, cap/denial
+   *  notices, expiry notices) route back through THAT adapter
+   *  instead of always through adapters[0] — before the panel chat
+   *  existed every conversation was Telegram's and the two were
+   *  the same thing. The bridge adapter's send() forwards to the
+   *  primary adapter, so bridge conversations still land in
+   *  Telegram exactly as before. Unknown conversations (an
+   *  approval that outlived a restart) fall back to adapters[0],
+   *  the historical behavior. */
+  private conversationAdapters = new Map<string, string>();
 
   constructor(
     private stateDir: string,
@@ -79,10 +90,16 @@ export class ChannelHost {
     this.updateCommands = cmds;
   }
 
-  /** Operator notification on the primary adapter (updater notices,
-   *  confirmations). Same egress screening as every outbound text. */
+  /** The adapter a conversation's deliveries route through. */
+  private adapterNameFor(conversationId: string): string {
+    return this.conversationAdapters.get(conversationId) ?? this.adapters[0]?.name ?? "telegram";
+  }
+
+  /** Operator notification (updater notices, confirmations),
+   *  routed to the conversation's own adapter. Same egress
+   *  screening as every outbound text. */
   async notifyOperator(conversationId: string, text: string): Promise<void> {
-    await this.sendTo(this.adapters[0]?.name ?? "telegram", conversationId, text);
+    await this.sendTo(this.adapterNameFor(conversationId), conversationId, text);
   }
 
   /**
@@ -177,6 +194,13 @@ export class ChannelHost {
   }
 
   private async onEvent(adapterName: string, ev: ChannelEvent): Promise<void> {
+    // v0.6: remember where each conversation lives, so host-
+    // originated deliveries route back to the same surface.
+    if (ev.type === "message") {
+      this.conversationAdapters.set(ev.message.conversationId, adapterName);
+    } else {
+      this.conversationAdapters.set(ev.press.conversationId, adapterName);
+    }
     if (ev.type === "button") {
       // Phase 2: button presses resolve approvals. The button id IS the
       // resolution: "approve:<id>" / "deny:<id>", minted by the Approval
@@ -547,6 +571,11 @@ export class ChannelHost {
     via: string,
     agentResolver?: { name: string },
   ): Promise<void> {
+    // v0.6: notices route to the conversation's own surface (a
+    // panel-resolved park on a panel job reports back to the
+    // panel chat, not to Telegram) — the resolution itself is
+    // unchanged, hash-bound and single-use as always.
+    const route = this.adapterNameFor(conversationId);
     if (!this.approvals) return;
     const req = this.approvals.get(id);
     if (!req || req.status !== "pending") {
@@ -558,7 +587,7 @@ export class ChannelHost {
         via,
       });
       await this.sendTo(
-        adapterName,
+        route,
         conversationId,
         `That approval (${id}) is no longer pending${req ? ` — it is ${req.status}` : ""}. Nothing was executed.`,
       );
@@ -592,7 +621,7 @@ export class ChannelHost {
     }
     if (approve && this.governor.isKilled()) {
       await this.sendTo(
-        adapterName,
+        route,
         conversationId,
         "⏹ Kill switch is ON — approvals cannot execute while GUS is stopped. The request stays parked until it expires.",
       );
@@ -612,7 +641,7 @@ export class ChannelHost {
       );
     } catch (e) {
       await this.sendTo(
-        adapterName,
+        route,
         conversationId,
         `That approval could not be resolved (${e instanceof Error ? e.message : String(e)}). Nothing was executed.`,
       );
@@ -639,14 +668,14 @@ export class ChannelHost {
         /* job already settled (kill raced us) — the denial stands */
       }
       await this.sendTo(
-        adapterName,
+        route,
         conversationId,
         `🚫 Denied: "${req.summary}". Nothing ran. The job ended as failed-loudly with a receipt.`,
       );
       return;
     }
     await this.sendTo(
-      adapterName,
+      route,
       conversationId,
       agentResolver
         ? `✅ Approved by ${agentResolver.name} under the delegation policy: "${req.summary}". Executing exactly that now.`
@@ -665,7 +694,7 @@ export class ChannelHost {
     }
     this.logEvent("events.jsonl", { ts: Date.now(), kind: "approval_expired", id: req.id, jobId: req.jobId });
     void this.sendTo(
-      this.adapters[0]?.name ?? "telegram",
+      this.adapterNameFor(req.conversationId),
       req.conversationId,
       `⌛ Approval expired (no answer in time = denied): "${req.summary}". Nothing ran. The job ended as failed-loudly with a receipt.`,
     );
@@ -723,7 +752,7 @@ export class ChannelHost {
       { id: `deny:${req.id}`, label: "🚫 Deny" },
     ];
     void this.sendTo(
-      this.adapters[0]?.name ?? "telegram",
+      this.adapterNameFor(job.conversationId),
       job.conversationId,
       `⏸ Job parked — this needs your approval before anything runs: "${req.summary}". ` +
         `Why: ${req.reason}. Nothing was executed. ` +
@@ -747,7 +776,7 @@ export class ChannelHost {
     const job = this.jobs.get(jobId);
     if (!job) return;
     void this.sendTo(
-      this.adapters[0]?.name ?? "telegram",
+      this.adapterNameFor(job.conversationId),
       job.conversationId,
       `💸 Governor cap reached — the job was stopped by the spend ceiling, not by the agent: ${detail}. ` +
         `It ended as failed-loudly with a receipt; the ledger shows every charge.`,
@@ -758,7 +787,7 @@ export class ChannelHost {
     const job = this.jobs.get(jobId);
     if (!job) return;
     void this.sendTo(
-      this.adapters[0]?.name ?? "telegram",
+      this.adapterNameFor(job.conversationId),
       job.conversationId,
       `🚫 Denied by the control plane: "${tool}" was refused (${note}). The job ended as failed-loudly with a receipt.`,
     );
@@ -790,7 +819,7 @@ export class ChannelHost {
     if (refusal) {
       this.modelRefusals.delete(jobId);
       this.jobs.transition(jobId, "failed-loudly", `provider refused the model call: ${refusal}`);
-      await this.sendTo(this.adapters[0]?.name ?? "telegram", job.conversationId, outText);
+      await this.sendTo(this.adapterNameFor(job.conversationId), job.conversationId, outText);
       this.pendingDeliveries.delete(jobId);
       return;
     }
@@ -847,11 +876,11 @@ export class ChannelHost {
 
     if (verified) {
       this.jobs.transition(jobId, "verified-done", note);
-      await this.sendTo(this.adapters[0]?.name ?? "telegram", job.conversationId, outText);
+      await this.sendTo(this.adapterNameFor(job.conversationId), job.conversationId, outText);
     } else {
       this.jobs.transition(jobId, "failed-loudly", note);
       await this.sendTo(
-        this.adapters[0]?.name ?? "telegram",
+        this.adapterNameFor(job.conversationId),
         job.conversationId,
         "⚠️ That job failed its verification check, so I won't call it done. It ended as failed-loudly with a receipt in the log.",
       );

@@ -141,6 +141,50 @@ export interface PanelActionResult {
   detail: string;
 }
 
+/** v0.6: one side of the panel-chat transcript. "in" is the
+ *  operator's submitted text; "out" is what the host delivered to
+ *  the chat conversation (results and notices, egress-screened
+ *  before they were recorded). The durable source is chat.jsonl in
+ *  control-plane state — this shape is only its read model. */
+export interface PanelChatMessageData {
+  ts: number;
+  direction: "in" | "out";
+  text: string;
+}
+
+/** v0.6: the Chat view's full read model — the transcript plus the
+ *  chat conversation's jobs (oldest first), so the view can render
+ *  status transitions and inline approval cards from durable state
+ *  alone. Approvals themselves still come from approvals() — the
+ *  same pending records every surface resolves. */
+export interface PanelChatData {
+  conversationId: string;
+  messages: PanelChatMessageData[];
+  jobs: PanelJobData[];
+}
+
+/** v0.6: one Watch-timeline line, merged from events.jsonl (source
+ *  "events": channel/host events — approvals, parks, permissive
+ *  let-throughs) and gate.jsonl (source "gate": every Shield gate
+ *  decision). receiptId is carried whenever the underlying record
+ *  has one, so a line can be traced to its verifiable receipt. */
+export interface PanelTimelineEntryData {
+  ts: number;
+  source: "events" | "gate";
+  kind: string;
+  detail: string;
+  jobId?: string;
+  receiptId?: string;
+}
+
+/** v0.6: the Watch frame. Bytes cross the contract (never a path,
+ *  never a data URL) so the server can stream them as-is. The
+ *  bridge captures PNG, so PNG is what is served — no transcoding
+ *  step exists anywhere in the frame path. */
+export type PanelWatchFrameResult =
+  | { ok: true; contentType: string; bytes: Uint8Array }
+  | { ok: false; detail: string };
+
 export interface PanelBackend {
   status(): PanelStatusData;
   ledger(): PanelLedgerData;
@@ -170,4 +214,20 @@ export interface PanelBackend {
   installSkill(payload: { path?: string }): Promise<
     PanelActionResult & { verdict?: string; findings?: Record<string, unknown>[] }
   >;
+  /** v0.6: submit the Chat composer's text. It becomes a NORMAL
+   *  job through the channel pipeline (ingress secret-guard,
+   *  Shield scan, classifier, Governor caps, receipts) — the panel
+   *  chat is a channel adapter, not a side door. */
+  submitChat(text: string): Promise<PanelActionResult>;
+  /** v0.6: the Chat view's read model, from durable state. */
+  chatHistory(): PanelChatData;
+  /** v0.6: the latest Watch frame, fetched on demand from the Mac
+   *  bridge's observation path (throttled by the backend to ~1 fps;
+   *  nothing is captured while nobody asks). ok:false with an
+   *  honest detail when the bridge is absent or Screen Recording
+   *  is not granted — the timeline still works either way. */
+  watchFrame(): Promise<PanelWatchFrameResult>;
+  /** v0.6: the Watch timeline (events + gate decisions), newest
+   *  first. */
+  watchTimeline(): PanelTimelineEntryData[];
 }

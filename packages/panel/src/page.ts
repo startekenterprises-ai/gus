@@ -11,6 +11,14 @@
  * (help.ts — the same text the /help page prints), and "Settings on
  * file" renders first, directly under the header: what is actually
  * saved is the first thing the operator sees.
+ *
+ * v0.6: two views join the page. Chat — a composer and transcript
+ * over the panel's chat channel (a normal job pipeline, durable
+ * history, approval cards inline). Watch — the resident Mac's
+ * latest frame beside the events/gate timeline, pulled only while
+ * the page is open. Both poll their own endpoints on their own
+ * timers so the main refresh never clobbers the composer or the
+ * frame.
  */
 import { helpMark } from "./help.js";
 
@@ -51,6 +59,14 @@ export const PANEL_HTML = `<!doctype html>
   .helppop { position: absolute; z-index: 40; max-width: 320px; border: 1px solid #8888; border-radius: 10px; padding: 10px 12px; background: Canvas; box-shadow: 0 6px 24px #0005; font-size: .9rem; }
   .helppop p { margin: 0 0 6px; }
   .helppop a { font-weight: 600; }
+  textarea { font: inherit; padding: 7px; border-radius: 8px; border: 1px solid #8888; width: 100%; box-sizing: border-box; margin: 4px 0 10px; }
+  .chatlog { max-height: 480px; overflow-y: auto; padding-right: 2px; }
+  .chatmsg { border: 1px solid #8885; border-radius: 10px; padding: 8px 12px; margin: 6px 0; white-space: pre-wrap; word-break: break-word; }
+  .chatmsg.in { margin-left: 12%; background: #1a7f3714; }
+  .chatmsg.out { margin-right: 12%; }
+  .chatmsg .who { font-size: .78rem; opacity: .7; font-weight: 600; display: block; margin-bottom: 2px; }
+  #watch-frame { max-width: 100%; border: 1px solid #8885; border-radius: 10px; display: block; }
+  .watchdot { color: #888; } .watchdot.on { color: #c0392b; }
 </style>
 </head>
 <body>
@@ -104,6 +120,25 @@ export const PANEL_HTML = `<!doctype html>
 </div>
 <h2>Approvals waiting</h2>
 <div id="approvals"><div class="hint">Nothing is waiting.</div></div>
+
+<h2>Chat${helpMark("panel-chat")}</h2>
+<div class="hint">Talk to GUS here, or on Telegram — same jobs, same gates, two windows. A parked chat job shows its approval card right in the conversation.</div>
+<div id="chat-log" class="chatlog"><div class="hint">No messages yet.</div></div>
+<div id="chat-cards"></div>
+<label for="chat-input">Message GUS</label>
+<textarea id="chat-input" rows="3" placeholder="Ask GUS to do something…"></textarea>
+<div class="acts"><button class="primary" id="chat-send">Send</button></div>
+
+<h2>Watch${helpMark("panel-watch")}</h2>
+<div class="row">
+  <div class="acts" style="margin:0 0 8px">
+    <span><span id="watch-dot" class="watchdot">●</span> <b id="watch-state">Watching</b></span>
+    <button id="watch-toggle">⏸ Pause</button>
+  </div>
+  <img id="watch-frame" alt="The resident Mac's screen, as the bridge last reported it" hidden>
+  <div id="watch-notice" class="hint">Waiting for the first frame…</div>
+  <div id="watch-timeline" style="margin-top:10px"></div>
+</div>
 
 <h2>Money — where it went</h2>
 <div class="cards" id="money-cards"></div>
@@ -402,6 +437,136 @@ $("#pv-kind").addEventListener("change", () => {
   const models = { gemini: "gemini-3.5-flash", anthropic: "claude-sonnet-5", openai: "gpt-5-mini", ollama: "llama3.1:8b", gateway: "llama3.1:8b", stub: "stub-v0" };
   $("#pv-model").value = models[$("#pv-kind").value] || "";
 });
+// ---- Chat view (v0.6) ----
+// Polls the durable transcript + this conversation's jobs every
+// 2s. Everything renders through textContent — message text is
+// data, never markup. The composer is a separate element, so a
+// re-render can never eat a half-typed message.
+let chatRendered = "";
+async function refreshChat() {
+  const [data, approvals] = await Promise.all([api("/api/chat/history"), api("/api/approvals")]);
+  const key = JSON.stringify([data, approvals]);
+  if (key === chatRendered) return;
+  chatRendered = key;
+  const log = $("#chat-log");
+  log.innerHTML = "";
+  if (!data.messages.length && !data.jobs.length) {
+    log.innerHTML = '<div class="hint">No messages yet.</div>';
+  }
+  for (const m of data.messages) {
+    const div = document.createElement("div");
+    div.className = "chatmsg " + m.direction;
+    const who = document.createElement("span");
+    who.className = "who";
+    who.textContent = (m.direction === "in" ? "You" : "GUS") + " · " + new Date(m.ts).toLocaleTimeString();
+    const body = document.createElement("span");
+    body.textContent = m.text;
+    div.append(who, body);
+    log.append(div);
+  }
+  for (const j of data.jobs) {
+    const div = document.createElement("div");
+    div.className = "hint";
+    div.textContent = "— job " + j.kind + " · " + j.state + " · " + new Date(j.createdAt).toLocaleTimeString() +
+      (j.outcomeNote ? " · " + j.outcomeNote : "") + (j.receiptId ? " · receipt " + j.receiptId : "");
+    log.append(div);
+  }
+  log.scrollTop = log.scrollHeight;
+  const cards = $("#chat-cards");
+  cards.innerHTML = "";
+  const chatJobIds = new Set(data.jobs.map((j) => j.id));
+  for (const a of approvals.filter((x) => chatJobIds.has(x.jobId))) {
+    const div = document.createElement("div");
+    div.className = "row";
+    const head = document.createElement("b");
+    head.textContent = "⏸ Parked — " + a.summary;
+    const why = document.createElement("div");
+    why.className = "hint";
+    why.textContent = "Why: " + a.reason + " · No answer in time counts as a denial.";
+    const acts = document.createElement("div"); acts.className = "acts";
+    const yes = document.createElement("button"); yes.className = "primary"; yes.textContent = "✅ Approve — exactly this";
+    const no = document.createElement("button"); no.className = "danger"; no.textContent = "🚫 Deny";
+    yes.onclick = () => act(() => api("/api/approvals/" + a.id + "/approve", { method: "POST" }), "Approved — executing exactly that.").then(() => { chatRendered = ""; refreshChat().catch(() => {}); });
+    no.onclick = () => act(() => api("/api/approvals/" + a.id + "/deny", { method: "POST" }), "Denied. Nothing ran.").then(() => { chatRendered = ""; refreshChat().catch(() => {}); });
+    acts.append(yes, no); div.append(head, why, acts); cards.append(div);
+  }
+}
+$("#chat-send").onclick = async () => {
+  const input = $("#chat-input");
+  const text = input.value.trim();
+  if (!text) return;
+  try {
+    const r = await api("/api/chat", { method: "POST", body: JSON.stringify({ text }) });
+    input.value = "";
+    flash(r.detail || "Sent.", true);
+  } catch (e) { flash(String(e.message || e), false); }
+  chatRendered = "";
+  refreshChat().catch(() => {});
+};
+setInterval(() => refreshChat().catch(() => {}), 2000);
+refreshChat().catch(() => {});
+
+// ---- Watch view (v0.6) ----
+// Frames are pulled only while this page is open and the view is
+// not paused (~1 fps, backend-throttled). The timeline polls on
+// its own 2s timer. Pausing stops frame requests entirely.
+let watchPaused = false;
+let watchBusy = false;
+let watchFrameUrl = null;
+async function pullFrame() {
+  if (watchPaused || watchBusy || document.hidden) return;
+  watchBusy = true;
+  try {
+    const res = await fetch("/api/watch/frame");
+    if (res.ok) {
+      const blob = await res.blob();
+      if (watchFrameUrl) URL.revokeObjectURL(watchFrameUrl);
+      watchFrameUrl = URL.createObjectURL(blob);
+      const img = $("#watch-frame");
+      img.src = watchFrameUrl;
+      img.hidden = false;
+      $("#watch-notice").textContent = "";
+    } else {
+      const body = await res.json().catch(() => ({}));
+      $("#watch-frame").hidden = true;
+      $("#watch-notice").textContent = body.detail || ("No frame (HTTP " + res.status + ") — the timeline below still works.");
+    }
+  } catch {
+    $("#watch-notice").textContent = "The frame request failed — the timeline below still works.";
+  } finally { watchBusy = false; }
+}
+let timelineRendered = "";
+async function refreshTimeline() {
+  const entries = await api("/api/watch/timeline");
+  const key = JSON.stringify(entries);
+  if (key === timelineRendered) return;
+  timelineRendered = key;
+  const box = $("#watch-timeline");
+  box.innerHTML = "";
+  if (!entries.length) {
+    box.innerHTML = '<div class="hint">No actions or gate decisions recorded yet.</div>';
+    return;
+  }
+  for (const e of entries) {
+    const div = document.createElement("div");
+    div.className = "hint";
+    div.textContent = new Date(e.ts).toLocaleTimeString() + " · [" + e.source + "] " + e.kind + " — " + e.detail +
+      (e.jobId ? " · job " + e.jobId : "") + (e.receiptId ? " · receipt " + e.receiptId : "");
+    box.append(div);
+  }
+}
+$("#watch-toggle").onclick = () => {
+  watchPaused = !watchPaused;
+  $("#watch-state").textContent = watchPaused ? "Paused" : "Watching";
+  $("#watch-dot").className = "watchdot" + (watchPaused ? "" : " on");
+  $("#watch-toggle").textContent = watchPaused ? "▶ Resume" : "⏸ Pause";
+};
+$("#watch-dot").className = "watchdot on";
+setInterval(pullFrame, 1000);
+setInterval(() => refreshTimeline().catch(() => {}), 2000);
+pullFrame();
+refreshTimeline().catch(() => {});
+
 refresh().catch((e) => { $("#subtitle").textContent = "Could not load the panel: " + e.message; });
 </script>
 </body>

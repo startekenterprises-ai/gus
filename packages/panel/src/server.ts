@@ -149,6 +149,29 @@ export class PanelServer {
       res.end(HELP_HTML);
       return;
     }
+    // v0.6: the Chat view. History is plain JSON; the frame route
+    // below is the panel's one binary response.
+    if (method === "GET" && path === "/api/chat/history") return json(200, this.backend.chatHistory());
+    if (method === "GET" && path === "/api/watch/timeline") return json(200, this.backend.watchTimeline());
+    if (method === "GET" && path === "/api/watch/frame") {
+      const frame = await this.backend.watchFrame();
+      if (!frame.ok) return json(503, { ok: false, detail: frame.detail });
+      res.writeHead(200, {
+        "content-type": frame.contentType,
+        "cache-control": "no-store",
+        "content-length": frame.bytes.length,
+      });
+      res.end(Buffer.from(frame.bytes));
+      return;
+    }
+    if (method === "POST" && path === "/api/chat") {
+      const body = await this.readJson(req);
+      const result = await this.backend.submitChat(
+        typeof body.text === "string" ? body.text : "",
+      );
+      return json(result.ok ? 200 : 400, result);
+    }
+
     if (method === "GET" && path === "/api/status") return json(200, this.backend.status());
     if (method === "GET" && path === "/api/ledger") return json(200, this.backend.ledger());
     if (method === "GET" && path === "/api/jobs") return json(200, this.backend.jobs());

@@ -134,6 +134,22 @@ export const HELP_ENTRIES: HelpEntry[] = [
       "The monthly ceiling catches what the smaller caps can't: a modest daily spend, left running, is real money by month's end. The Governor totals settled spend for the month and refuses new paid work once the ceiling is reached.\n\n" +
       "Like every cap, it is enforced outside the model, applies to delegate-submitted work and approval decisions alike, and can only be changed by you.",
   },
+  {
+    id: "panel-chat",
+    title: "Chat",
+    tip: "Talk to GUS from the panel. A chat message is a normal job: secret-guard, Shield ingress scan, classifier, the same spend caps, the same receipts. The chat window is a channel, not a bypass.",
+    body:
+      "The Chat view is the panel acting as one more channel, like Telegram: what you type is screened for secrets, scanned by the Agent-Shield gate before it can reach the agent, classified, metered against your caps, and settled with a receipt. Nothing about coming from this page relaxes any of that — a message the gate would block on Telegram is blocked here, with the same receipt.\n\n" +
+      "The conversation is kept in durable state on this machine, so a reload loses nothing, and Telegram keeps working in parallel — same jobs, two windows. When a chat job parks for approval, the card appears right in the conversation and resolves through the same hash-bound, single-use approval engine as every other surface.",
+  },
+  {
+    id: "panel-watch",
+    title: "Watch",
+    tip: "See the resident Mac while GUS works: the latest screen frame beside the timeline of actions and gate decisions. Frames are fetched only while the view is open, served only on this machine, and never stored.",
+    body:
+      "The Watch view asks the Mac bridge for a fresh observation — the same observation path GUS itself uses — at most about once a second, and only while you are looking. Nothing is captured in the background, frames are never written to disk or sent anywhere, and pausing the view stops the requests entirely.\n\n" +
+      "The frame needs the Screen Recording permission macOS grants to GUS.app. Without it the frame area says so plainly and the view still shows the timeline: every action, park, approval and gate decision from the durable event and gate logs, each line traceable to its receipt where one exists.",
+  },
 ];
 
 export const HELP_BY_ID: ReadonlyMap<string, HelpEntry> = new Map(

@@ -41,7 +41,12 @@ import { GUS_VERSION } from "@gus/shared";
 import { LocalReceiptIssuer, ShieldClient, ShieldGate } from "@gus/gate";
 import { VaultBroker } from "@gus/vault";
 import { EgressProxy } from "@gus/egress";
-import { PanelServer, type PanelBackend } from "@gus/panel";
+import {
+  PanelServer,
+  type PanelBackend,
+  type PanelJobData,
+} from "@gus/panel";
+import type { JobRecord } from "@gus/shared";
 import { Governor } from "./governor.js";
 import { JobRunner } from "./jobs.js";
 import { CommServer } from "./comm-server.js";
@@ -57,6 +62,8 @@ import { createMacHostAdapter } from "./mac-native.js";
 import { Onboarding, DIGEST_PROMPT } from "./onboarding.js";
 import { resolveChannelAdapter } from "./channel-setup.js";
 import { BridgeInboxAdapter } from "./bridge-inbox.js";
+import { PanelChatAdapter, PANEL_CHAT_CONVERSATION } from "./panel-chat.js";
+import { WatchFrameSource, readWatchTimeline } from "./watch.js";
 import { loadDelegates } from "./delegates.js";
 import {
   loadGovernorMode,
@@ -177,7 +184,12 @@ const gmail = new GmailService(new HttpGmailTransport(vault), {
 // process booted is picked up on the next mac_* call, and until one
 // exists the unavailable adapter refuses every mac_* execution
 // plainly and loudly, exactly as before.
-const mac = new MacService(createMacHostAdapter(), {
+// The host adapter stays reachable as `macHost`: v0.6's Watch
+// view asks it for observations directly (the operator watching
+// is not an agent action — no job, no classification, no caps;
+// the frame is served by the panel and never stored).
+const macHost = createMacHostAdapter();
+const mac = new MacService(macHost, {
   workDirs: () => policy.load().mac.workDirs,
   shield: shieldGate,
   vault,
@@ -187,11 +199,17 @@ const mac = new MacService(createMacHostAdapter(), {
 // never delivers bot-to-bot messages, so Nova's requests arrive as
 // files; bridge-inbox.ts). Inert without a `bridge` binding in
 // delegates.json. Its outbound forwards through the primary adapter,
-// and results/approvals post via adapters[0] as usual.
+// and (v0.6) host deliveries route per conversation — for bridge
+// conversations that still means this adapter, whose send forwards
+// to Telegram as before.
+// v0.6: the panel Chat adapter — the panel as a channel, its
+// transcript durable in chat.jsonl (panel-chat.ts).
 const bridge = new BridgeInboxAdapter(stateDir, {
   sendVia: (msg) => adapter.send(msg),
 });
-const host = new ChannelHost(stateDir, governor, jobs, [adapter, bridge], approvals, shieldGate);
+const panelChat = new PanelChatAdapter(stateDir);
+const watchFrames = new WatchFrameSource(macHost);
+const host = new ChannelHost(stateDir, governor, jobs, [adapter, bridge, panelChat], approvals, shieldGate);
 approvals.onExpire = (req) => host.handleApprovalExpired(req);
 const comm = new CommServer(socketPath, governor, jobs, {
   onRuntimeHello: () => host.onRuntimeHello(),
@@ -331,6 +349,30 @@ function shieldVerifyUrls(): Map<string, string> {
   return map;
 }
 
+/** The panel's job read model (shared by /api/jobs and the chat
+ *  history, so the two windows can never disagree about a job). */
+function toPanelJob(j: JobRecord, urls: Map<string, string>): PanelJobData {
+  return {
+    id: j.id,
+    kind: j.kind,
+    state: j.state,
+    createdAt: j.createdAt,
+    updatedAt: j.updatedAt,
+    costUsd: j.costUsd,
+    tokensIn: j.tokensIn,
+    tokensOut: j.tokensOut,
+    outcomeNote: j.outcomeNote,
+    receiptId: j.receiptId,
+    receiptVerifyUrl: j.receiptId?.startsWith("rcpt_")
+      ? (urls.get(j.receiptId) ?? `${shieldGate.client.baseUrl}/v/${j.receiptId}`)
+      : undefined,
+    shieldReceipts: (j.shieldReceiptIds ?? []).map((id) => ({
+      receiptId: id,
+      verifyUrl: urls.get(id),
+    })),
+  };
+}
+
 const panelBackend: PanelBackend = {
   status: () => {
     const cfg = loadProviderConfig(stateDir);
@@ -397,25 +439,7 @@ const panelBackend: PanelBackend = {
   }),
   jobs: () => {
     const urls = shieldVerifyUrls();
-    return jobs.list(50).map((j) => ({
-      id: j.id,
-      kind: j.kind,
-      state: j.state,
-      createdAt: j.createdAt,
-      updatedAt: j.updatedAt,
-      costUsd: j.costUsd,
-      tokensIn: j.tokensIn,
-      tokensOut: j.tokensOut,
-      outcomeNote: j.outcomeNote,
-      receiptId: j.receiptId,
-      receiptVerifyUrl: j.receiptId?.startsWith("rcpt_")
-        ? (urls.get(j.receiptId) ?? `${shieldGate.client.baseUrl}/v/${j.receiptId}`)
-        : undefined,
-      shieldReceipts: (j.shieldReceiptIds ?? []).map((id) => ({
-        receiptId: id,
-        verifyUrl: urls.get(id),
-      })),
-    }));
+    return jobs.list(50).map((j) => toPanelJob(j, urls));
   },
   approvals: () =>
     approvals.pending().map((r) => ({
@@ -510,6 +534,29 @@ const panelBackend: PanelBackend = {
   onboardingFirstJob: async () => onboarding.firstJob(),
   skills: () => skillInstaller.listInstalled(),
   installSkill: async (payload) => skillInstaller.install(payload.path ?? ""),
+  // v0.6: the Chat view — submission is the chat adapter emitting
+  // the ordinary channel event; history is the adapter's durable
+  // transcript plus this conversation's jobs from the same store
+  // /api/jobs reads.
+  submitChat: async (text) => panelChat.submit(text),
+  chatHistory: () => {
+    const urls = shieldVerifyUrls();
+    return {
+      conversationId: PANEL_CHAT_CONVERSATION,
+      messages: panelChat.history(),
+      jobs: jobs
+        .list(200)
+        .filter((j) => j.conversationId === PANEL_CHAT_CONVERSATION)
+        .reverse()
+        .map((j) => toPanelJob(j, urls)),
+    };
+  },
+  // v0.6: the Watch view — one on-demand observation of the Mac
+  // bridge per ask, throttled to ~1 fps inside WatchFrameSource
+  // (watch.ts). The frame is served by the panel and never
+  // written to disk; the model never sees it.
+  watchFrame: () => watchFrames.frame(),
+  watchTimeline: () => readWatchTimeline(stateDir, 60),
 };
 
 // The operator token: a 0600 file in control-plane state, minted on

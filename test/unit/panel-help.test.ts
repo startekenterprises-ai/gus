@@ -161,6 +161,10 @@ function stubBackend(): PanelBackend {
     onboardingFirstJob: async () => ({ ok: true, detail: "ok" }),
     skills: () => [],
     installSkill: action,
+    submitChat: action,
+    chatHistory: () => ({ conversationId: "panel-chat", messages: [], jobs: [] }),
+    watchFrame: async () => ({ ok: false as const, detail: "no frame in the stub" }),
+    watchTimeline: () => [],
   };
 }
 
