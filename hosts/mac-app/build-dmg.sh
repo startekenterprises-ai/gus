@@ -70,6 +70,18 @@ cp "$BIN_DIR/GusMacHost" "$APP/Contents/Helpers/GusMacHost"
 sed -e "s/__VERSION__/$VERSION/g" -e "s/__BUILD__/$BUILD/g" \
   "$SCRIPT_DIR/Resources/Info.plist" > "$APP/Contents/Info.plist"
 
+# App icon: the STARTEK chevron (Glenn's pick 2026-11-06). The 1024px
+# master rides in the repo as base64 text (the push path is text-only);
+# decode it, resize with sips, and let iconutil build the .icns.
+ICONSET=$(mktemp -d)/AppIcon.iconset
+mkdir -p "$ICONSET"
+base64 -d "$SCRIPT_DIR/Resources/AppIcon-1024.png.b64" > "$(dirname "$ICONSET")/icon-1024.png"
+for spec in "16:icon_16x16.png" "32:icon_16x16@2x.png" "32:icon_32x32.png" "64:icon_32x32@2x.png" "128:icon_128x128.png" "256:icon_128x128@2x.png" "256:icon_256x256.png" "512:icon_256x256@2x.png" "512:icon_512x512.png" "1024:icon_512x512@2x.png"; do
+  px="${spec%%:*}"; name="${spec##*:}"
+  sips -z "$px" "$px" "$(dirname "$ICONSET")/icon-1024.png" --out "$ICONSET/$name" >/dev/null || fail "sips failed building $name"
+done
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns" || fail "iconutil failed building AppIcon.icns"
+
 PAYLOAD="$APP/Contents/Resources/gus"
 cp "$REPO_DIR/package.json" "$PAYLOAD/package.json"
 for pkg in shared gate vault egress panel control-plane runtime; do
