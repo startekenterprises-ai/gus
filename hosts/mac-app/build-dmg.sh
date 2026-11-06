@@ -75,7 +75,7 @@ sed -e "s/__VERSION__/$VERSION/g" -e "s/__BUILD__/$BUILD/g" \
 # decode it, resize with sips, and let iconutil build the .icns.
 ICONSET=$(mktemp -d)/AppIcon.iconset
 mkdir -p "$ICONSET"
-base64 -d "$SCRIPT_DIR/Resources/AppIcon-1024.png.b64" > "$(dirname "$ICONSET")/icon-1024.png"
+base64 -d < "$SCRIPT_DIR/Resources/AppIcon-1024.png.b64" > "$(dirname "$ICONSET")/icon-1024.png"
 for spec in "16:icon_16x16.png" "32:icon_16x16@2x.png" "32:icon_32x32.png" "64:icon_32x32@2x.png" "128:icon_128x128.png" "256:icon_128x128@2x.png" "256:icon_256x256.png" "512:icon_256x256@2x.png" "512:icon_512x512.png" "1024:icon_512x512@2x.png"; do
   px="${spec%%:*}"; name="${spec##*:}"
   sips -z "$px" "$px" "$(dirname "$ICONSET")/icon-1024.png" --out "$ICONSET/$name" >/dev/null || fail "sips failed building $name"
@@ -123,7 +123,11 @@ echo "build-dmg: creating ${DMG} ..."
 hdiutil create -volname "GUS $VERSION" -srcfolder "$DMG_STAGE" -ov -format UDZO "$DMG"
 
 echo
+# The in-app updater requires the DMG's sha256 as a sibling release
+# asset (any name ending .dmg.sha256; it reads the first token).
+shasum -a 256 "$DMG" > "$DMG.sha256"
 echo "build-dmg: done — $DMG"
+echo "build-dmg: checksum — $DMG.sha256 (attach BOTH files to the GitHub release; the updater refuses a DMG without its checksum)"
 echo "build-dmg: first launch on a new Mac is right-click → Open (ad-hoc"
 echo "build-dmg: signing, not notarization). Then grant Accessibility in"
 echo "build-dmg: System Settings and run the setup window's checklist."
