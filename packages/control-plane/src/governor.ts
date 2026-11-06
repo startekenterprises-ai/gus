@@ -101,6 +101,12 @@ export const BUILTIN_PRICES_USD_PER_1K: Record<string, number> = {
   // project.
   "gemini/gemini-3.5-flash": 0.00525,
   "gemini/gemini-3-flash-preview": 0.00175,
+  // Meta's published Muse Spark rates (checked 2026-11-06), blended
+  // in+out per 1k like the entries above: $1.25 in / $4.25 out per 1M
+  // tokens → (0.00125 + 0.00425) / 2. Patch drafted by GUS himself
+  // (night work, 2026-11-06) after the gap showed up as $0 metering
+  // on the first Spark-powered install.
+  "muse-spark-1.3": 0.00275,
 };
 
 export type LedgerEntry =
