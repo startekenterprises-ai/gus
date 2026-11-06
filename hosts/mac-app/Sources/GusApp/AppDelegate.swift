@@ -323,7 +323,6 @@ final class GusAppDelegate: NSObject, NSApplicationDelegate {
         var req = URLRequest(url: url)
         req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         URLSession.shared.dataTask(with: req) { data, _, error in
-            var info: ReleaseInfo?
             if error == nil, let data,
                let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let tag = obj["tag_name"] as? String,
@@ -349,7 +348,7 @@ final class GusAppDelegate: NSObject, NSApplicationDelegate {
                     return
                 }
             }
-            DispatchQueue.main.async { completion(info) }
+            DispatchQueue.main.async { completion(nil) }
         }.resume()
     }
 

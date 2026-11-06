@@ -57,6 +57,7 @@ import { createMacHostAdapter } from "./mac-native.js";
 import { Onboarding, DIGEST_PROMPT } from "./onboarding.js";
 import { resolveChannelAdapter } from "./channel-setup.js";
 import { BridgeInboxAdapter } from "./bridge-inbox.js";
+import { loadDelegates } from "./delegates.js";
 import {
   loadGovernorMode,
   readPermissiveActions,
@@ -347,6 +348,34 @@ const panelBackend: PanelBackend = {
       pendingApprovals: approvals.pending().length,
       spendTodayUsd: spend.todayUsd,
       spendMonthUsd: spend.monthUsd,
+      settings: (() => {
+        const names = vault.listNames();
+        const keyNameByProvider: Record<string, string> = {
+          gemini: "gemini",
+          openai: "openai",
+          anthropic: "anthropic",
+        };
+        const keyName = keyNameByProvider[cfg.provider];
+        const caps = governor.config();
+        return {
+          providerKey: (keyName
+            ? names.includes(keyName)
+              ? "stored"
+              : "missing"
+            : "not-required") as "stored" | "missing" | "not-required",
+          telegramConfigured: names.includes("telegram-bot"),
+          caps: {
+            maxUsdPerTask: caps.maxUsdPerTask,
+            maxUsdPerDay: caps.maxUsdPerDay,
+            maxUsdPerMonth: caps.maxUsdPerMonth,
+          },
+          delegates: Object.values(loadDelegates(stateDir).conversations).reduce(
+            (n, c) => n + c.delegates.length,
+            0,
+          ),
+          macWorkDirs: policy.load().mac.workDirs.length,
+        };
+      })(),
       governorMode: loadGovernorMode(stateDir),
       permissiveToday: (() => {
         const dayStart = new Date();

@@ -32,6 +32,16 @@ export interface PanelStatusData {
     count: number;
     recent: { ts: number; kind: string; detail: string }[];
   };
+  /** v0.4.1: what's actually ON FILE — the saved-settings readout.
+   *  Presence only: key state is stored/missing/not-required, never
+   *  a value, here or anywhere else in the panel. */
+  settings: {
+    providerKey: "stored" | "missing" | "not-required";
+    telegramConfigured: boolean;
+    caps: { maxUsdPerTask?: number; maxUsdPerDay?: number; maxUsdPerMonth?: number };
+    delegates: number;
+    macWorkDirs: number;
+  };
 }
 
 export interface PanelLedgerData {

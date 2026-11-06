@@ -422,6 +422,13 @@ function stubBackend(calls: string[]): PanelBackend {
       spendMonthUsd: 0,
       governorMode: "enforcing" as const,
       permissiveToday: { count: 0, recent: [] },
+      settings: {
+        providerKey: "stored" as const,
+        telegramConfigured: true,
+        caps: { maxUsdPerTask: 2, maxUsdPerDay: 10, maxUsdPerMonth: 100 },
+        delegates: 1,
+        macWorkDirs: 4,
+      },
     }),
     ledger: () => ({
       entries: [],

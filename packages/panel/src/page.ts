@@ -66,6 +66,11 @@ export const PANEL_HTML = `<!doctype html>
   </div>
   <div id="permissive-report" class="hint"></div>
 </div>
+<div class="row">
+  <b>Settings on file</b>
+  <div class="hint">What is actually saved right now — so a save is something you can verify, not something you hope happened. Keys are shown as stored or not; values never appear here.</div>
+  <div id="settings-on-file" class="hint">Loading…</div>
+</div>
 
 <h2>Approvals waiting</h2>
 <div id="approvals"><div class="hint">Nothing is waiting.</div></div>
@@ -183,6 +188,19 @@ async function refresh() {
     '<div class="card">Governor mode<b class="' + (status.governorMode === "permissive" ? "warn" : "ok") + '">' +
       (status.governorMode === "permissive" ? "⚠️ Permissive" : "🛡 Enforcing") + "</b></div>" +
     '<div class="card">Spent today<b>' + money(status.spendTodayUsd) + "</b></div>";
+  const st = status.settings || {};
+  const keyLine = st.providerKey === "stored" ? "stored in the vault ✓"
+    : st.providerKey === "missing" ? "NOT stored — add it in Setup below"
+    : "not required for this provider";
+  const capsLine = st.caps && (st.caps.maxUsdPerTask != null || st.caps.maxUsdPerDay != null || st.caps.maxUsdPerMonth != null)
+    ? "per task " + money(st.caps.maxUsdPerTask) + " · per day " + money(st.caps.maxUsdPerDay) + " · per month " + money(st.caps.maxUsdPerMonth)
+    : "conservative defaults (token caps)";
+  $("#settings-on-file").innerHTML =
+    "Provider: <b>" + status.provider.id + " / " + status.provider.model + "</b> · API key: <b>" + keyLine + "</b><br>" +
+    "Telegram: <b>" + (st.telegramConfigured ? "bot token stored ✓" : "not configured") + "</b> · " +
+    "Agent-Shield gate: <b>" + (status.shield.provisioned ? "key stored ✓ · fail-" + status.shield.onUnavailable : "not provisioned") + "</b><br>" +
+    "Spend caps: <b>" + capsLine + "</b><br>" +
+    "Named delegates: <b>" + (st.delegates ?? 0) + "</b> · Mac work folders: <b>" + (st.macWorkDirs ?? 0) + "</b>";
   const pr = status.permissiveToday || { count: 0, recent: [] };
   $("#permissive-report").innerHTML = pr.count === 0
     ? "Permissive let-throughs today: none."
