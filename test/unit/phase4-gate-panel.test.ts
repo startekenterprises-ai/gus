@@ -420,6 +420,8 @@ function stubBackend(calls: string[]): PanelBackend {
       pendingApprovals: 1,
       spendTodayUsd: 0,
       spendMonthUsd: 0,
+      governorMode: "enforcing" as const,
+      permissiveToday: { count: 0, recent: [] },
     }),
     ledger: () => ({
       entries: [],
@@ -437,6 +439,10 @@ function stubBackend(calls: string[]): PanelBackend {
     setKilled: async (on) => {
       calls.push(`kill:${on}`);
       return { ok: true, detail: "kill toggled" };
+    },
+    setGovernorMode: async (mode) => {
+      calls.push(`mode:${mode}`);
+      return { ok: true, detail: "mode set" };
     },
     vaultNames: () => ["agent-shield"],
     storeSecret: (name) => {

@@ -161,6 +161,11 @@ export class PanelServer {
       const result = await this.backend.setKilled(body.on === true);
       return json(result.ok ? 200 : 409, result);
     }
+    if (method === "POST" && path === "/api/governor-mode") {
+      const body = await this.readJson(req);
+      const result = await this.backend.setGovernorMode(String(body.mode ?? ""));
+      return json(result.ok ? 200 : 400, result);
+    }
     if (method === "POST" && path === "/api/vault") {
       const body = await this.readJson(req);
       const result = this.backend.storeSecret(String(body.name ?? ""), String(body.value ?? ""));

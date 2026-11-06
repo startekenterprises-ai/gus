@@ -51,6 +51,14 @@ export const DEFAULT_SHIELD_POLICY: ShieldPolicyView = {
   onUnavailable: "closed",
 };
 
+/** The Governor's enforcement mode (v0.4, SELinux-style). Enforcing:
+ *  verdicts bind. Permissive: verdicts are recorded and receipted
+ *  but do not bind — the action proceeds, stamped with what
+ *  enforcing mode would have done. Scanning itself never turns
+ *  off in either mode; neither do the spend caps or the kill
+ *  switch, which are Governor mechanics, not content policy. */
+export type GateMode = "enforcing" | "permissive";
+
 export interface GateDecision {
   action: "allow" | "flag" | "block";
   /** True when a real scan produced this decision. */
@@ -60,6 +68,10 @@ export interface GateDecision {
   /** Plain-language explanation, safe for the operator and the job
    *  record (screened by callers before persisting, like all notes). */
   detail: string;
+  /** True when this decision was relaxed by permissive mode. */
+  permissive?: boolean;
+  /** What enforcing mode would have done ("block"). */
+  wouldBe?: string;
 }
 
 export interface GateLogEntry {
@@ -76,6 +88,10 @@ export interface GateLogEntry {
   /** sha256 of the scanned content — correlation, never content. */
   contentSha256: string;
   detail: string;
+  /** v0.4: the Governor mode in force for this decision, and — when
+   *  permissive mode relaxed it — what enforcing would have done. */
+  mode?: GateMode;
+  wouldBe?: string;
 }
 
 function sha256Hex(text: string): string {
@@ -94,8 +110,15 @@ export class ShieldGate {
       client: ShieldClient;
       policy: () => ShieldPolicyView;
       logPath: string;
+      /** v0.4: the Governor mode, re-read per scan so a mode flip is
+       *  live on the next decision. Absent = enforcing, always. */
+      mode?: () => GateMode;
     },
   ) {}
+
+  private mode(): GateMode {
+    return this.opts.mode?.() ?? "enforcing";
+  }
 
   get client(): ShieldClient {
     return this.opts.client;
@@ -131,6 +154,8 @@ export class ShieldGate {
         receipt: receiptRaw ?? null,
         contentSha256,
         detail: d.detail,
+        mode: this.mode(),
+        ...(d.wouldBe ? { wouldBe: d.wouldBe } : {}),
       };
       try {
         appendFileSync(this.opts.logPath, JSON.stringify(entry) + "\n");
@@ -180,6 +205,27 @@ export class ShieldGate {
       ? ` (Shield receipt ${outcome.receipt.receiptId})`
       : " (the Shield returned no receipt)";
     if (action === "block") {
+      if (this.mode() === "permissive") {
+        // SELinux-permissive semantics: the scan ran, the verdict is
+        // real and receipted — it just does not bind. The decision
+        // and the gate log both carry the would-be outcome, so the
+        // permissive report can show exactly what enforcing mode
+        // would have stopped.
+        return decide(
+          {
+            action: "allow",
+            scanned: true,
+            verdict: outcome.verdict,
+            receipt: outcome.receipt,
+            permissive: true,
+            wouldBe: "block",
+            detail:
+              `Agent-Shield verdict "${outcome.verdict}" — would be BLOCKED in enforcing mode; ` +
+              `proceeding under PERMISSIVE mode${receiptNote}`,
+          },
+          outcome.receiptRaw,
+        );
+      }
       return decide(
         {
           action,

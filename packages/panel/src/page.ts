@@ -57,6 +57,15 @@ export const PANEL_HTML = `<!doctype html>
     <button id="kill-off">▶ Resume</button>
   </div>
 </div>
+<div class="row">
+  <b>Governor mode</b>
+  <div class="hint"><b>Enforcing</b>: Shield verdicts and approval parks bind. <b>Permissive</b> (SELinux-style): everything is still scanned, classified, capped and receipted, but blocks and parks are recorded instead of enforced — the troubleshooting mode, with a report of what it let through. Two floors never relax: vault reads stay denied, and the spend caps and kill switch are unchanged.</div>
+  <div class="acts">
+    <button id="mode-enforcing">🛡 Enforcing</button>
+    <button id="mode-permissive">⚠️ Permissive</button>
+  </div>
+  <div id="permissive-report" class="hint"></div>
+</div>
 
 <h2>Approvals waiting</h2>
 <div id="approvals"><div class="hint">Nothing is waiting.</div></div>
@@ -171,7 +180,14 @@ async function refresh() {
     '<div class="card">Agent-Shield gate<b class="' + (status.shield.provisioned ? "ok" : "warn") + '">' +
       (status.shield.provisioned ? "On · fail-" + status.shield.onUnavailable : "Not provisioned yet") + "</b></div>" +
     '<div class="card">Approvals waiting<b>' + status.pendingApprovals + "</b></div>" +
+    '<div class="card">Governor mode<b class="' + (status.governorMode === "permissive" ? "warn" : "ok") + '">' +
+      (status.governorMode === "permissive" ? "⚠️ Permissive" : "🛡 Enforcing") + "</b></div>" +
     '<div class="card">Spent today<b>' + money(status.spendTodayUsd) + "</b></div>";
+  const pr = status.permissiveToday || { count: 0, recent: [] };
+  $("#permissive-report").innerHTML = pr.count === 0
+    ? "Permissive let-throughs today: none."
+    : "Permissive let-throughs today: <b>" + pr.count + "</b>" + pr.recent.map((a) =>
+        "<br>· " + new Date(a.ts).toLocaleTimeString() + " [" + a.kind + "] " + a.detail).join("");
   $("#money-cards").innerHTML =
     '<div class="card">Today<b>' + money(ledger.summary.todayUsd) + '</b></div>' +
     '<div class="card">This month<b>' + money(ledger.summary.monthUsd) + '</b></div>' +
@@ -251,6 +267,8 @@ document.addEventListener("click", (ev) => {
 });
 $("#kill-on").onclick = () => act(() => api("/api/kill", { method: "POST", body: JSON.stringify({ on: true }) }), "Kill switch ON.");
 $("#kill-off").onclick = () => act(() => api("/api/kill", { method: "POST", body: JSON.stringify({ on: false }) }), "Kill switch off.");
+$("#mode-enforcing").onclick = () => act(() => api("/api/governor-mode", { method: "POST", body: JSON.stringify({ mode: "enforcing" }) }), "Governor mode: ENFORCING.");
+$("#mode-permissive").onclick = () => act(() => api("/api/governor-mode", { method: "POST", body: JSON.stringify({ mode: "permissive" }) }), "Governor mode: PERMISSIVE — blocks and parks are recorded, not enforced.");
 $("#pv-kind").addEventListener("change", () => {
   const models = { gemini: "gemini-3.5-flash", anthropic: "claude-sonnet-5", openai: "gpt-5-mini", ollama: "llama3.1:8b", gateway: "llama3.1:8b", stub: "stub-v0" };
   $("#pv-model").value = models[$("#pv-kind").value] || "";

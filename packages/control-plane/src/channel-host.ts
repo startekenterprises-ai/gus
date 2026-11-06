@@ -15,6 +15,12 @@ import type { JobRunner } from "./jobs.js";
 import type { CommServer } from "./comm-server.js";
 import type { ApprovalEngine, ApprovalRequest } from "./approvals.js";
 import { loadDelegates, roleFor, type PrincipalRole } from "./delegates.js";
+import {
+  appendPermissiveAction,
+  loadGovernorMode,
+  readPermissiveActions,
+  writeGovernorMode,
+} from "./governor-mode.js";
 
 const SECRET_WARNING = (classes: string[]) =>
   `⚠️ That looked like a secret (${classes.join(", ")}), so I refused it: ` +
@@ -228,12 +234,14 @@ export class ChannelHost {
       (text === "/stop" ||
         text === "/resume" ||
         /^\/(approve|deny)\s+\S+$/.test(text) ||
-        /^\/update\s+\S+$/.test(text))
+        /^\/update\s+\S+$/.test(text) ||
+        text === "/mode" ||
+        text.startsWith("/mode "))
     ) {
       await this.sendTo(
         adapterName,
         msg.conversationId,
-        "That command is operator-only — I take work requests from you, but approvals, /stop, /resume and /update stay with the operator.",
+        "That command is operator-only — I take work requests from you, but approvals, /stop, /resume, /update and /mode stay with the operator.",
       );
       return;
     }
@@ -273,6 +281,37 @@ export class ChannelHost {
       }
       const ack = this.updateCommands.startUpdate(msg.conversationId, upd[1]);
       await this.sendTo(adapterName, msg.conversationId, ack);
+      return;
+    }
+
+    // v0.4: the Governor mode (operator-only — the delegate branch
+    // above already refused it for delegates). /mode reads; /mode
+    // permissive|enforcing flips, live on the next decision.
+    if (text === "/mode" || text.startsWith("/mode ")) {
+      const arg = text.slice("/mode".length).trim();
+      if (arg === "permissive" || arg === "enforcing") {
+        writeGovernorMode(this.stateDir, arg, `channel:${adapterName}`);
+        await this.sendTo(
+          adapterName,
+          msg.conversationId,
+          arg === "permissive"
+            ? "⚠️ Governor mode: PERMISSIVE. Shield verdicts and approval parks no longer bind — everything is still scanned, classified, capped, and receipted, and every let-through is recorded in the permissive report (panel). vault_read stays denied; the caps and kill switch are unchanged. /mode enforcing restores full enforcement."
+            : "🛡 Governor mode: ENFORCING. Shield verdicts and approval parks bind, as before.",
+        );
+        return;
+      }
+      const mode = loadGovernorMode(this.stateDir);
+      const dayStart = new Date();
+      dayStart.setHours(0, 0, 0, 0);
+      const today = readPermissiveActions(this.stateDir, dayStart.getTime());
+      await this.sendTo(
+        adapterName,
+        msg.conversationId,
+        `Governor mode: ${mode.toUpperCase()}. Permissive let-throughs today: ${today.length}. ` +
+          (mode === "permissive"
+            ? "Blocks and parks are being recorded, not enforced. /mode enforcing to harden."
+            : "/mode permissive relaxes enforcement (everything still scanned, capped, and receipted)."),
+      );
       return;
     }
 
@@ -330,6 +369,17 @@ export class ChannelHost {
         this.logEvent("events.jsonl", {
           ts: Date.now(),
           kind: "shield_flag_inbound",
+          jobId: job.id,
+          detail: decision.detail,
+        });
+      }
+      if (decision.permissive) {
+        // The gate log already carries the would-be entry (the
+        // permissive report reads it there); this event is the
+        // host-side marker that the job proceeded under the mode.
+        this.logEvent("events.jsonl", {
+          ts: Date.now(),
+          kind: "permissive_ingress",
           jobId: job.id,
           detail: decision.detail,
         });
@@ -534,6 +584,13 @@ export class ChannelHost {
         `No answer within ${secs}s counts as a denial.`,
       buttons,
     );
+  }
+
+  /** v0.4 (HostHooks): a classifier park/deny proceeded under
+   *  permissive mode. Recorded in events + the permissive report. */
+  onPermissiveAction(jobId: string, detail: string): void {
+    this.logEvent("events.jsonl", { ts: Date.now(), kind: "permissive_action", jobId, detail });
+    appendPermissiveAction(this.stateDir, { ts: Date.now(), jobId, kind: "policy", detail });
   }
 
   onCapExceeded(jobId: string, detail: string): void {

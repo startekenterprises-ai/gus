@@ -20,6 +20,7 @@ import { estimateTokens, fakeComplete, FAKE_MODEL_NAME } from "./provider.js";
 import { stubCompletion, type Provider } from "./providers.js";
 import { isGmailTool } from "./gmail.js";
 import { isMacTool } from "./mac.js";
+import type { GovernorMode } from "./governor-mode.js";
 
 export interface HostHooks {
   onRuntimeHello(): void;
@@ -39,6 +40,10 @@ export interface HostHooks {
   /** Phase 2: the Governor refused a model call at a spend cap and the
    *  job was settled failed-loudly — the host notifies the operator. */
   onCapExceeded(jobId: string, detail: string): void;
+  /** v0.4: permissive mode let a would-be park/deny proceed. The
+   *  host records it in the permissive report. Optional so older
+   *  hosts (the canary) compile unchanged. */
+  onPermissiveAction?(jobId: string, detail: string): void;
   onJobUpdate(jobId: string, note: string): void;
   onJobFinal(jobId: string, text: string): Promise<void>;
   logRuntime(level: string, text: string): void;
@@ -166,7 +171,17 @@ export class CommServer {
      *  as the GmailGate: absent = plain refusal, never a path to the
      *  runtime. */
     private macGate?: MacGate,
+    /** v0.4: the Governor mode, re-read per tool call so a flip is
+     *  live immediately. Absent = enforcing. In permissive mode a
+     *  classifier park/deny proceeds instead, stamped via
+     *  hooks.onPermissiveAction — EXCEPT vault_read, which is
+     *  floored below before the mode is ever consulted. */
+    private modeFn?: () => GovernorMode,
   ) {}
+
+  private permissive(): boolean {
+    return this.modeFn?.() === "permissive";
+  }
 
   async start(): Promise<void> {
     if (existsSync(this.socketPath)) unlinkSync(this.socketPath);
@@ -587,10 +602,14 @@ export class CommServer {
           args: req.args,
         });
 
-        if (cls.action === "deny") {
+        if (cls.action === "deny" && !(this.permissive() && req.tool !== "vault_read")) {
           // Denial is a terminal, receipted outcome — never a silent
           // drop, never a park. (Phase 1's vault_read refusal lives
           // here now: it is the classifier's hard-deny entry.)
+          // v0.4: permissive mode lets a denial proceed (stamped
+          // below) — EXCEPT vault_read, floored here before the mode
+          // is consulted: a secret entering model context is an
+          // irreversible disclosure, not a reversible action.
           if (req.tool === "vault_read") {
             this.hooks.logRuntime(
               "warn",
@@ -607,7 +626,15 @@ export class CommServer {
           break;
         }
 
-        if (cls.action === "needs-approval") {
+        if (cls.action === "deny" && this.permissive() && req.tool !== "vault_read") {
+          const detail =
+            `tool ${req.tool} would be DENIED in enforcing mode (${cls.reason}) — ` +
+            `proceeding under PERMISSIVE mode`;
+          this.hooks.onPermissiveAction?.(req.jobId, detail);
+          this.hooks.logRuntime("warn", `permissive let-through for job ${req.jobId}: ${detail}`);
+        }
+
+        if (cls.action === "needs-approval" && !this.permissive()) {
           // Park: the approval record (with the exact screened
           // arguments + their hash) is created BEFORE the job parks;
           // the host presents it on the channel. The runtime's turn
@@ -641,6 +668,14 @@ export class CommServer {
             note: `parked for approval ${approval.id}: nothing executed`,
           });
           break;
+        }
+
+        if (cls.action === "needs-approval" && this.permissive()) {
+          const detail =
+            `tool ${req.tool} would PARK for approval in enforcing mode (${cls.reason}) — ` +
+            `proceeding under PERMISSIVE mode`;
+          this.hooks.onPermissiveAction?.(req.jobId, detail);
+          this.hooks.logRuntime("warn", `permissive let-through for job ${req.jobId}: ${detail}`);
         }
 
         // --- allowed: fetch executes HERE, in the egress proxy (Phase

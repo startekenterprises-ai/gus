@@ -57,6 +57,11 @@ import { createMacHostAdapter } from "./mac-native.js";
 import { Onboarding, DIGEST_PROMPT } from "./onboarding.js";
 import { resolveChannelAdapter } from "./channel-setup.js";
 import { BridgeInboxAdapter } from "./bridge-inbox.js";
+import {
+  loadGovernorMode,
+  readPermissiveActions,
+  writeGovernorMode,
+} from "./governor-mode.js";
 import { SkillInstaller } from "./skills.js";
 import { startHeartbeat } from "./heartbeat.js";
 
@@ -144,6 +149,8 @@ const shieldGate = new ShieldGate({
   client: new ShieldClient({ vault, baseUrl: process.env.GUS_SHIELD_BASE_URL }),
   policy: () => policy.shieldPolicy(),
   logPath: `${stateDir}/gate.jsonl`,
+  // v0.4: the Governor mode (governor-mode.ts) — re-read per scan.
+  mode: () => loadGovernorMode(stateDir),
 });
 
 // Phase 6: the Gmail pack. Executes in this process (like the egress
@@ -195,9 +202,10 @@ const comm = new CommServer(socketPath, governor, jobs, {
   onCapExceeded: (jobId, detail) => host.onCapExceeded(jobId, detail),
   onJobUpdate: (jobId, note) => host.onJobUpdate(jobId, note),
   onJobFinal: (jobId, text) => host.onJobFinal(jobId, text),
+  onPermissiveAction: (jobId, detail) => host.onPermissiveAction(jobId, detail),
   logRuntime: (level, text) =>
     appendFileSync(`${stateDir}/runtime-log.jsonl`, JSON.stringify({ ts: Date.now(), level, text }) + "\n"),
-}, policy, approvals, egress, shieldGate, () => resolveProvider(stateDir, vault), gmail, mac);
+}, policy, approvals, egress, shieldGate, () => resolveProvider(stateDir, vault), gmail, mac, () => loadGovernorMode(stateDir));
 host.attachComm(comm);
 
 // Phase 3: the Updater. Constructed always (its queries power
@@ -290,6 +298,16 @@ const panelBackend: PanelBackend = {
       pendingApprovals: approvals.pending().length,
       spendTodayUsd: spend.todayUsd,
       spendMonthUsd: spend.monthUsd,
+      governorMode: loadGovernorMode(stateDir),
+      permissiveToday: (() => {
+        const dayStart = new Date();
+        dayStart.setHours(0, 0, 0, 0);
+        const all = readPermissiveActions(stateDir, dayStart.getTime());
+        return {
+          count: all.length,
+          recent: all.slice(-8).reverse().map((a) => ({ ts: a.ts, kind: a.kind, detail: a.detail })),
+        };
+      })(),
     };
   },
   ledger: () => ({
@@ -338,6 +356,19 @@ const panelBackend: PanelBackend = {
     return after && after.status !== "pending"
       ? { ok: true, detail: approve ? "Approved — executing exactly that." : "Denied. Nothing ran." }
       : { ok: false, detail: "The approval could not be resolved (kill switch on, or it just expired). Nothing was executed." };
+  },
+  setGovernorMode: async (mode) => {
+    if (mode !== "enforcing" && mode !== "permissive") {
+      return { ok: false, detail: `Unknown mode "${mode}" — expected "enforcing" or "permissive". Nothing changed.` };
+    }
+    writeGovernorMode(stateDir, mode, "panel");
+    return {
+      ok: true,
+      detail:
+        mode === "permissive"
+          ? "Governor mode: PERMISSIVE — blocks and parks are recorded, not enforced. Caps, kill switch, and scanning unchanged."
+          : "Governor mode: ENFORCING — Shield verdicts and approval parks bind.",
+    };
   },
   setKilled: async (on) => {
     if (on) {

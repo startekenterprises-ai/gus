@@ -16,6 +16,8 @@ final class GusAppDelegate: NSObject, NSApplicationDelegate {
     private var restartItem: NSMenuItem!
     private var stopItem: NSMenuItem!
     private var loginItem: NSMenuItem!
+    private var modeEnforcingItem: NSMenuItem!
+    private var modePermissiveItem: NSMenuItem!
     private var helperProcess: Process?
     private var setupWindow: SetupWindowController?
     private var statusTimer: Timer?
@@ -77,6 +79,14 @@ final class GusAppDelegate: NSObject, NSApplicationDelegate {
         loginItem = NSMenuItem(title: "Start at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
         menu.addItem(loginItem)
         menu.addItem(.separator())
+        let modeHeader = NSMenuItem(title: "Governor Mode", action: nil, keyEquivalent: "")
+        modeHeader.isEnabled = false
+        menu.addItem(modeHeader)
+        modeEnforcingItem = NSMenuItem(title: "Enforcing", action: #selector(setEnforcing), keyEquivalent: "")
+        menu.addItem(modeEnforcingItem)
+        modePermissiveItem = NSMenuItem(title: "Permissive (record, don't block)", action: #selector(setPermissive), keyEquivalent: "")
+        menu.addItem(modePermissiveItem)
+        menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Setup & Permissions…", action: #selector(showSetup), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Open Setup Panel", action: #selector(openPanel), keyEquivalent: ""))
         menu.addItem(.separator())
@@ -100,7 +110,41 @@ final class GusAppDelegate: NSObject, NSApplicationDelegate {
         restartItem?.isEnabled = running
         stopItem?.isEnabled = running
         loginItem?.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        let permissive = governorMode() == "permissive"
+        modeEnforcingItem?.state = permissive ? .off : .on
+        modePermissiveItem?.state = permissive ? .on : .off
     }
+
+    // MARK: Governor mode (v0.4 — same state file the control plane,
+    // the panel, and the /mode chat command read and write)
+
+    private var governorModePath: String {
+        NSHomeDirectory() + "/.gus/state/governor-mode.json"
+    }
+
+    private func governorMode() -> String {
+        guard let data = FileManager.default.contents(atPath: governorModePath),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let mode = obj["mode"] as? String else {
+            return "enforcing"
+        }
+        return mode == "permissive" ? "permissive" : "enforcing"
+    }
+
+    private func setGovernorMode(_ mode: String) {
+        let obj: [String: Any] = [
+            "mode": mode,
+            "setBy": "gus-app-menu",
+            "ts": Int(Date().timeIntervalSince1970 * 1000),
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted]) {
+            try? data.write(to: URL(fileURLWithPath: governorModePath))
+        }
+        refreshStatus()
+    }
+
+    @objc private func setEnforcing() { setGovernorMode("enforcing") }
+    @objc private func setPermissive() { setGovernorMode("permissive") }
 
     // MARK: launchd control
 

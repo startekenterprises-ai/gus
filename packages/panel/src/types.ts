@@ -26,6 +26,12 @@ export interface PanelStatusData {
   pendingApprovals: number;
   spendTodayUsd: number;
   spendMonthUsd: number;
+  /** v0.4: the Governor mode + today's permissive let-throughs. */
+  governorMode: "enforcing" | "permissive";
+  permissiveToday: {
+    count: number;
+    recent: { ts: number; kind: string; detail: string }[];
+  };
 }
 
 export interface PanelLedgerData {
@@ -119,6 +125,9 @@ export interface PanelBackend {
    *  channel uses — the panel cannot widen, rebind, or forge. */
   resolveApproval(id: string, approve: boolean): Promise<PanelActionResult>;
   setKilled(on: boolean): Promise<PanelActionResult>;
+  /** v0.4: flip the Governor mode (governor-mode.ts in the control
+   *  plane). Live on the next decision; no restart. */
+  setGovernorMode(mode: string): Promise<PanelActionResult>;
   /** Names only — there is no read path for values, here either. */
   vaultNames(): string[];
   storeSecret(name: string, value: string): PanelActionResult;
