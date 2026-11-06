@@ -17,6 +17,13 @@ import { createConnection, type Socket } from "node:net";
 import type { ControlMessage, RuntimeRequest } from "@gus/shared";
 import { GUS_VERSION } from "@gus/shared";
 import { Workspace, executeTool } from "./tools.js";
+import { TurnQueue } from "./turn-queue.js";
+
+/** v0.3.4: turns are serialized — the loop's waiters match by
+ *  message type and `currentTurn` is a singleton, so two turns in
+ *  flight cross-deliver model output (field: 2026-11-05, one job
+ *  failed its post-condition with the other job's text). */
+const turns = new TurnQueue();
 
 const SOCKET = process.env.GUS_COMM_SOCKET ?? "/comm/gus.sock";
 const WORKSPACE = process.env.GUS_WORKSPACE ?? "/workspace";
@@ -155,7 +162,7 @@ function onMessage(m: ControlMessage): void {
       killed = m.killed;
       break;
     case "user_message":
-      void runTurn(m.jobId, m.text);
+      turns.enqueue(() => runTurn(m.jobId, m.text));
       break;
     case "approved_execution": {
       // Phase 2: the operator approved this exact action on the channel
@@ -165,7 +172,7 @@ function onMessage(m: ControlMessage): void {
       // job's turn from the tool result so the job can settle through
       // the normal verification path. The runtime can receive this
       // message; it has no way to send anything resembling it.
-      void (async () => {
+      turns.enqueue(async () => {
         const signal = { aborted: killed };
         currentTurn = { jobId: m.jobId, signal };
         try {
@@ -193,7 +200,7 @@ function onMessage(m: ControlMessage): void {
         } finally {
           if (currentTurn?.jobId === m.jobId) currentTurn = null;
         }
-      })();
+      });
       break;
     }
     case "kill":
