@@ -162,10 +162,11 @@ const gmail = new GmailService(new HttpGmailTransport(vault), {
 // service enforces the fs/shell jail from the policy's mac section,
 // and every executed action verifies its post-condition against the
 // host. Phase 8: the host adapter is the native bridge when the
-// GusMacHost helper is present on this host (GUS_MAC_HOST=1 or its
-// socket exists — see mac-native.ts and docs/mac-app.md); everywhere
-// else the unavailable adapter refuses every mac_* execution plainly
-// and loudly, exactly as before.
+// GusMacHost helper is present on this host. The wiring resolves
+// lazily, per call (mac-native.ts): a helper that appears after this
+// process booted is picked up on the next mac_* call, and until one
+// exists the unavailable adapter refuses every mac_* execution
+// plainly and loudly, exactly as before.
 const mac = new MacService(createMacHostAdapter(), {
   workDirs: () => policy.load().mac.workDirs,
   shield: shieldGate,

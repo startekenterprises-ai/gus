@@ -14,6 +14,7 @@ import type { Governor } from "./governor.js";
 import type { JobRunner } from "./jobs.js";
 import type { CommServer } from "./comm-server.js";
 import type { ApprovalEngine, ApprovalRequest } from "./approvals.js";
+import { loadDelegates, roleFor, type PrincipalRole } from "./delegates.js";
 
 const SECRET_WARNING = (classes: string[]) =>
   `⚠️ That looked like a secret (${classes.join(", ")}), so I refused it: ` +
@@ -105,6 +106,13 @@ export class ChannelHost {
     appendFileSync(`${this.stateDir}/${file}`, JSON.stringify(obj) + "\n");
   }
 
+  /** Who is speaking in this conversation (delegates.ts). The config
+   *  is re-read per event: the operator edits delegates.json live and
+   *  the change lands without a restart. */
+  private principalFor(conversationId: string, senderId: string): PrincipalRole {
+    return roleFor(loadDelegates(this.stateDir), conversationId, senderId);
+  }
+
   /** All outbound channel text passes egress screening — no exceptions,
    *  including our own static notices. */
   private async sendTo(
@@ -171,6 +179,23 @@ export class ChannelHost {
         return;
       }
       const [, action, id] = m;
+      // Sender gate (delegates.ts): in a gated conversation only the
+      // OPERATOR's press resolves. A delegate's or stranger's press is
+      // refused and logged — the button existing in a shared chat must
+      // never make approval a group privilege.
+      const pressRole = this.principalFor(ev.press.conversationId, ev.press.senderId);
+      if (pressRole.role === "delegate" || pressRole.role === "stranger") {
+        await this.ackSafely(adapter, ev.press.callbackId, "Only the operator can resolve approvals.");
+        this.logEvent("events.jsonl", {
+          ts: Date.now(),
+          kind: "approval_resolve_rejected",
+          id,
+          via: "channel-button",
+          reason: "not-operator",
+          senderId: ev.press.senderId,
+        });
+        return;
+      }
       await this.ackSafely(adapter, ev.press.callbackId, action === "approve" ? "Approved." : "Denied.");
       await this.resolveApproval(adapterName, ev.press.conversationId, id, action === "approve", "channel-button");
       return;
@@ -183,6 +208,35 @@ export class ChannelHost {
       return;
     }
     const text = msg.text.trim();
+    // Principal gate (delegates.ts): in a gated conversation a
+    // stranger is ignored outright, and a delegate gets job requests
+    // only — approvals, /stop, /resume and /update stay the
+    // operator's. Ungated conversations are legacy (the sender is the
+    // operator by construction) and skip every check below.
+    const role = this.principalFor(msg.conversationId, msg.senderId);
+    if (role.role === "stranger") {
+      this.logEvent("events.jsonl", {
+        ts: Date.now(),
+        kind: "message_ignored_stranger",
+        conversationId: msg.conversationId,
+        senderId: msg.senderId,
+      });
+      return;
+    }
+    if (
+      role.role === "delegate" &&
+      (text === "/stop" ||
+        text === "/resume" ||
+        /^\/(approve|deny)\s+\S+$/.test(text) ||
+        /^\/update\s+\S+$/.test(text))
+    ) {
+      await this.sendTo(
+        adapterName,
+        msg.conversationId,
+        "That command is operator-only — I take work requests from you, but approvals, /stop, /resume and /update stay with the operator.",
+      );
+      return;
+    }
     if (text === "/stop") return this.kill(adapterName, msg.conversationId, `channel:${adapterName}`);
     if (text === "/resume") return this.resume(adapterName, msg.conversationId);
     // Approval resolution by command — the text fallback for adapters
@@ -234,7 +288,12 @@ export class ChannelHost {
         : /^fetch\b/i.test(text)
           ? "fetch-summarize"
           : "chat";
-    const job = this.jobs.create(kind, msg.conversationId, screened.redacted);
+    // A delegate's request carries its origin into the job record and
+    // the runtime prompt alike: the model knows who asked, and the
+    // receipt chain covers the prefixed text.
+    const createText =
+      role.role === "delegate" ? `[from ${role.name}] ${screened.redacted}` : screened.redacted;
+    const job = this.jobs.create(kind, msg.conversationId, createText);
     this.jobs.transition(job.id, "running");
 
     // --- Phase 4: the Shield gate scans the inbound message before
@@ -277,8 +336,9 @@ export class ChannelHost {
       }
     }
 
-    this.pendingDeliveries.set(job.id, text);
-    this.comm.pushUserMessage({ jobId: job.id, kind, text });
+    const jobText = role.role === "delegate" ? `[from ${role.name}] ${text}` : text;
+    this.pendingDeliveries.set(job.id, jobText);
+    this.comm.pushUserMessage({ jobId: job.id, kind, text: jobText });
   }
 
   async kill(adapterName: string, conversationId: string, by: string): Promise<void> {

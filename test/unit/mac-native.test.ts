@@ -35,6 +35,7 @@ import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  LazyMacHostAdapter,
   NativeMacHostAdapter,
   createMacHostAdapter,
 } from "../../packages/control-plane/src/mac-native.js";
@@ -167,15 +168,44 @@ test("native: shellRun honours the shellPath override (the /bin/sh path CI exerc
 
 // ---------------------------------------------------------------- wiring
 
-test("wiring: createMacHostAdapter picks native only when the helper is plausibly present", () => {
-  const no = () => false;
-  const yes = () => true;
-  assert.ok(createMacHostAdapter({}, no) instanceof UnavailableMacHostAdapter);
-  assert.ok(createMacHostAdapter({ GUS_MAC_HOST: "1" }, no) instanceof NativeMacHostAdapter);
-  assert.ok(createMacHostAdapter({}, yes) instanceof NativeMacHostAdapter);
-  const custom = createMacHostAdapter({ GUS_MAC_HOST_SOCKET: "/tmp/custom.sock" }, yes);
-  assert.ok(custom instanceof NativeMacHostAdapter);
-  assert.equal((custom as NativeMacHostAdapter).socketPath, "/tmp/custom.sock");
+class FakeNativeAdapter extends UnavailableMacHostAdapter {
+  opened: string[] = [];
+  override async openApp(app: string): Promise<string> {
+    this.opened.push(app);
+    return `opened "${app}"`;
+  }
+}
+
+test("wiring: with no helper present, calls refuse plainly as not installed", async () => {
+  const a = createMacHostAdapter({}, () => false);
+  await assert.rejects(() => a.openApp("Calculator"), /not installed/);
+});
+
+test("wiring: a helper appearing after boot is picked up on the next call (boot-race fix)", async () => {
+  let present = false;
+  const fake = new FakeNativeAdapter();
+  const a = createMacHostAdapter({}, () => present, () => fake);
+  await assert.rejects(() => a.openApp("Calculator"), /not installed/);
+  present = true;
+  assert.equal(await a.openApp("Calculator"), 'opened "Calculator"');
+  assert.deepEqual(fake.opened, ["Calculator"]);
+});
+
+test("wiring: GUS_MAC_HOST=1 forces the native path even with no socket file", async () => {
+  const a = createMacHostAdapter(
+    { GUS_MAC_HOST: "1", GUS_MAC_HOST_SOCKET: join(dir, "absent.sock") },
+    () => false,
+  );
+  await assert.rejects(
+    () => a.openApp("Calculator"),
+    (e: unknown) => !/not installed/.test(e instanceof Error ? e.message : String(e)),
+  );
+});
+
+test("wiring: the socket path comes from GUS_MAC_HOST_SOCKET", () => {
+  const a = createMacHostAdapter({ GUS_MAC_HOST_SOCKET: "/tmp/custom.sock" }, () => true);
+  assert.ok(a instanceof LazyMacHostAdapter);
+  assert.equal((a as LazyMacHostAdapter).socketPath, "/tmp/custom.sock");
 });
 
 // ------------------------------------------------------------- integration

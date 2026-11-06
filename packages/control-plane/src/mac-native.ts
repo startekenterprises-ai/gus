@@ -308,21 +308,91 @@ function isSocketAbsent(e: unknown): boolean {
 }
 
 /**
- * The main.ts wiring rule (Phase 8): the native adapter when the
- * helper is plausibly present — GUS_MAC_HOST=1 forces it, or the
- * helper socket file exists — and the plainly-refusing unavailable
- * adapter everywhere else, so a non-Mac host (or a Mac before the
- * install sitting) keeps failing mac_* calls loudly and honestly
- * instead of timing out against a socket that will never exist.
- * `exists` is injectable for the unit suite.
+ * The main.ts wiring rule: a LAZY adapter that decides per call, not
+ * once at boot. The native adapter is picked up the first time the
+ * helper is plausibly present (GUS_MAC_HOST=1 forces it, or the
+ * helper socket file exists) and kept from then on; until then every
+ * call refuses plainly via the unavailable adapter, so a non-Mac host
+ * (or a Mac before the install sitting) keeps failing mac_* calls
+ * loudly and honestly instead of timing out against a socket that
+ * will never exist.
+ *
+ * Why per call (field fix, 2026-11-05): the Phase 8 rule decided once
+ * at control-plane boot. When GUS.app and the control plane started
+ * in the same second, the check ran before the helper had bound its
+ * socket and the process wired "unavailable" for its whole lifetime
+ * — every mac_* call refused with "not installed" while the helper
+ * sat healthy. Resolving lazily makes the wiring follow the helper
+ * whenever it appears.
+ * `exists` and the native factory are injectable for the unit suite.
  */
+export class LazyMacHostAdapter implements MacHostAdapter {
+  readonly socketPath: string;
+  private native?: MacHostAdapter;
+  private readonly unavailable = new UnavailableMacHostAdapter();
+
+  constructor(
+    socketPath: string,
+    private readonly forced: boolean,
+    private readonly exists: (path: string) => boolean,
+    private readonly makeNative: (socketPath: string) => MacHostAdapter,
+  ) {
+    this.socketPath = socketPath;
+  }
+
+  private inner(): MacHostAdapter {
+    if (this.native) return this.native;
+    if (this.forced || this.exists(this.socketPath)) {
+      this.native = this.makeNative(this.socketPath);
+      return this.native;
+    }
+    return this.unavailable;
+  }
+
+  async observe(): Promise<MacObservation> {
+    return this.inner().observe();
+  }
+  async probe(): Promise<MacProbe> {
+    return this.inner().probe();
+  }
+  async click(args: MacClickArgs): Promise<string> {
+    return this.inner().click(args);
+  }
+  async typeText(text: string): Promise<string> {
+    return this.inner().typeText(text);
+  }
+  async key(combo: string): Promise<string> {
+    return this.inner().key(combo);
+  }
+  async scroll(direction: MacScrollDirection, amount: number): Promise<string> {
+    return this.inner().scroll(direction, amount);
+  }
+  async openApp(app: string): Promise<string> {
+    return this.inner().openApp(app);
+  }
+  async focusWindow(args: { app?: string; title?: string }): Promise<string> {
+    return this.inner().focusWindow(args);
+  }
+  async readFile(absPath: string): Promise<string> {
+    return this.inner().readFile(absPath);
+  }
+  async writeFile(absPath: string, content: string): Promise<void> {
+    return this.inner().writeFile(absPath, content);
+  }
+  async shellRun(command: string, cwd: string): Promise<MacShellResult> {
+    return this.inner().shellRun(command, cwd);
+  }
+  async pickerSelect(absPath: string): Promise<string> {
+    return this.inner().pickerSelect(absPath);
+  }
+}
+
 export function createMacHostAdapter(
   env: NodeJS.ProcessEnv = process.env,
   exists: (path: string) => boolean = existsSync,
+  makeNative: (socketPath: string) => MacHostAdapter = (socketPath) =>
+    new NativeMacHostAdapter({ socketPath }),
 ): MacHostAdapter {
   const socketPath = env.GUS_MAC_HOST_SOCKET ?? DEFAULT_MAC_HOST_SOCKET;
-  if (env.GUS_MAC_HOST === "1" || exists(socketPath)) {
-    return new NativeMacHostAdapter({ socketPath });
-  }
-  return new UnavailableMacHostAdapter();
+  return new LazyMacHostAdapter(socketPath, env.GUS_MAC_HOST === "1", exists, makeNative);
 }
