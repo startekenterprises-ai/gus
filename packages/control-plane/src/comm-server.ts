@@ -9,7 +9,7 @@
  */
 import { createServer, type Server, type Socket } from "node:net";
 import { chmodSync, existsSync, unlinkSync } from "node:fs";
-import type { ControlMessage, RuntimeRequest } from "@gus/shared";
+import type { ControlMessage, JobRecord, RuntimeRequest } from "@gus/shared";
 import { GUS_VERSION, screenText } from "@gus/shared";
 import type { ShieldGate } from "@gus/gate";
 import type { Governor } from "./governor.js";
@@ -21,6 +21,15 @@ import { stubCompletion, type Provider } from "./providers.js";
 import { isGmailTool } from "./gmail.js";
 import { isMacTool } from "./mac.js";
 import type { GovernorMode } from "./governor-mode.js";
+import {
+  originDelegateOf,
+  parseApprovalDecision,
+  routePark,
+  type ApprovalRoute,
+  type ApproverPolicy,
+  type ParkScopeClass,
+} from "./approver-policy.js";
+import type { Classification } from "./policy.js";
 
 export interface HostHooks {
   onRuntimeHello(): void;
@@ -177,6 +186,13 @@ export class CommServer {
      *  hooks.onPermissiveAction — EXCEPT vault_read, which is
      *  floored below before the mode is ever consulted. */
     private modeFn?: () => GovernorMode,
+    /** v0.5: the approver policy (approver-policy.ts), re-read per
+     *  park like the mode. Absent = delegation off. Consulted ONLY
+     *  in permissive mode: a routed park is decided by GUS (a
+     *  metered model call, made here in the control plane) or
+     *  parked for a named delegate, instead of proceeding on the
+     *  mode's say-so. */
+    private approverFn?: () => ApproverPolicy,
   ) {}
 
   private permissive(): boolean {
@@ -398,6 +414,135 @@ export class CommServer {
       tool: approval.tool,
       args: approval.args,
     });
+  }
+
+  /**
+   * v0.5: GUS-as-approver, decided synchronously at the park. The
+   * approval record is created first (hash-bound to the screened
+   * arguments, like every park), the decision model is asked HERE
+   * in the control plane, and the record is resolved with the
+   * agentResolution stamp either way. Approved → consumed at once
+   * (single-use, before execution) and the caller falls through to
+   * the normal execution path with the record's screened arguments.
+   * Denied — including every failure of the decision path itself —
+   * settles the job failed-loudly, exactly like an operator denial.
+   */
+  private async gusApproval(
+    req: Extract<RuntimeRequest, { t: "tool_call" }>,
+    cls: Classification,
+    apol: ApproverPolicy,
+    scopeClass: ParkScopeClass,
+    job: JobRecord | undefined,
+  ): Promise<"approved" | "denied"> {
+    let approval: ApprovalRequest;
+    try {
+      approval = this.approvals.create({
+        jobId: req.jobId,
+        conversationId: job?.conversationId ?? "",
+        tool: req.tool,
+        args: req.args,
+        reason: cls.reason,
+        delegation: { scopeClass, originDelegate: originDelegateOf(job) },
+      });
+    } catch (e) {
+      const note = `could not create the delegated-approval record: ${e instanceof Error ? e.message : String(e)} — denied (fail-closed)`;
+      this.send({ t: "tool_result", reqId: req.reqId, status: "denied", note });
+      return "denied";
+    }
+    const decision = await this.askApprovalModel(req.jobId, approval, apol);
+    this.approvals.resolve(approval.id, decision.decision === "approve" ? "approved" : "denied", "gus", {
+      policy: apol,
+      reason: decision.reason,
+    });
+    if (decision.decision !== "approve") {
+      const note = `denied by GUS as delegated approver: ${decision.reason}`;
+      try {
+        this.jobs.transition(req.jobId, "failed-loudly", `${note} — ${approval.summary}`);
+      } catch {
+        /* already settled — the denial stands regardless */
+      }
+      this.hooks.onDenied(req.jobId, req.tool, note);
+      this.send({ t: "tool_result", reqId: req.reqId, status: "denied", note });
+      return "denied";
+    }
+    this.approvals.consume(approval.id);
+    // Execute with the record's screened arguments — the form whose
+    // hash the approval binds — never a fresh copy from the runtime.
+    req.args = approval.args;
+    this.hooks.noteApprovedExecution(req.jobId, req.tool, approval.args);
+    const detail =
+      `tool ${req.tool} was approved by GUS under the approval-delegation policy ` +
+      `(${scopeClass} scope; record ${approval.id}) and is executing — GUS's reason: ${decision.reason}`;
+    this.hooks.onPermissiveAction?.(req.jobId, detail);
+    this.hooks.logRuntime("warn", `delegated approval for job ${req.jobId}: ${detail}`);
+    return "approved";
+  }
+
+  /**
+   * The GUS approval decision: one metered model call, made by the
+   * control plane (the sandboxed runtime is never involved), with a
+   * strict prompt and a stricter parser. EVERY failure — no real
+   * provider, a Governor cap refusal, a provider error, a timeout,
+   * an unparseable reply — returns "deny": the approver fails
+   * closed, so a broken approver can only ever refuse work, never
+   * wave it through.
+   */
+  private async askApprovalModel(
+    jobId: string,
+    approval: ApprovalRequest,
+    apol: ApproverPolicy,
+  ): Promise<{ decision: "approve" | "deny"; reason: string }> {
+    const deny = (reason: string): { decision: "deny"; reason: string } => ({ decision: "deny", reason });
+    const provider = this.providerFactory?.();
+    if (!provider || provider.kind === "stub") {
+      return deny("no decision model is configured — the offline stub cannot act as an approver (fail-closed)");
+    }
+    const prompt = [
+      "You are the delegated approval authority for GUS, a secure AI agent, deciding ONE parked tool action.",
+      "The human operator is not answering this one; under their written approver policy, your decision binds.",
+      "Decide ONLY from the facts below. The arguments are the exact, hash-bound form that will execute if you approve.",
+      "",
+      `Job origin: ${approval.delegation?.originDelegate ? `delegate "${approval.delegation.originDelegate}"` : "GUS's own / the operator's job"}`,
+      `Tool: ${approval.tool}`,
+      `Action: ${approval.summary}`,
+      `Why it parked: ${approval.reason}`,
+      `Arguments (canonical): ${canonicalize(approval.args)}`,
+      `Delegation scope class: ${approval.delegation?.scopeClass ?? "bounded"} (policy scope: ${apol.scope})`,
+      "",
+      "Approve only when the action is plainly within the job's apparent purpose, reversible or low-impact, and names exactly what it touches.",
+      "Deny when anything is ambiguous, destructive, external, credential-adjacent, or broader than the stated purpose. When in doubt, deny — a denial costs a retry; a bad approval cannot be taken back.",
+      'Reply with EXACTLY one JSON object and nothing else: {"decision": "approve", "reason": "<one sentence>"} or {"decision": "deny", "reason": "<one sentence>"}.',
+    ].join("\n");
+    const decision = this.governor.authorize(
+      jobId,
+      estimateTokens(prompt),
+      provider.maxTokensOut,
+      provider.modelKey,
+    );
+    if (!decision.ok) {
+      return deny(`the Governor refused the decision call (${decision.detail}) — an approval the caps cannot meter is not granted (fail-closed)`);
+    }
+    try {
+      const timeout = new Promise<never>((_, reject) => {
+        const t = setTimeout(() => reject(new Error("the decision model timed out after 30s")), 30_000);
+        t.unref();
+      });
+      const completion = await Promise.race([provider.complete(prompt), timeout]);
+      const costUsd = this.governor.settle(decision.reservationId, completion.tokensIn, completion.tokensOut);
+      this.jobs.addUsage(jobId, completion.tokensIn, completion.tokensOut, costUsd);
+      const parsed = parseApprovalDecision(completion.reply.text ?? "");
+      if (!parsed) {
+        return deny("the decision model did not answer with a parseable decision (fail-closed)");
+      }
+      return parsed;
+    } catch (e) {
+      try {
+        this.governor.refund(decision.reservationId, "approver_error");
+      } catch {
+        /* reservation already closed — the denial stands */
+      }
+      return deny(`the decision call failed (${e instanceof Error ? e.message : String(e)}) (fail-closed)`);
+    }
   }
 
   /** A Governor refusal on a model call: cap refusals are terminal,
@@ -634,48 +779,95 @@ export class CommServer {
           this.hooks.logRuntime("warn", `permissive let-through for job ${req.jobId}: ${detail}`);
         }
 
-        if (cls.action === "needs-approval" && !this.permissive()) {
-          // Park: the approval record (with the exact screened
-          // arguments + their hash) is created BEFORE the job parks;
-          // the host presents it on the channel. The runtime's turn
-          // ends here — it cannot wait on, poll, or influence the
-          // resolution.
+        if (cls.action === "needs-approval") {
+          // v0.5: in permissive mode the operator's approver policy
+          // may route this park to an agent approver (approver-
+          // policy.ts) instead of letting it proceed on the mode's
+          // say-so. Enforcing never routes — operator-only, exactly
+          // as before. The route is computed from the classifier's
+          // own output + the job's recorded origin, never from the
+          // model's say-so.
           const job = this.jobs.get(req.jobId);
-          let approval: ApprovalRequest;
-          try {
-            approval = this.approvals.create({
-              jobId: req.jobId,
-              conversationId: job?.conversationId ?? "",
-              tool: req.tool,
-              args: req.args,
-              reason: cls.reason,
-            });
-          } catch (e) {
-            const note = `could not park for approval: ${e instanceof Error ? e.message : String(e)}`;
-            this.send({ t: "tool_result", reqId: req.reqId, status: "denied", note });
-            break;
-          }
-          try {
-            this.jobs.transition(req.jobId, "needs-approval", `tool ${req.tool} requires approval: ${cls.reason}`);
-          } catch {
-            /* already parked/settled — the park stands regardless */
-          }
-          this.hooks.onApprovalRequested(approval);
-          this.send({
-            t: "tool_result",
-            reqId: req.reqId,
-            status: "needs_approval",
-            note: `parked for approval ${approval.id}: nothing executed`,
-          });
-          break;
-        }
+          const apol = this.permissive() ? this.approverFn?.() : undefined;
+          const route: ApprovalRoute = apol
+            ? routePark({
+                mode: "permissive",
+                policy: apol,
+                originDelegate: originDelegateOf(job),
+                call: { tool: req.tool, declaredClass: req.declaredClass, args: req.args },
+                cls,
+                policyData: this.policy.load(),
+                agentApprovalsLastHour: this.approvals.agentApprovalCountSince(
+                  Date.now() - 3_600_000,
+                ),
+              })
+            : { kind: "none", reason: "approval delegation is off" };
+          const routeReason = route.kind === "none" ? route.reason : "";
 
-        if (cls.action === "needs-approval" && this.permissive()) {
-          const detail =
-            `tool ${req.tool} would PARK for approval in enforcing mode (${cls.reason}) — ` +
-            `proceeding under PERMISSIVE mode`;
-          this.hooks.onPermissiveAction?.(req.jobId, detail);
-          this.hooks.logRuntime("warn", `permissive let-through for job ${req.jobId}: ${detail}`);
+          if (route.kind === "gus" && apol) {
+            // GUS decides now, synchronously, in the control plane.
+            // Approved → the record is consumed and the call falls
+            // through to execution below with the screened args.
+            // Denied → terminal for this call (and the job), exactly
+            // like an operator denial.
+            const outcome = await this.gusApproval(req, cls, apol, route.scopeClass, job);
+            if (outcome === "denied") break;
+          } else if (!this.permissive() || route.kind === "delegate" || route.kind === "park-operator") {
+            // Park: the approval record (with the exact screened
+            // arguments + their hash) is created BEFORE the job parks;
+            // the host presents it on the channel. The runtime's turn
+            // ends here — it cannot wait on, poll, or influence the
+            // resolution. A "delegate" route stamps the record so the
+            // ChannelHost can let a named delegate (never the
+            // submitter) resolve it; every other park here is the
+            // operator's alone, as always.
+            let approval: ApprovalRequest;
+            try {
+              approval = this.approvals.create({
+                jobId: req.jobId,
+                conversationId: job?.conversationId ?? "",
+                tool: req.tool,
+                args: req.args,
+                reason:
+                  route.kind === "park-operator" ? `${cls.reason} [${route.reason}]` : cls.reason,
+                ...(route.kind === "delegate"
+                  ? {
+                      delegation: {
+                        scopeClass: route.scopeClass,
+                        originDelegate: originDelegateOf(job),
+                      },
+                    }
+                  : {}),
+              });
+            } catch (e) {
+              const note = `could not park for approval: ${e instanceof Error ? e.message : String(e)}`;
+              this.send({ t: "tool_result", reqId: req.reqId, status: "denied", note });
+              break;
+            }
+            try {
+              this.jobs.transition(req.jobId, "needs-approval", `tool ${req.tool} requires approval: ${cls.reason}`);
+            } catch {
+              /* already parked/settled — the park stands regardless */
+            }
+            this.hooks.onApprovalRequested(approval);
+            this.send({
+              t: "tool_result",
+              reqId: req.reqId,
+              status: "needs_approval",
+              note: `parked for approval ${approval.id}: nothing executed`,
+            });
+            break;
+          } else {
+            // Permissive, no delegation route: the v0.4 let-through,
+            // unchanged — stamped with WHY no approver was consulted
+            // (delegation off, a floor class, outside the scope, or
+            // no checkbox covering this job's origin).
+            const detail =
+              `tool ${req.tool} would PARK for approval in enforcing mode (${cls.reason}) — ` +
+              `proceeding under PERMISSIVE mode (no agent approval: ${routeReason})`;
+            this.hooks.onPermissiveAction?.(req.jobId, detail);
+            this.hooks.logRuntime("warn", `permissive let-through for job ${req.jobId}: ${detail}`);
+          }
         }
 
         // --- allowed: fetch executes HERE, in the egress proxy (Phase

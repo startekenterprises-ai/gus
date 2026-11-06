@@ -6,9 +6,14 @@
  * restarts, control-plane restarts, and any amount of conversation
  * compaction BY CONSTRUCTION — the agent's context is not an input to
  * anything in this file. The runtime has no message type that can
- * create, resolve, extend, or forge an approval (see comm.ts); the only
+ * create, resolve, extend, or forge an approval (see comm.ts); the
  * resolution inputs are channel events handled by the ChannelHost
- * (inline buttons, or /approve /deny commands from the operator).
+ * (inline buttons, or /approve /deny commands from the operator) —
+ * plus, since v0.5, agent approvers acting under the operator's
+ * approver policy (approver-policy.ts): GUS's control-plane decision
+ * in the CommServer, and named delegates through the same ChannelHost
+ * path. Every such resolution is stamped on the record (resolvedBy +
+ * agentResolution) so the audit trail never hides who answered.
  *
  * Binding: every request records the sha256 of the CANONICAL form of the
  * exact tool + arguments (object keys sorted recursively, so key order
@@ -32,6 +37,7 @@ import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { screenText } from "@gus/shared";
 import { sha256Hex } from "@gus/gate";
 import { gmailMessageIds, gmailRecipients } from "./gmail.js";
+import type { ApproverPolicy, ParkScopeClass } from "./approver-policy.js";
 
 export type ApprovalStatus = "pending" | "approved" | "denied" | "expired" | "consumed";
 
@@ -52,8 +58,22 @@ export interface ApprovalRequest {
   createdAt: number;
   expiresAt: number;
   resolvedAt?: number;
-  /** How it was resolved: "channel-button" | "channel-command" | "timeout". */
+  /** How it was resolved: "channel-button" | "channel-command" | "timeout"
+   *  for operator resolutions; "gus" or "delegate:<name>" when an agent
+   *  approver resolved it under the approver policy (v0.5). */
   resolvedBy?: string;
+  /** v0.5: stamped at creation when this park was routed to agent
+   *  approvers under the approver policy (Permissive mode): the
+   *  scope class that qualified it, and the delegate that submitted
+   *  the job, if any. Absent = an operator-only park, as always
+   *  before v0.5. The ChannelHost consults it (plus a fresh policy
+   *  read) before letting a delegate resolve. */
+  delegation?: { scopeClass: ParkScopeClass; originDelegate?: string };
+  /** v0.5: set when an agent approver resolved this request — the
+   *  approver-policy snapshot in force at the decision, and the
+   *  approver's stated reason (for GUS, the decision model's own
+   *  words). Operator resolutions never set it. */
+  agentResolution?: { policy: ApproverPolicy; reason: string };
 }
 
 /** Canonical JSON: object keys sorted recursively. Two argument sets
@@ -232,6 +252,9 @@ export class ApprovalEngine {
     tool: string;
     args: Record<string, unknown>;
     reason: string;
+    /** v0.5: the delegation routing facts, when this park was
+     *  routed to agent approvers (approver-policy.ts). */
+    delegation?: { scopeClass: ParkScopeClass; originDelegate?: string };
   }): ApprovalRequest {
     for (const r of this.requests.values()) {
       if (r.jobId === input.jobId && r.status === "pending") {
@@ -252,6 +275,7 @@ export class ApprovalEngine {
       status: "pending",
       createdAt: now,
       expiresAt: now + this.timeoutMs(),
+      ...(input.delegation ? { delegation: input.delegation } : {}),
     };
     this.requests.set(rec.id, rec);
     this.persist(rec);
@@ -309,15 +333,37 @@ export class ApprovalEngine {
     return undefined;
   }
 
-  /** Operator resolution (channel button or command ONLY — this method
-   *  is reachable exclusively from the ChannelHost). */
-  resolve(id: string, decision: "approved" | "denied", resolvedBy: string): ApprovalRequest {
+  /** Resolution. Operator resolutions arrive exclusively from the
+   *  ChannelHost (channel button/command or the panel, which
+   *  delegates to the host). Agent resolutions (v0.5) arrive from
+   *  the two approver-policy paths — the CommServer's GUS decision
+   *  and the ChannelHost's delegate gate — and MUST carry the
+   *  agentResolution stamp (policy snapshot + reason), so an agent
+   *  approval is never indistinguishable from the operator's. */
+  resolve(
+    id: string,
+    decision: "approved" | "denied",
+    resolvedBy: string,
+    agentResolution?: { policy: ApproverPolicy; reason: string },
+  ): ApprovalRequest {
     this.sweepExpired();
     const rec = this.requests.get(id);
     if (!rec) throw new Error(`unknown approval ${id}`);
     if (rec.status === "expired") throw new Error(`approval ${id} has expired — timeout is a denial`);
     if (rec.status !== "pending") throw new Error(`approval ${id} is already ${rec.status}`);
+    if (agentResolution) rec.agentResolution = agentResolution;
     return this.transition(rec, decision, resolvedBy);
+  }
+
+  /** v0.5: how many approvals agent approvers have resolved since
+   *  `sinceMs` — the approver policy's hourly rate budget is spent
+   *  against this count, across GUS and delegates alike. */
+  agentApprovalCountSince(sinceMs: number): number {
+    let n = 0;
+    for (const r of this.requests.values()) {
+      if (r.agentResolution && typeof r.resolvedAt === "number" && r.resolvedAt >= sinceMs) n++;
+    }
+    return n;
   }
 
   /** Mark an approved request consumed. Called BEFORE execution starts,

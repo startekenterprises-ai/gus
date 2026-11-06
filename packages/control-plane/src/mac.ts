@@ -108,12 +108,36 @@ export function macJailContains(absPath: string, workDirs: string[]): boolean {
 
 export type MacScrollDirection = "up" | "down" | "left" | "right";
 
+/**
+ * The risk category of a parked shell command (v0.5): the
+ * approval-delegation scope check (approver-policy.ts) buckets
+ * parks by it. The named categories mirror shellParkRule's rules;
+ * "unlisted" is a park for the one benign reason — no allowlist
+ * entry covers the command; "opaque" is a park because the
+ * classifier cannot see into the command (redirection,
+ * substitution, or nothing named at all).
+ */
+export type ShellRisk =
+  | "delete"
+  | "install"
+  | "publish"
+  | "privilege"
+  | "process"
+  | "keychain"
+  | "move"
+  | "network"
+  | "permission"
+  | "unlisted"
+  | "opaque";
+
 export interface ShellClassification {
   action: "allow" | "needs-approval";
   /** The severity a parked command carries (deletes and destructive
    *  patterns park as "destructive"; everything else as "write"). */
   severity: "write" | "destructive";
   reason: string;
+  /** Why it parked, in delegation-scope terms. Set on every park. */
+  risk?: ShellRisk;
 }
 
 /** Split a command line into segments on &&, ||, ; and | — the
@@ -150,16 +174,20 @@ function firstNonFlagArg(tokens: string[]): string | undefined {
  *  the scope's Once list names them (installs, credential-adjacent,
  *  external publishing) or because they can reach outside the jail's
  *  accounting (moves/copies, network shells, privilege). */
-function shellParkRule(program: string, tokens: string[]): { severity: "write" | "destructive"; reason: string } | null {
+function shellParkRule(
+  program: string,
+  tokens: string[],
+): { severity: "write" | "destructive"; reason: string; risk: ShellRisk } | null {
   const sub = firstNonFlagArg(tokens);
   switch (program) {
     case "rm":
       return {
         severity: "destructive",
+        risk: "delete",
         reason: "the command deletes files (rm) — deletes always need a one-time approval; standing approvals and the shell allowlist never cover deletes (the Yue rule)",
       };
     case "sudo":
-      return { severity: "destructive", reason: "the command elevates privilege (sudo) — privilege changes always need a one-time approval" };
+      return { severity: "destructive", risk: "privilege", reason: "the command elevates privilege (sudo) — privilege changes always need a one-time approval" };
     case "dd":
     case "mkfs":
     case "diskutil":
@@ -167,55 +195,56 @@ function shellParkRule(program: string, tokens: string[]): { severity: "write" |
     case "reboot":
     case "halt":
     case "poweroff":
-      return { severity: "destructive", reason: `the command is a destructive system operation (${program}) — always needs a one-time approval` };
+      return { severity: "destructive", risk: "privilege", reason: `the command is a destructive system operation (${program}) — always needs a one-time approval` };
     case "kill":
     case "killall":
     case "pkill":
-      return { severity: "destructive", reason: `the command controls other processes (${program}) — always needs a one-time approval` };
+      return { severity: "destructive", risk: "process", reason: `the command controls other processes (${program}) — always needs a one-time approval` };
     case "mv":
     case "cp":
       return {
         severity: "destructive",
+        risk: "move",
         reason: `the command ${program === "mv" ? "moves" : "copies"} files — it can overwrite or relocate files outside the fs jail's accounting, so it always needs a one-time approval`,
       };
     case "git":
       if (sub === "push") {
-        return { severity: "write", reason: "the command publishes externally (git push) — external sends/posts always need a one-time approval" };
+        return { severity: "write", risk: "publish", reason: "the command publishes externally (git push) — external sends/posts always need a one-time approval" };
       }
       return null;
     case "ssh":
     case "scp":
     case "sftp":
     case "rsync":
-      return { severity: "write", reason: `the command opens a network shell (${program}) outside the egress proxy — always needs a one-time approval` };
+      return { severity: "write", risk: "network", reason: `the command opens a network shell (${program}) outside the egress proxy — always needs a one-time approval` };
     case "curl":
     case "wget":
-      return { severity: "write", reason: `the command fetches over the network (${program}) outside the egress proxy — always needs a one-time approval` };
+      return { severity: "write", risk: "network", reason: `the command fetches over the network (${program}) outside the egress proxy — always needs a one-time approval` };
     case "security":
-      return { severity: "write", reason: "the command is credential-adjacent (the macOS keychain CLI) — always needs a one-time approval" };
+      return { severity: "write", risk: "keychain", reason: "the command is credential-adjacent (the macOS keychain CLI) — always needs a one-time approval" };
     case "brew":
     case "pip":
     case "pip3":
     case "gem":
     case "apt":
     case "apt-get":
-      return { severity: "write", reason: `the command installs software (${program}) — installs always need a one-time approval` };
+      return { severity: "write", risk: "install", reason: `the command installs software (${program}) — installs always need a one-time approval` };
     case "npm":
     case "yarn":
     case "pnpm":
       if (sub === "install" || sub === "add" || sub === "i") {
-        return { severity: "write", reason: `the command installs packages (${program} ${sub}) — installs always need a one-time approval` };
+        return { severity: "write", risk: "install", reason: `the command installs packages (${program} ${sub}) — installs always need a one-time approval` };
       }
       return null;
     case "cargo":
       if (sub === "install") {
-        return { severity: "write", reason: "the command installs software (cargo install) — installs always need a one-time approval" };
+        return { severity: "write", risk: "install", reason: "the command installs software (cargo install) — installs always need a one-time approval" };
       }
       return null;
     case "chmod":
     case "chown":
       if (tokens.some((t) => t === "-R" || t === "--recursive")) {
-        return { severity: "destructive", reason: `the command recursively changes file permissions (${program} -R) — always needs a one-time approval` };
+        return { severity: "destructive", risk: "permission", reason: `the command recursively changes file permissions (${program} -R) — always needs a one-time approval` };
       }
       return null;
     default:
@@ -244,35 +273,38 @@ function allowlistMatch(segmentTokens: string[], allowlist: string[]): string | 
  * an allowlisted build does not need it.
  */
 export function classifyShellCommand(command: string, allowlist: string[]): ShellClassification {
-  const park = (severity: "write" | "destructive", reason: string): ShellClassification => ({
+  const park = (severity: "write" | "destructive", reason: string, risk: ShellRisk): ShellClassification => ({
     action: "needs-approval",
     severity,
     reason,
+    risk,
   });
   if (typeof command !== "string" || command.trim() === "") {
-    return park("write", "mac.shell.run names no command — a shell approval must name exactly what runs");
+    return park("write", "mac.shell.run names no command — a shell approval must name exactly what runs", "opaque");
   }
   if (/[`>]|\$\(/.test(command)) {
     return park(
       "write",
       "the command uses redirection or substitution, which hides work from the classifier — shell commands like that always need a one-time approval",
+      "opaque",
     );
   }
   const segments = shellSegments(command);
   if (segments.length === 0) {
-    return park("write", "mac.shell.run names no command — a shell approval must name exactly what runs");
+    return park("write", "mac.shell.run names no command — a shell approval must name exactly what runs", "opaque");
   }
   const matched: string[] = [];
   for (const segment of segments) {
     const tokens = shellTokens(segment);
     if (tokens.length === 0) continue;
     const rule = shellParkRule(programOf(tokens), tokens);
-    if (rule) return park(rule.severity, rule.reason);
+    if (rule) return park(rule.severity, rule.reason, rule.risk);
     const hit = allowlistMatch(tokens, allowlist);
     if (!hit) {
       return park(
         "write",
         `shell command "${segment}" is not on the operator's allowlist — non-allowlisted shell always needs a one-time approval`,
+        "unlisted",
       );
     }
     matched.push(hit);
@@ -282,6 +314,40 @@ export function classifyShellCommand(command: string, allowlist: string[]): Shel
     severity: "write",
     reason: `shell command on the operator's allowlist (${matched.join("; ")}) in an approved work directory`,
   };
+}
+
+/**
+ * The worst risk across EVERY segment of a command (v0.5).
+ * classifyShellCommand stops at the first park — right for
+ * classification, wrong for the delegation scope check: an
+ * unlisted first segment ("ls") would mask a deleting second one
+ * ("ls && rm x") if the scope check only read the first verdict.
+ * The scope check therefore judges the chain by its worst link:
+ * any floor-category segment makes the whole command a floor.
+ */
+export function shellWorstRisk(command: string, allowlist: string[]): ShellRisk {
+  const rank = (r: ShellRisk): number =>
+    r === "delete" || r === "install" || r === "publish" || r === "privilege" || r === "process" || r === "keychain"
+      ? 3
+      : r === "unlisted"
+        ? 1
+        : 2;
+  if (typeof command !== "string" || command.trim() === "") return "opaque";
+  if (/[`>]|\$\(/.test(command)) return "opaque";
+  const segments = shellSegments(command);
+  if (segments.length === 0) return "opaque";
+  let worst: ShellRisk = "unlisted";
+  for (const segment of segments) {
+    const tokens = shellTokens(segment);
+    if (tokens.length === 0) continue;
+    const rule = shellParkRule(programOf(tokens), tokens);
+    if (rule) {
+      if (rank(rule.risk) > rank(worst)) worst = rule.risk;
+      continue;
+    }
+    if (!allowlistMatch(tokens, allowlist) && rank("unlisted") > rank(worst)) worst = "unlisted";
+  }
+  return worst;
 }
 
 // ------------------------------------------------------------ host adapter

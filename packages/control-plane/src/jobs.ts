@@ -57,11 +57,17 @@ export class JobRunner {
 
   create(kind: JobKind, conversationId: string, redactedInput: string): JobRecord {
     const id = `job_${Date.now().toString(36)}_${(counter++).toString(36)}${Math.floor(Math.random() * 1e4)}`;
+    // v0.5: the origin is read off the input the ChannelHost hands
+    // us — delegate submissions arrive stamped "[from <name>] "
+    // (channel-host.ts); everything else is the operator's own (or
+    // a system) job. Approval delegation routes on this.
+    const originMatch = /^\[from ([^\]]+)\]\s/.exec(redactedInput);
     const rec: JobRecord = {
       id,
       kind,
       state: "queued",
       inputHash: sha256Hex(redactedInput),
+      origin: originMatch ? originMatch[1] : "operator",
       conversationId,
       createdAt: Date.now(),
       updatedAt: Date.now(),

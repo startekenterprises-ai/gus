@@ -44,6 +44,13 @@ export interface JobRecord {
   /** sha256 of the (secret-guard-redacted) job input. Receipts carry this
    *  hash, never the content — the Agent-Shield Protocol discipline. */
   inputHash: string;
+  /** v0.5: who submitted this job — the delegate's name when the
+   *  ChannelHost stamped the input with its "[from <name>] " origin
+   *  prefix, else "operator" (the operator, a legacy conversation,
+   *  or a control-plane system job). Drives approval-delegation
+   *  routing (approver-policy.ts). Absent on pre-v0.5 records,
+   *  which read as "operator". */
+  origin?: string;
   conversationId: string;
   createdAt: number;
   updatedAt: number;

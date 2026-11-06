@@ -66,6 +66,24 @@ export const PANEL_HTML = `<!doctype html>
   </div>
   <div id="permissive-report" class="hint"></div>
 </div>
+<div class="row" id="delegation-row">
+  <b>Approval delegation</b>
+  <div class="hint">In <b>Permissive</b> mode only, a parked action can be routed to an agent approver instead of proceeding on the mode's say-so: GUS itself (a metered decision by the configured model, made in the control plane — a failed or unparseable decision is a denial), or a named delegate resolving a park on a job it did not submit. Some classes are floors and are <b>never</b> delegable: vault reads, deletes, installs, sends and posts, git push, sudo/kill-class shell, and keychain access. Every delegated approval is hash-bound, single-use, rate-limited, and receipted with who approved it and their reason. In Enforcing mode none of this applies — approvals stay with the operator, exactly as always — so these controls are greyed out until the Governor is permissive.</div>
+  <fieldset id="delegation-fields" style="border:0;padding:0;margin:0">
+    <label style="display:block;font-weight:400"><input type="checkbox" id="del-gus-delegates" style="width:auto;margin-right:6px">GUS may approve delegates' parked actions</label>
+    <label style="display:block;font-weight:400"><input type="checkbox" id="del-gus-own" style="width:auto;margin-right:6px">GUS may approve its own jobs' parked actions</label>
+    <label style="display:block;font-weight:400"><input type="checkbox" id="del-delegates" style="width:auto;margin-right:6px">Named delegates may approve parked actions on jobs they did not submit</label>
+    <label>Scope</label>
+    <select id="del-scope">
+      <option value="bounded">Bounded — Mac input injection, file writes outside the work folders, non-allowlisted shell</option>
+      <option value="all_except_floors">Everything except the floors</option>
+    </select>
+    <label>Max agent approvals per hour (across all agent approvers)</label>
+    <input id="del-max" type="number" min="0" max="1000" step="1">
+    <div class="acts"><button id="del-save">Save delegation policy</button></div>
+  </fieldset>
+  <div id="delegation-state" class="hint"></div>
+</div>
 <div class="row">
   <b>Settings on file</b>
   <div class="hint">What is actually saved right now — so a save is something you can verify, not something you hope happened. Keys are shown as stored or not; values never appear here.</div>
@@ -195,12 +213,32 @@ async function refresh() {
   const capsLine = st.caps && (st.caps.maxUsdPerTask != null || st.caps.maxUsdPerDay != null || st.caps.maxUsdPerMonth != null)
     ? "per task " + money(st.caps.maxUsdPerTask) + " · per day " + money(st.caps.maxUsdPerDay) + " · per month " + money(st.caps.maxUsdPerMonth)
     : "conservative defaults (token caps)";
+  const ap = st.approverPolicy || { gusApprovesDelegates: false, gusApprovesOwn: false, delegatesMayApprove: false, scope: "bounded", maxApprovalsPerHour: 30 };
+  const apOn = ap.gusApprovesDelegates || ap.gusApprovesOwn || ap.delegatesMayApprove;
+  const apLine = !apOn
+    ? "off — approvals are the operator's"
+    : "GUS→delegates " + (ap.gusApprovesDelegates ? "on" : "off") + " · GUS→own " + (ap.gusApprovesOwn ? "on" : "off") +
+      " · delegates " + (ap.delegatesMayApprove ? "on" : "off") + " · scope " + (ap.scope === "all_except_floors" ? "all except floors" : "bounded") +
+      " · ≤" + ap.maxApprovalsPerHour + "/hr" + (status.governorMode === "permissive" ? " · LIVE (permissive)" : " · inert while enforcing");
   $("#settings-on-file").innerHTML =
     "Provider: <b>" + status.provider.id + " / " + status.provider.model + "</b> · API key: <b>" + keyLine + "</b><br>" +
     "Telegram: <b>" + (st.telegramConfigured ? "bot token stored ✓" : "not configured") + "</b> · " +
     "Agent-Shield gate: <b>" + (status.shield.provisioned ? "key stored ✓ · fail-" + status.shield.onUnavailable : "not provisioned") + "</b><br>" +
     "Spend caps: <b>" + capsLine + "</b><br>" +
-    "Named delegates: <b>" + (st.delegates ?? 0) + "</b> · Mac work folders: <b>" + (st.macWorkDirs ?? 0) + "</b>";
+    "Named delegates: <b>" + (st.delegates ?? 0) + "</b> · Mac work folders: <b>" + (st.macWorkDirs ?? 0) + "</b><br>" +
+    "Approval delegation: <b>" + apLine + "</b>";
+  const dFields = $("#delegation-fields");
+  dFields.disabled = status.governorMode !== "permissive";
+  $("#delegation-state").textContent = status.governorMode === "permissive"
+    ? "Live: the Governor is permissive, so this policy routes parks from now on."
+    : "Inert while the Governor is enforcing — flip to Permissive above to enable these controls.";
+  if (!$("#delegation-row").contains(document.activeElement)) {
+    $("#del-gus-delegates").checked = !!ap.gusApprovesDelegates;
+    $("#del-gus-own").checked = !!ap.gusApprovesOwn;
+    $("#del-delegates").checked = !!ap.delegatesMayApprove;
+    $("#del-scope").value = ap.scope;
+    $("#del-max").value = ap.maxApprovalsPerHour;
+  }
   const pr = status.permissiveToday || { count: 0, recent: [] };
   $("#permissive-report").innerHTML = pr.count === 0
     ? "Permissive let-throughs today: none."
@@ -287,6 +325,10 @@ $("#kill-on").onclick = () => act(() => api("/api/kill", { method: "POST", body:
 $("#kill-off").onclick = () => act(() => api("/api/kill", { method: "POST", body: JSON.stringify({ on: false }) }), "Kill switch off.");
 $("#mode-enforcing").onclick = () => act(() => api("/api/governor-mode", { method: "POST", body: JSON.stringify({ mode: "enforcing" }) }), "Governor mode: ENFORCING.");
 $("#mode-permissive").onclick = () => act(() => api("/api/governor-mode", { method: "POST", body: JSON.stringify({ mode: "permissive" }) }), "Governor mode: PERMISSIVE — blocks and parks are recorded, not enforced.");
+$("#del-save").onclick = () => act(() => api("/api/approver-policy", { method: "POST", body: JSON.stringify({
+  gusApprovesDelegates: $("#del-gus-delegates").checked, gusApprovesOwn: $("#del-gus-own").checked,
+  delegatesMayApprove: $("#del-delegates").checked, scope: $("#del-scope").value,
+  maxApprovalsPerHour: Number($("#del-max").value) }) }), "Delegation policy saved.");
 $("#pv-kind").addEventListener("change", () => {
   const models = { gemini: "gemini-3.5-flash", anthropic: "claude-sonnet-5", openai: "gpt-5-mini", ollama: "llama3.1:8b", gateway: "llama3.1:8b", stub: "stub-v0" };
   $("#pv-model").value = models[$("#pv-kind").value] || "";

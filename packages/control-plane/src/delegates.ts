@@ -13,8 +13,14 @@
  *   delegate  — may submit job requests. Its jobs run under the same
  *               classifier, Shield gate, and spend caps as the
  *               operator's; anything that parks still parks for the
- *               OPERATOR. A delegate can never resolve an approval,
- *               stop, resume, or update — not even its own jobs'.
+ *               OPERATOR. A delegate can never stop, resume, or
+ *               update, and can never resolve an approval on its own
+ *               jobs. v0.5 adds exactly one carve-out, the approver
+ *               policy (approver-policy.ts): while the Governor is
+ *               permissive AND the operator has enabled it, a
+ *               delegate may resolve a park that was routed to agent
+ *               approvers on a job it did NOT submit — receipted
+ *               as that delegate's resolution, never the operator's.
  *   stranger  — any other sender in a gated conversation. Ignored
  *               (and logged); the bot does not answer.
  *   legacy    — a conversation with no entry in delegates.json:

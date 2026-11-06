@@ -21,6 +21,7 @@ import {
   readPermissiveActions,
   writeGovernorMode,
 } from "./governor-mode.js";
+import { delegateResolutionAllowed, loadApproverPolicy } from "./approver-policy.js";
 
 const SECRET_WARNING = (classes: string[]) =>
   `⚠️ That looked like a secret (${classes.join(", ")}), so I refused it: ` +
@@ -189,12 +190,47 @@ export class ChannelHost {
         return;
       }
       const [, action, id] = m;
-      // Sender gate (delegates.ts): in a gated conversation only the
-      // OPERATOR's press resolves. A delegate's or stranger's press is
-      // refused and logged — the button existing in a shared chat must
-      // never make approval a group privilege.
+      // Sender gate (delegates.ts): in a gated conversation the
+      // OPERATOR's press resolves. A stranger's press is refused and
+      // logged — the button existing in a shared chat must never
+      // make approval a group privilege. v0.5: a DELEGATE's press is
+      // pre-checked against the approver policy here (permissive +
+      // delegatesMayApprove + the park was routed to agent approvers
+      // + not the delegate's own job + rate budget); a press that
+      // fails is refused and logged exactly as before, and one that
+      // passes goes to resolveApproval, which re-checks the same
+      // gate at resolution time — the press alone grants nothing.
       const pressRole = this.principalFor(ev.press.conversationId, ev.press.senderId);
-      if (pressRole.role === "delegate" || pressRole.role === "stranger") {
+      if (pressRole.role === "delegate") {
+        const gate = delegateResolutionAllowed({
+          mode: loadGovernorMode(this.stateDir),
+          policy: loadApproverPolicy(this.stateDir),
+          delegation: this.approvals?.get(id)?.delegation,
+          resolverName: pressRole.name,
+          agentApprovalsLastHour: this.approvals
+            ? this.approvals.agentApprovalCountSince(Date.now() - 3_600_000)
+            : 0,
+        });
+        if (!gate.ok) {
+          await this.ackSafely(adapter, ev.press.callbackId, "Only the operator can resolve approvals.");
+          this.logEvent("events.jsonl", {
+            ts: Date.now(),
+            kind: "approval_resolve_rejected",
+            id,
+            via: "channel-button",
+            reason: "not-operator",
+            detail: gate.reason,
+            senderId: ev.press.senderId,
+          });
+          return;
+        }
+        await this.ackSafely(adapter, ev.press.callbackId, action === "approve" ? "Approved." : "Denied.");
+        await this.resolveApproval(adapterName, ev.press.conversationId, id, action === "approve", "channel-button", {
+          name: pressRole.name,
+        });
+        return;
+      }
+      if (pressRole.role === "stranger") {
         await this.ackSafely(adapter, ev.press.callbackId, "Only the operator can resolve approvals.");
         this.logEvent("events.jsonl", {
           ts: Date.now(),
@@ -233,8 +269,21 @@ export class ChannelHost {
       });
       return;
     }
+    // v0.5: a delegate's /approve//deny is no longer refused out of
+    // hand when the approver policy might let it through (Governor
+    // permissive + delegatesMayApprove) — it falls to the command
+    // branch below, where resolveApproval's agent gate re-validates
+    // everything (routed park, not its own job, rate budget) and
+    // refuses with the specific reason when any check fails. Every
+    // other privileged command stays operator-only for delegates.
+    const delegateApprovalAttempt =
+      role.role === "delegate" &&
+      /^\/(approve|deny)\s+\S+$/.test(text) &&
+      loadGovernorMode(this.stateDir) === "permissive" &&
+      loadApproverPolicy(this.stateDir).delegatesMayApprove;
     if (
       role.role === "delegate" &&
+      !delegateApprovalAttempt &&
       (text === "/stop" ||
         text === "/resume" ||
         /^\/(approve|deny)\s+\S+$/.test(text) ||
@@ -259,7 +308,14 @@ export class ChannelHost {
     // impossible to trigger by accident or by the agent's phrasing.
     const cmd = text.match(/^\/(approve|deny)\s+(\S+)$/);
     if (cmd) {
-      return this.resolveApproval(adapterName, msg.conversationId, cmd[2], cmd[1] === "approve", "channel-command");
+      return this.resolveApproval(
+        adapterName,
+        msg.conversationId,
+        cmd[2],
+        cmd[1] === "approve",
+        "channel-command",
+        role.role === "delegate" ? { name: role.name } : undefined,
+      );
     }
 
     // Phase 3 operator commands. /version is a pure status read — it
@@ -465,8 +521,19 @@ export class ChannelHost {
 
   /**
    * Resolve a pending approval from a channel event. This is the ONLY
-   * resolution path in the system: buttons and /approve//deny commands
-   * handled here. The runtime has no equivalent — see comm.ts.
+   * channel resolution path in the system: buttons and /approve//deny
+   * commands handled here (the panel delegates to this same method).
+   * The runtime has no equivalent — see comm.ts.
+   *
+   * v0.5: `agentResolver` names a DELEGATE attempting the resolution
+   * under the approver policy. The gate is re-checked here, at
+   * resolution time — mode still permissive, delegatesMayApprove
+   * still on, the park was routed to agent approvers, the job is not
+   * the resolver's own, and the hourly agent-approval budget is not
+   * spent — and any failure refuses with the reason and resolves
+   * nothing. A passing resolution is stamped on the record
+   * (resolvedBy "delegate:<name>" + the agentResolution snapshot),
+   * so it is never indistinguishable from the operator's own.
    */
   async resolveApproval(
     adapterName: string,
@@ -474,6 +541,7 @@ export class ChannelHost {
     id: string,
     approve: boolean,
     via: string,
+    agentResolver?: { name: string },
   ): Promise<void> {
     if (!this.approvals) return;
     const req = this.approvals.get(id);
@@ -492,6 +560,32 @@ export class ChannelHost {
       );
       return;
     }
+    if (agentResolver) {
+      const apol = loadApproverPolicy(this.stateDir);
+      const gate = delegateResolutionAllowed({
+        mode: loadGovernorMode(this.stateDir),
+        policy: apol,
+        delegation: req.delegation,
+        resolverName: agentResolver.name,
+        agentApprovalsLastHour: this.approvals.agentApprovalCountSince(Date.now() - 3_600_000),
+      });
+      if (!gate.ok) {
+        this.logEvent("events.jsonl", {
+          ts: Date.now(),
+          kind: "approval_resolve_rejected",
+          id,
+          via,
+          reason: `delegate-gate: ${gate.reason}`,
+          senderName: agentResolver.name,
+        });
+        await this.sendTo(
+          adapterName,
+          conversationId,
+          `That one stays with the operator: ${gate.reason}. Nothing was executed.`,
+        );
+        return;
+      }
+    }
     if (approve && this.governor.isKilled()) {
       await this.sendTo(
         adapterName,
@@ -501,7 +595,17 @@ export class ChannelHost {
       return;
     }
     try {
-      this.approvals.resolve(id, approve ? "approved" : "denied", via);
+      this.approvals.resolve(
+        id,
+        approve ? "approved" : "denied",
+        agentResolver ? `delegate:${agentResolver.name}` : via,
+        agentResolver
+          ? {
+              policy: loadApproverPolicy(this.stateDir),
+              reason: `resolved by delegate ${agentResolver.name} via ${via}, under the approval-delegation policy`,
+            }
+          : undefined,
+      );
     } catch (e) {
       await this.sendTo(
         adapterName,
@@ -516,10 +620,17 @@ export class ChannelHost {
       id,
       jobId: req.jobId,
       via,
+      ...(agentResolver ? { resolvedBy: `delegate:${agentResolver.name}` } : {}),
     });
     if (!approve) {
       try {
-        this.jobs.transition(req.jobId, "failed-loudly", `denied by operator: ${req.summary}`);
+        this.jobs.transition(
+          req.jobId,
+          "failed-loudly",
+          agentResolver
+            ? `denied by delegate ${agentResolver.name} (delegated approver): ${req.summary}`
+            : `denied by operator: ${req.summary}`,
+        );
       } catch {
         /* job already settled (kill raced us) — the denial stands */
       }
@@ -530,7 +641,13 @@ export class ChannelHost {
       );
       return;
     }
-    await this.sendTo(adapterName, conversationId, `✅ Approved: "${req.summary}". Executing exactly that now.`);
+    await this.sendTo(
+      adapterName,
+      conversationId,
+      agentResolver
+        ? `✅ Approved by ${agentResolver.name} under the delegation policy: "${req.summary}". Executing exactly that now.`
+        : `✅ Approved: "${req.summary}". Executing exactly that now.`,
+    );
     await this.comm.executeApproval(req);
   }
 
@@ -607,6 +724,9 @@ export class ChannelHost {
       `⏸ Job parked — this needs your approval before anything runs: "${req.summary}". ` +
         `Why: ${req.reason}. Nothing was executed. ` +
         `Tap Approve/Deny, or reply /approve ${req.id} or /deny ${req.id}. ` +
+        (req.delegation
+          ? `Under the approval-delegation policy, an authorized agent may also resolve this one — every resolution is receipted with who answered. `
+          : ``) +
         `No answer within ${secs}s counts as a denial.`,
       buttons,
     );

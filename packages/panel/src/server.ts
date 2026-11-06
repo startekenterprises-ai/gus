@@ -166,6 +166,18 @@ export class PanelServer {
       const result = await this.backend.setGovernorMode(String(body.mode ?? ""));
       return json(result.ok ? 200 : 400, result);
     }
+    if (method === "POST" && path === "/api/approver-policy") {
+      const body = await this.readJson(req);
+      const result = await this.backend.setApproverPolicy({
+        gusApprovesDelegates: body.gusApprovesDelegates === true,
+        gusApprovesOwn: body.gusApprovesOwn === true,
+        delegatesMayApprove: body.delegatesMayApprove === true,
+        scope: body.scope === "all_except_floors" ? "all_except_floors" : "bounded",
+        maxApprovalsPerHour:
+          typeof body.maxApprovalsPerHour === "number" ? body.maxApprovalsPerHour : 30,
+      });
+      return json(result.ok ? 200 : 400, result);
+    }
     if (method === "POST" && path === "/api/vault") {
       const body = await this.readJson(req);
       const result = this.backend.storeSecret(String(body.name ?? ""), String(body.value ?? ""));

@@ -41,7 +41,22 @@ export interface PanelStatusData {
     caps: { maxUsdPerTask?: number; maxUsdPerDay?: number; maxUsdPerMonth?: number };
     delegates: number;
     macWorkDirs: number;
+    /** v0.5: the approval-delegation policy on file (approver-
+     *  policy.ts in the control plane). It only takes effect while
+     *  the Governor is permissive; the readout shows it either way. */
+    approverPolicy: PanelApproverPolicyData;
   };
+}
+
+/** v0.5: approval delegation — who besides the operator may resolve
+ *  a parked action, and within what scope. Mirrors ApproverPolicy in
+ *  the control plane; all paths default OFF. */
+export interface PanelApproverPolicyData {
+  gusApprovesDelegates: boolean;
+  gusApprovesOwn: boolean;
+  delegatesMayApprove: boolean;
+  scope: "bounded" | "all_except_floors";
+  maxApprovalsPerHour: number;
 }
 
 export interface PanelLedgerData {
@@ -138,6 +153,10 @@ export interface PanelBackend {
   /** v0.4: flip the Governor mode (governor-mode.ts in the control
    *  plane). Live on the next decision; no restart. */
   setGovernorMode(mode: string): Promise<PanelActionResult>;
+  /** v0.5: save the approval-delegation policy (approver-policy.ts
+   *  in the control plane). Live on the next park; applies only
+   *  while the Governor is permissive. */
+  setApproverPolicy(policy: PanelApproverPolicyData): Promise<PanelActionResult>;
   /** Names only — there is no read path for values, here either. */
   vaultNames(): string[];
   storeSecret(name: string, value: string): PanelActionResult;

@@ -428,6 +428,13 @@ function stubBackend(calls: string[]): PanelBackend {
         caps: { maxUsdPerTask: 2, maxUsdPerDay: 10, maxUsdPerMonth: 100 },
         delegates: 1,
         macWorkDirs: 4,
+        approverPolicy: {
+          gusApprovesDelegates: false,
+          gusApprovesOwn: false,
+          delegatesMayApprove: false,
+          scope: "bounded" as const,
+          maxApprovalsPerHour: 30,
+        },
       },
     }),
     ledger: () => ({
@@ -450,6 +457,10 @@ function stubBackend(calls: string[]): PanelBackend {
     setGovernorMode: async (mode) => {
       calls.push(`mode:${mode}`);
       return { ok: true, detail: "mode set" };
+    },
+    setApproverPolicy: async (p) => {
+      calls.push(`approver:${p.scope}`);
+      return { ok: true, detail: "approver policy set" };
     },
     vaultNames: () => ["agent-shield"],
     storeSecret: (name) => {

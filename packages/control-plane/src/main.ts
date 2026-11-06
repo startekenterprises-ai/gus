@@ -63,6 +63,7 @@ import {
   readPermissiveActions,
   writeGovernorMode,
 } from "./governor-mode.js";
+import { loadApproverPolicy, writeApproverPolicy } from "./approver-policy.js";
 import { SkillInstaller } from "./skills.js";
 import { startHeartbeat } from "./heartbeat.js";
 
@@ -206,7 +207,7 @@ const comm = new CommServer(socketPath, governor, jobs, {
   onPermissiveAction: (jobId, detail) => host.onPermissiveAction(jobId, detail),
   logRuntime: (level, text) =>
     appendFileSync(`${stateDir}/runtime-log.jsonl`, JSON.stringify({ ts: Date.now(), level, text }) + "\n"),
-}, policy, approvals, egress, shieldGate, () => resolveProvider(stateDir, vault), gmail, mac, () => loadGovernorMode(stateDir));
+}, policy, approvals, egress, shieldGate, () => resolveProvider(stateDir, vault), gmail, mac, () => loadGovernorMode(stateDir), () => loadApproverPolicy(stateDir));
 host.attachComm(comm);
 
 // Phase 3: the Updater. Constructed always (its queries power
@@ -374,6 +375,7 @@ const panelBackend: PanelBackend = {
             0,
           ),
           macWorkDirs: policy.load().mac.workDirs.length,
+          approverPolicy: loadApproverPolicy(stateDir),
         };
       })(),
       governorMode: loadGovernorMode(stateDir),
@@ -446,6 +448,37 @@ const panelBackend: PanelBackend = {
         mode === "permissive"
           ? "Governor mode: PERMISSIVE — blocks and parks are recorded, not enforced. Caps, kill switch, and scanning unchanged."
           : "Governor mode: ENFORCING — Shield verdicts and approval parks bind.",
+    };
+  },
+  setApproverPolicy: async (p) => {
+    if (p.scope !== "bounded" && p.scope !== "all_except_floors") {
+      return { ok: false, detail: `Unknown delegation scope "${String(p.scope)}" — expected "bounded" or "all_except_floors". Nothing changed.` };
+    }
+    if (
+      typeof p.maxApprovalsPerHour !== "number" ||
+      !Number.isFinite(p.maxApprovalsPerHour) ||
+      p.maxApprovalsPerHour < 0 ||
+      p.maxApprovalsPerHour > 1000
+    ) {
+      return { ok: false, detail: "Max agent approvals per hour must be a number from 0 to 1000. Nothing changed." };
+    }
+    writeApproverPolicy(
+      stateDir,
+      {
+        gusApprovesDelegates: p.gusApprovesDelegates === true,
+        gusApprovesOwn: p.gusApprovesOwn === true,
+        delegatesMayApprove: p.delegatesMayApprove === true,
+        scope: p.scope,
+        maxApprovalsPerHour: Math.floor(p.maxApprovalsPerHour),
+      },
+      "panel",
+    );
+    const anyOn = p.gusApprovesDelegates || p.gusApprovesOwn || p.delegatesMayApprove;
+    return {
+      ok: true,
+      detail: anyOn
+        ? "Approval delegation saved. It applies only while the Governor is PERMISSIVE — in Enforcing, approvals stay with the operator. Floors (vault, deletes, installs, sends, git push, sudo-class shell, keychain) are never delegable."
+        : "Approval delegation saved — all paths off. Parks are the operator's (and in Permissive they proceed stamped, as before).",
     };
   },
   setKilled: async (on) => {
