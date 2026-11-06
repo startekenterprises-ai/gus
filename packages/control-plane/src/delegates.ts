@@ -50,6 +50,10 @@ export interface ConversationPrincipals {
 
 export interface DelegatesConfig {
   conversations: Record<string, ConversationPrincipals>;
+  /** The file-bridge binding (bridge-inbox.ts): which conversation
+   *  bridge-submitted requests belong to, and which delegate sender
+   *  they arrive as. Optional; absent = the bridge is inert. */
+  bridge?: { conversationId: string; senderId: string };
 }
 
 export type PrincipalRole =
@@ -69,7 +73,17 @@ export function loadDelegates(stateDir: string): DelegatesConfig {
       raw.conversations &&
       typeof raw.conversations === "object"
     ) {
-      return { conversations: raw.conversations };
+      const cfg: DelegatesConfig = { conversations: raw.conversations };
+      const b = (raw as { bridge?: unknown }).bridge;
+      if (
+        b &&
+        typeof b === "object" &&
+        typeof (b as { conversationId?: unknown }).conversationId === "string" &&
+        typeof (b as { senderId?: unknown }).senderId === "string"
+      ) {
+        cfg.bridge = b as { conversationId: string; senderId: string };
+      }
+      return cfg;
     }
   } catch {
     /* absent or malformed → no gated conversations */

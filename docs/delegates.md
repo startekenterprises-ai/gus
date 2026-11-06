@@ -50,3 +50,25 @@ where the only possible sender is the operator.
   (`approval_resolve_rejected`, reason `not-operator`).
 - Strangers' messages are ignored and logged
   (`message_ignored_stranger`).
+
+## The bridge inbox — how a bot delegate actually reaches GUS
+
+Telegram does not deliver bot messages to other bots, in any
+configuration (verified live 2026-11-05, both directions). A bot
+delegate therefore cannot reach GUS through the group chat. The
+last hop is a file: the delegate's operator-side tooling appends
+one JSON file per request to `~/.gus/state/bridge-inbox/`, and the
+control plane's bridge adapter turns each file into the same
+channel event a chat message would have produced. Enable it with
+a `bridge` binding in `delegates.json`:
+
+```json
+{ "bridge": { "conversationId": "-1001234567890", "senderId": "123456789" } }
+```
+
+Request file shape: `{ "id": "<unique>", "text": "<request>", "ts": <ms> }`,
+named so lexical order is chronological. Processed files are
+archived under `bridge-inbox/processed/` (malformed ones as
+`.bad`). Replies, receipts, and approval buttons still post to the
+conversation through Telegram — the group remains the room the
+operator watches; only the delegate's inbound hop is a file.

@@ -56,6 +56,7 @@ import { MacService } from "./mac.js";
 import { createMacHostAdapter } from "./mac-native.js";
 import { Onboarding, DIGEST_PROMPT } from "./onboarding.js";
 import { resolveChannelAdapter } from "./channel-setup.js";
+import { BridgeInboxAdapter } from "./bridge-inbox.js";
 import { SkillInstaller } from "./skills.js";
 import { startHeartbeat } from "./heartbeat.js";
 
@@ -173,7 +174,15 @@ const mac = new MacService(createMacHostAdapter(), {
   vault,
 });
 
-const host = new ChannelHost(stateDir, governor, jobs, [adapter], approvals, shieldGate);
+// Phase 10: the Bridge Inbox — file-based delegate ingress (Telegram
+// never delivers bot-to-bot messages, so Nova's requests arrive as
+// files; bridge-inbox.ts). Inert without a `bridge` binding in
+// delegates.json. Its outbound forwards through the primary adapter,
+// and results/approvals post via adapters[0] as usual.
+const bridge = new BridgeInboxAdapter(stateDir, {
+  sendVia: (msg) => adapter.send(msg),
+});
+const host = new ChannelHost(stateDir, governor, jobs, [adapter, bridge], approvals, shieldGate);
 approvals.onExpire = (req) => host.handleApprovalExpired(req);
 const comm = new CommServer(socketPath, governor, jobs, {
   onRuntimeHello: () => host.onRuntimeHello(),
