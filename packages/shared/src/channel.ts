@@ -25,6 +25,14 @@ export interface InboundMessage {
   text: string;
   /** Unix ms. */
   receivedAt: number;
+  /** v0.5.1: artifact post-conditions declared by the requester —
+   *  absolute file paths this job is expected to CREATE. Only the
+   *  Bridge Inbox sets this (from the request file's `deliverables`
+   *  field); chat messages never carry it. The control plane records
+   *  them on the job and, at completion, verified-done additionally
+   *  requires every path to exist — a text-only "done" no longer
+   *  settles a job that promised files. */
+  deliverables?: string[];
 }
 
 export interface OutboundMessage {

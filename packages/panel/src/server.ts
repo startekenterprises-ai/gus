@@ -23,6 +23,7 @@ import { createServer, type Server } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import type { PanelBackend } from "./types.js";
 import { PANEL_HTML } from "./page.js";
+import { HELP_HTML } from "./help.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
 
@@ -138,6 +139,14 @@ export class PanelServer {
     if (method === "GET" && path === "/") {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(PANEL_HTML);
+      return;
+    }
+    // v0.5.1: the help/docs page — behind the same auth check as
+    // every other route (it runs above, before routing). Anchors
+    // match the help registry ids the panel's pop-ups link to.
+    if (method === "GET" && path === "/help") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(HELP_HTML);
       return;
     }
     if (method === "GET" && path === "/api/status") return json(200, this.backend.status());

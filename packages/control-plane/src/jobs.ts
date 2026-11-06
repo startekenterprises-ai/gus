@@ -55,7 +55,12 @@ export class JobRunner {
     appendFileSync(this.storePath(), JSON.stringify(rec) + "\n");
   }
 
-  create(kind: JobKind, conversationId: string, redactedInput: string): JobRecord {
+  create(
+    kind: JobKind,
+    conversationId: string,
+    redactedInput: string,
+    opts?: { deliverables?: string[] },
+  ): JobRecord {
     const id = `job_${Date.now().toString(36)}_${(counter++).toString(36)}${Math.floor(Math.random() * 1e4)}`;
     // v0.5: the origin is read off the input the ChannelHost hands
     // us — delegate submissions arrive stamped "[from <name>] "
@@ -68,6 +73,10 @@ export class JobRunner {
       state: "queued",
       inputHash: sha256Hex(redactedInput),
       origin: originMatch ? originMatch[1] : "operator",
+      // v0.5.1: declared artifact post-conditions ride the record
+      // so the completion check in the ChannelHost can enforce them
+      // (and a restart mid-job cannot lose them).
+      ...(opts?.deliverables?.length ? { deliverables: [...opts.deliverables] } : {}),
       conversationId,
       createdAt: Date.now(),
       updatedAt: Date.now(),

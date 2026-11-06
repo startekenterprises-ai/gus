@@ -6,7 +6,7 @@
  * verification, and job settlement. The runtime sandbox is reached only
  * through the CommServer; channels never touch the sandbox directly.
  */
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
 import type { ApprovalButton, ChannelAdapter, ChannelEvent, JobKind } from "@gus/shared";
 import { guardEvent, screenText } from "@gus/shared";
 import { sha256Hex, type ShieldGate } from "@gus/gate";
@@ -414,7 +414,11 @@ export class ChannelHost {
     // receipt chain covers the prefixed text.
     const createText =
       role.role === "delegate" ? `[from ${role.name}] ${screened.redacted}` : screened.redacted;
-    const job = this.jobs.create(kind, msg.conversationId, createText);
+    // v0.5.1: declared artifact post-conditions (bridge requests
+    // only — chat messages never carry them) ride into the record.
+    const job = this.jobs.create(kind, msg.conversationId, createText, {
+      deliverables: msg.deliverables,
+    });
     this.jobs.transition(job.id, "running");
 
     // --- Phase 4: the Shield gate scans the inbound message before
@@ -819,6 +823,26 @@ export class ChannelHost {
       note = verified
         ? "post-condition ok: delivered output matches Governor-issued model output"
         : "post-condition FAILED: runtime output differs from Governor-issued model output";
+    }
+
+    // v0.5.1: declared deliverables are an ADDITIONAL post-condition,
+    // checked here on disk by the control plane — never taken from
+    // the model's word. A job that promised files and produced only
+    // a reply fails loudly with the missing path named, however good
+    // the text was (field: a bridge dev job "completed" in 16s off a
+    // single text reply, 2026-11-06). Jobs that declared none are
+    // verified exactly as before.
+    if (job.deliverables?.length) {
+      const missing = job.deliverables.filter((p) => !existsSync(p));
+      if (missing.length > 0) {
+        verified = false;
+        note =
+          missing.length === 1
+            ? `post-condition failed: deliverable ${missing[0]} was not created`
+            : `post-condition failed: deliverables ${missing.join(", ")} were not created`;
+      } else if (verified) {
+        note += `; deliverables verified: all ${job.deliverables.length} declared file(s) exist`;
+      }
     }
 
     if (verified) {

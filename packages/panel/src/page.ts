@@ -6,7 +6,14 @@
  * is "no known-bad patterns detected," a stub receipt is labeled a
  * stub, and the Shield fail-mode tradeoff is stated where the
  * operator chooses it.
+ *
+ * v0.5.1: settings carry "?" help markers from the help registry
+ * (help.ts — the same text the /help page prints), and "Settings on
+ * file" renders first, directly under the header: what is actually
+ * saved is the first thing the operator sees.
  */
+import { helpMark } from "./help.js";
+
 export const PANEL_HTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -40,17 +47,28 @@ export const PANEL_HTML = `<!doctype html>
   .msg.err { background: #c0392b22; display: block; }
   code { font-size: .85em; word-break: break-all; }
   a { color: inherit; }
+  .helpbtn { font-size: .78rem; width: 1.35em; height: 1.35em; padding: 0; border-radius: 50%; line-height: 1; vertical-align: super; margin-left: 5px; cursor: help; }
+  .helppop { position: absolute; z-index: 40; max-width: 320px; border: 1px solid #8888; border-radius: 10px; padding: 10px 12px; background: Canvas; box-shadow: 0 6px 24px #0005; font-size: .9rem; }
+  .helppop p { margin: 0 0 6px; }
+  .helppop a { font-weight: 600; }
 </style>
 </head>
 <body>
 <h1>GUS control panel</h1>
 <div class="sub" id="subtitle">Loading…</div>
+<div class="sub"><a href="/help">📖 Help &amp; docs — what every setting does</a></div>
 <div id="flash" class="msg"></div>
+
+<div class="row">
+  <b>Settings on file</b>
+  <div class="hint">What is actually saved right now — so a save is something you can verify, not something you hope happened. Keys are shown as stored or not; values never appear here.</div>
+  <div id="settings-on-file" class="hint">Loading…</div>
+</div>
 
 <h2>Status</h2>
 <div class="cards" id="status-cards"></div>
 <div class="row">
-  <b>Kill switch</b>
+  <b>Kill switch</b>${helpMark("kill-switch")}
   <div class="hint">Stops the agent immediately: no new model calls, running jobs end as failed-loudly with receipts. The same switch as Telegram's /stop.</div>
   <div class="acts">
     <button class="danger" id="kill-on">⏹ Stop GUS now</button>
@@ -58,7 +76,7 @@ export const PANEL_HTML = `<!doctype html>
   </div>
 </div>
 <div class="row">
-  <b>Governor mode</b>
+  <b>Governor mode</b>${helpMark("governor-mode")}
   <div class="hint"><b>Enforcing</b>: Shield verdicts and approval parks bind. <b>Permissive</b> (SELinux-style): everything is still scanned, classified, capped and receipted, but blocks and parks are recorded instead of enforced — the troubleshooting mode, with a report of what it let through. Two floors never relax: vault reads stay denied, and the spend caps and kill switch are unchanged.</div>
   <div class="acts">
     <button id="mode-enforcing">🛡 Enforcing</button>
@@ -67,29 +85,23 @@ export const PANEL_HTML = `<!doctype html>
   <div id="permissive-report" class="hint"></div>
 </div>
 <div class="row" id="delegation-row">
-  <b>Approval delegation</b>
+  <b>Approval delegation</b>${helpMark("approval-delegation")}
   <div class="hint">In <b>Permissive</b> mode only, a parked action can be routed to an agent approver instead of proceeding on the mode's say-so: GUS itself (a metered decision by the configured model, made in the control plane — a failed or unparseable decision is a denial), or a named delegate resolving a park on a job it did not submit. Some classes are floors and are <b>never</b> delegable: vault reads, deletes, installs, sends and posts, git push, sudo/kill-class shell, and keychain access. Every delegated approval is hash-bound, single-use, rate-limited, and receipted with who approved it and their reason. In Enforcing mode none of this applies — approvals stay with the operator, exactly as always — so these controls are greyed out until the Governor is permissive.</div>
   <fieldset id="delegation-fields" style="border:0;padding:0;margin:0">
-    <label style="display:block;font-weight:400"><input type="checkbox" id="del-gus-delegates" style="width:auto;margin-right:6px">GUS may approve delegates' parked actions</label>
-    <label style="display:block;font-weight:400"><input type="checkbox" id="del-gus-own" style="width:auto;margin-right:6px">GUS may approve its own jobs' parked actions</label>
-    <label style="display:block;font-weight:400"><input type="checkbox" id="del-delegates" style="width:auto;margin-right:6px">Named delegates may approve parked actions on jobs they did not submit</label>
-    <label>Scope</label>
+    <label style="display:block;font-weight:400"><input type="checkbox" id="del-gus-delegates" style="width:auto;margin-right:6px">GUS may approve delegates' parked actions${helpMark("del-gus-delegates")}</label>
+    <label style="display:block;font-weight:400"><input type="checkbox" id="del-gus-own" style="width:auto;margin-right:6px">GUS may approve its own jobs' parked actions${helpMark("del-gus-own")}</label>
+    <label style="display:block;font-weight:400"><input type="checkbox" id="del-delegates" style="width:auto;margin-right:6px">Named delegates may approve parked actions on jobs they did not submit${helpMark("del-delegates")}</label>
+    <label>Scope${helpMark("del-scope")}</label>
     <select id="del-scope">
       <option value="bounded">Bounded — Mac input injection, file writes outside the work folders, non-allowlisted shell</option>
       <option value="all_except_floors">Everything except the floors</option>
     </select>
-    <label>Max agent approvals per hour (across all agent approvers)</label>
+    <label>Max agent approvals per hour (across all agent approvers)${helpMark("del-max-approvals")}</label>
     <input id="del-max" type="number" min="0" max="1000" step="1">
     <div class="acts"><button id="del-save">Save delegation policy</button></div>
   </fieldset>
   <div id="delegation-state" class="hint"></div>
 </div>
-<div class="row">
-  <b>Settings on file</b>
-  <div class="hint">What is actually saved right now — so a save is something you can verify, not something you hope happened. Keys are shown as stored or not; values never appear here.</div>
-  <div id="settings-on-file" class="hint">Loading…</div>
-</div>
-
 <h2>Approvals waiting</h2>
 <div id="approvals"><div class="hint">Nothing is waiting.</div></div>
 
@@ -126,7 +138,7 @@ export const PANEL_HTML = `<!doctype html>
 <div class="step" id="step-provider">
   <b>3 · Choose how GUS thinks</b>
   <div class="hint">Your own provider key (stored in the vault, metered by the same caps), a model running on your own machine (Ollama — free), or the StarTek starter gateway when configured. New here? Gemini is the recommended starter: a free key from Google AI Studio (aistudio.google.com) is enough to begin. One honest catch: on Google's free tier, Google may use what you send to improve its models — a paid Gemini key removes that.</div>
-  <label>Provider</label>
+  <label>Provider${helpMark("provider")}</label>
   <select id="pv-kind">
     <option value="gemini">Google Gemini — my key (recommended starter: free key from Google AI Studio)</option>
     <option value="anthropic">Anthropic (Claude) — my key</option>
@@ -135,7 +147,7 @@ export const PANEL_HTML = `<!doctype html>
     <option value="gateway">StarTek starter gateway</option>
     <option value="stub">Offline stub (testing only — not a real model)</option>
   </select>
-  <label>Model</label>
+  <label>Model${helpMark("model")}</label>
   <input id="pv-model" value="gemini-3.5-flash">
   <label>API key (not needed for Ollama)</label>
   <input id="pv-key" type="password" autocomplete="off" placeholder="paste key — goes to the vault only">
@@ -147,9 +159,9 @@ export const PANEL_HTML = `<!doctype html>
 <div class="step" id="step-caps">
   <b>4 · Spending caps</b>
   <div class="hint">Hard ceilings, enforced outside the model — the agent cannot raise them or talk its way past them. Pre-filled with sane defaults; change them if you like.</div>
-  <label>Max per task (USD)</label><input id="cap-task" type="number" step="0.5" min="0">
-  <label>Max per day (USD)</label><input id="cap-day" type="number" step="1" min="0">
-  <label>Max per month (USD)</label><input id="cap-month" type="number" step="5" min="0">
+  <label>Max per task (USD)${helpMark("cap-per-task")}</label><input id="cap-task" type="number" step="0.5" min="0">
+  <label>Max per day (USD)${helpMark("cap-per-day")}</label><input id="cap-day" type="number" step="1" min="0">
+  <label>Max per month (USD)${helpMark("cap-per-month")}</label><input id="cap-month" type="number" step="5" min="0">
   <button class="primary" data-act="caps">Save caps</button>
 </div>
 
@@ -176,6 +188,8 @@ export const PANEL_HTML = `<!doctype html>
 <button data-act="skill">Scan &amp; install</button>
 <div id="skill-result" class="hint"></div>
 
+<div id="helppop" class="helppop" hidden></div>
+
 <script>
 const $ = (s) => document.querySelector(s);
 async function api(path, opts) {
@@ -190,6 +204,61 @@ function flash(text, ok) {
   el.className = "msg " + (ok ? "ok" : "err");
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
+// Help pop-ups (v0.5.1): one shared card, fed by the "?" markers'
+// data attributes (the help registry's tips, embedded by the
+// server). Hover shows it on desktop; a click PINS it open (a tap
+// fires mouseover-then-click, so the click must not toggle shut
+// what the tap just opened) and a second click closes it. The
+// card's link goes to the matching /help anchor for the longer
+// text. Unpinned, it closes when the pointer leaves both the
+// marker and the card — with a grace delay to cross the gap.
+const helppop = $("#helppop");
+let helpPinned = null;
+let helpHideTimer = null;
+function showHelp(btn) {
+  if (helpHideTimer) { clearTimeout(helpHideTimer); helpHideTimer = null; }
+  helppop.innerHTML = "";
+  const p = document.createElement("p");
+  p.textContent = btn.dataset.tip || "";
+  const a = document.createElement("a");
+  a.href = "/help#" + btn.dataset.help;
+  a.textContent = "More in Help →";
+  helppop.append(p, a);
+  helppop.hidden = false;
+  const r = btn.getBoundingClientRect();
+  helppop.style.top = (window.scrollY + r.bottom + 6) + "px";
+  helppop.style.left = Math.max(8, Math.min(window.scrollX + r.left, window.scrollX + document.documentElement.clientWidth - 336)) + "px";
+}
+function hideHelp() {
+  if (helpHideTimer) { clearTimeout(helpHideTimer); helpHideTimer = null; }
+  helppop.hidden = true;
+  helpPinned = null;
+}
+function scheduleHideHelp() {
+  if (helpPinned || helppop.hidden) return;
+  if (helpHideTimer) clearTimeout(helpHideTimer);
+  helpHideTimer = setTimeout(hideHelp, 250);
+}
+document.addEventListener("click", (ev) => {
+  const btn = ev.target.closest(".helpbtn");
+  if (btn) {
+    ev.preventDefault();
+    if (helpPinned === btn) hideHelp();
+    else { showHelp(btn); helpPinned = btn; }
+    return;
+  }
+  if (!helppop.hidden && !ev.target.closest(".helppop")) hideHelp();
+});
+document.addEventListener("mouseover", (ev) => {
+  const btn = ev.target.closest(".helpbtn");
+  if (btn && !helpPinned) showHelp(btn);
+});
+document.addEventListener("mouseout", (ev) => {
+  if (ev.target.closest(".helpbtn")) scheduleHideHelp();
+});
+helppop.addEventListener("mouseenter", () => { if (helpHideTimer) clearTimeout(helpHideTimer); });
+helppop.addEventListener("mouseleave", scheduleHideHelp);
+document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") hideHelp(); });
 const money = (n) => "$" + Number(n || 0).toFixed(4);
 async function refresh() {
   const [status, ledger, jobs, approvals, onboarding, skills, vault] = await Promise.all([

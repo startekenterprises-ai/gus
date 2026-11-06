@@ -51,6 +51,13 @@ export interface JobRecord {
    *  routing (approver-policy.ts). Absent on pre-v0.5 records,
    *  which read as "operator". */
   origin?: string;
+  /** v0.5.1: artifact post-conditions declared at submission
+   *  (Bridge Inbox `deliverables`): absolute paths the job must
+   *  create. At completion the control plane checks each one exists
+   *  on disk; a missing deliverable settles the job failed-loudly
+   *  with the path named, however convincing the reply text was.
+   *  Absent = no artifact post-condition (the pre-v0.5.1 behavior). */
+  deliverables?: string[];
   conversationId: string;
   createdAt: number;
   updatedAt: number;

@@ -12,6 +12,17 @@
  *   `<stateDir>/bridge-inbox/`:
  *     { "id": "<unique>", "text": "<the request>", "ts": <ms> }
  *
+ *   v0.5.1: a request may also declare artifact post-conditions:
+ *     { …, "deliverables": ["/absolute/path/report.md", …] }
+ *   The paths ride the emitted message into the job record, and the
+ *   completion path refuses verified-done until every one exists on
+ *   disk — a bridge job that promised files can no longer settle on
+ *   a text reply alone. A `deliverables` field that is present but
+ *   unusable (not an array, or an array with no valid absolute path)
+ *   parks the file as .bad like any other malformed request: quietly
+ *   dropping a declared post-condition would recreate exactly the
+ *   false "done" this field exists to prevent.
+ *
  *   This adapter polls the directory, and for each file emits the
  *   exact ChannelEvent a chat message would have produced —
  *   conversation and sender taken from the `bridge` binding in
@@ -53,6 +64,36 @@ export interface BridgeInboxOptions {
 }
 
 const MAX_TEXT_CHARS = 8_000;
+const MAX_DELIVERABLES = 16;
+const MAX_DELIVERABLE_CHARS = 1024;
+
+/**
+ * Parse a request file's optional `deliverables` field.
+ *   absent            → { ok: true } with no deliverables (pre-v0.5.1
+ *                       request files behave exactly as before)
+ *   an array          → the valid entries: strings naming ABSOLUTE
+ *                       paths (the completion check runs on this
+ *                       machine), deduped, capped. An empty array
+ *                       declares nothing and is treated as absent.
+ *   anything unusable → { ok: false } — the caller parks the file as
+ *                       .bad rather than silently losing the
+ *                       requester's post-condition.
+ */
+export function parseDeliverables(
+  raw: unknown,
+): { ok: true; deliverables?: string[] } | { ok: false } {
+  if (raw === undefined) return { ok: true };
+  if (!Array.isArray(raw)) return { ok: false };
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    if (typeof entry !== "string") continue;
+    if (!entry.startsWith("/") || entry.length > MAX_DELIVERABLE_CHARS) continue;
+    seen.add(entry);
+    if (seen.size >= MAX_DELIVERABLES) break;
+  }
+  if (raw.length > 0 && seen.size === 0) return { ok: false };
+  return seen.size ? { ok: true, deliverables: [...seen] } : { ok: true };
+}
 
 export class BridgeInboxAdapter implements ChannelAdapter {
   readonly name = "bridge";
@@ -115,7 +156,7 @@ export class BridgeInboxAdapter implements ChannelAdapter {
     }
     for (const name of names) {
       const path = join(this.inboxDir, name);
-      let entry: { id?: unknown; text?: unknown };
+      let entry: { id?: unknown; text?: unknown; deliverables?: unknown };
       try {
         entry = JSON.parse(readFileSync(path, "utf8")) as typeof entry;
       } catch {
@@ -127,6 +168,12 @@ export class BridgeInboxAdapter implements ChannelAdapter {
       const text = typeof entry.text === "string" ? entry.text : "";
       if (!text || text.length > MAX_TEXT_CHARS) {
         console.error(`gus bridge-inbox: request ${id} has no usable text — parked as .bad`);
+        this.move(path, `${name}.bad`);
+        continue;
+      }
+      const parsed = parseDeliverables(entry.deliverables);
+      if (!parsed.ok) {
+        console.error(`gus bridge-inbox: request ${id} declares unusable deliverables — parked as .bad`);
         this.move(path, `${name}.bad`);
         continue;
       }
@@ -143,6 +190,7 @@ export class BridgeInboxAdapter implements ChannelAdapter {
           senderId: bridge.senderId,
           text,
           receivedAt: Date.now(),
+          ...(parsed.deliverables ? { deliverables: parsed.deliverables } : {}),
         },
       });
       this.move(path, name);
