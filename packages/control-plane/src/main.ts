@@ -241,6 +241,55 @@ host.bindUpdateCommands({
     jobs.transition(job.id, "running");
     return updater.begin(job.id, version, conversationId);
   },
+  // v0.4: stage the latest APP release for the one-click installer.
+  // Only metadata crosses here — release tag, DMG URL, and the
+  // published sha256 — into pending-update.json; the app downloads
+  // and verifies before it swaps anything.
+  stageUpdate: async () => {
+    const isNewer = (a: string, b: string): boolean => {
+      const pa = a.split(".").map((n) => parseInt(n, 10) || 0);
+      const pb = b.split(".").map((n) => parseInt(n, 10) || 0);
+      for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+        const x = pa[i] ?? 0;
+        const y = pb[i] ?? 0;
+        if (x !== y) return x > y;
+      }
+      return false;
+    };
+    const res = await fetch("https://api.github.com/repos/startekenterprises-ai/gus/releases/latest", {
+      headers: { accept: "application/vnd.github+json", "user-agent": "gus-control-plane" },
+    });
+    if (!res.ok) return `Couldn't reach GitHub releases (HTTP ${res.status}). Nothing staged.`;
+    const rel = (await res.json()) as {
+      tag_name?: string;
+      assets?: { name: string; browser_download_url: string }[];
+    };
+    const version = (rel.tag_name ?? "").replace(/^v/, "");
+    if (!version) return "The latest release has no version tag. Nothing staged.";
+    if (!isNewer(version, GUS_VERSION)) {
+      return `Already current — this GUS is v${GUS_VERSION} and the latest release is v${version}. Nothing staged.`;
+    }
+    const dmg = rel.assets?.find((a) => a.name.endsWith(".dmg"));
+    const shaAsset = rel.assets?.find((a) => a.name.endsWith(".dmg.sha256"));
+    if (!dmg || !shaAsset) return `Release v${version} has no DMG + checksum attached yet. Nothing staged.`;
+    const shaRes = await fetch(shaAsset.browser_download_url);
+    if (!shaRes.ok) return `Couldn't fetch the release checksum (HTTP ${shaRes.status}). Nothing staged.`;
+    const sha256 = (await shaRes.text()).trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+    if (!/^[0-9a-f]{64}$/.test(sha256)) return "The release checksum file didn't contain a sha256. Nothing staged.";
+    writeFileSync(
+      `${stateDir}/pending-update.json`,
+      JSON.stringify(
+        { version, dmgUrl: dmg.browser_download_url, sha256, stagedBy: "control-plane", ts: Date.now() },
+        null,
+        2,
+      ) + "\n",
+    );
+    return (
+      `📦 Update staged: GUS v${version} (this GUS is v${GUS_VERSION}). ` +
+      `Install it from the GUS.app menu — "Install Staged Update" — it downloads, verifies the sha256, swaps, and relaunches. ` +
+      `Vault, policy, jobs and receipts are never touched by an update.`
+    );
+  },
   versionText: () => {
     const { pointer, runtimeVersion } = updater.versionInfo();
     return (

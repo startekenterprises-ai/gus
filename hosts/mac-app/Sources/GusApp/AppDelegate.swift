@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Foundation
 import ServiceManagement
 
@@ -18,6 +19,7 @@ final class GusAppDelegate: NSObject, NSApplicationDelegate {
     private var loginItem: NSMenuItem!
     private var modeEnforcingItem: NSMenuItem!
     private var modePermissiveItem: NSMenuItem!
+    private var installStagedItem: NSMenuItem!
     private var helperProcess: Process?
     private var setupWindow: SetupWindowController?
     private var statusTimer: Timer?
@@ -90,6 +92,8 @@ final class GusAppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "Setup & Permissions…", action: #selector(showSetup), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Open Setup Panel", action: #selector(openPanel), keyEquivalent: ""))
         menu.addItem(.separator())
+        installStagedItem = NSMenuItem(title: "Install Staged Update…", action: #selector(installStagedUpdate), keyEquivalent: "")
+        menu.addItem(installStagedItem)
         menu.addItem(NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "About GUS", action: #selector(showAbout), keyEquivalent: ""))
         menu.addItem(.separator())
@@ -113,6 +117,13 @@ final class GusAppDelegate: NSObject, NSApplicationDelegate {
         let permissive = governorMode() == "permissive"
         modeEnforcingItem?.state = permissive ? .off : .on
         modePermissiveItem?.state = permissive ? .on : .off
+        if let staged = stagedUpdate(), isNewer(staged.version, than: appVersion) {
+            installStagedItem?.title = "Install Staged Update (v\(staged.version))…"
+            installStagedItem?.isEnabled = true
+        } else {
+            installStagedItem?.title = "Install Staged Update…"
+            installStagedItem?.isEnabled = false
+        }
     }
 
     // MARK: Governor mode (v0.4 — same state file the control plane,
@@ -239,39 +250,206 @@ final class GusAppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Updates & about
 
+    // MARK: Updates (v0.4 — one-click install from GitHub Releases;
+    // the release workflow attaches the DMG + its sha256 to every
+    // tagged release, and nothing installs that does not verify)
+
+    private struct ReleaseInfo {
+        let version: String
+        let dmgURL: String
+        let sha256: String
+    }
+
+    private var pendingUpdatePath: String {
+        NSHomeDirectory() + "/.gus/state/pending-update.json"
+    }
+
+    /// The staged update, if the control plane staged one (the
+    /// /stageupdate chat command): {version, dmgUrl, sha256}.
+    private func stagedUpdate() -> ReleaseInfo? {
+        guard let data = FileManager.default.contents(atPath: pendingUpdatePath),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let version = obj["version"] as? String,
+              let dmgUrl = obj["dmgUrl"] as? String,
+              let sha = obj["sha256"] as? String else {
+            return nil
+        }
+        return ReleaseInfo(version: version, dmgURL: dmgUrl, sha256: sha)
+    }
+
     @objc private func checkForUpdates() {
-        guard let url = URL(string: "https://raw.githubusercontent.com/startekenterprises-ai/gus/main/site-facts.json") else { return }
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                let current = self.appVersion
-                guard error == nil, let data,
-                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let gus = obj["gus"] as? [String: Any],
-                      let latest = gus["version"] as? String
-                else {
-                    self.showAlert(
-                        title: "Couldn't check for updates",
-                        text: "The check didn't reach GitHub. Nothing was changed.")
+        fetchLatestRelease { [weak self] info in
+            guard let self else { return }
+            guard let info else {
+                self.showAlert(
+                    title: "Couldn't check for updates",
+                    text: "The check didn't reach GitHub, or no release is published yet. Nothing was changed.")
+                return
+            }
+            if self.isNewer(info.version, than: self.appVersion) {
+                let alert = NSAlert()
+                alert.messageText = "GUS \(info.version) is available"
+                alert.informativeText = "You are running GUS \(self.appVersion). Install it now? GUS.app will download the release, verify its checksum, swap itself, and relaunch. The services restart on the new version; your state (vault, policy, jobs, receipts) is never touched by an update."
+                alert.addButton(withTitle: "Install Update")
+                alert.addButton(withTitle: "Later")
+                if alert.runModal() == .alertFirstButtonReturn {
+                    self.installUpdate(info)
+                }
+            } else {
+                self.showAlert(
+                    title: "GUS is up to date",
+                    text: "You are running the latest version, GUS \(self.appVersion).")
+            }
+        }
+    }
+
+    @objc private func installStagedUpdate() {
+        guard let info = stagedUpdate() else { return }
+        let alert = NSAlert()
+        alert.messageText = "Install the staged update to GUS \(info.version)?"
+        alert.informativeText = "GUS staged this update (checksum recorded at staging time). It will download, verify, swap, and relaunch — state is never touched."
+        alert.addButton(withTitle: "Install Update")
+        alert.addButton(withTitle: "Later")
+        if alert.runModal() == .alertFirstButtonReturn {
+            installUpdate(info)
+        }
+    }
+
+    private func fetchLatestRelease(completion: @escaping (ReleaseInfo?) -> Void) {
+        guard let url = URL(string: "https://api.github.com/repos/startekenterprises-ai/gus/releases/latest") else {
+            completion(nil)
+            return
+        }
+        var req = URLRequest(url: url)
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        URLSession.shared.dataTask(with: req) { data, _, error in
+            var info: ReleaseInfo?
+            if error == nil, let data,
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let tag = obj["tag_name"] as? String,
+               let assets = obj["assets"] as? [[String: Any]] {
+                let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+                var dmg: String?
+                var shaAsset: String?
+                for a in assets {
+                    guard let name = a["name"] as? String, let dl = a["browser_download_url"] as? String else { continue }
+                    if name.hasSuffix(".dmg") { dmg = dl }
+                    if name.hasSuffix(".dmg.sha256") { shaAsset = dl }
+                }
+                if let dmg, let shaAsset {
+                    // Fetch the (tiny) checksum file, then hand back.
+                    URLSession.shared.dataTask(with: URL(string: shaAsset)!) { shaData, _, _ in
+                        let sha = shaData.flatMap { String(data: $0, encoding: .utf8) }?
+                            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        let parsed = sha.split(separator: " ").first.map(String.init) ?? ""
+                        DispatchQueue.main.async {
+                            completion(parsed.isEmpty ? nil : ReleaseInfo(version: version, dmgURL: dmg, sha256: parsed))
+                        }
+                    }.resume()
                     return
                 }
-                if self.isNewer(latest, than: current) {
-                    let alert = NSAlert()
-                    alert.messageText = "GUS \(latest) is available"
-                    alert.informativeText = "You are running GUS \(current). New versions are published on the GUS GitHub releases page."
-                    alert.addButton(withTitle: "Open Releases Page")
-                    alert.addButton(withTitle: "Later")
-                    if alert.runModal() == .alertFirstButtonReturn,
-                       let page = URL(string: "https://github.com/startekenterprises-ai/gus/releases") {
-                        NSWorkspace.shared.open(page)
-                    }
-                } else {
-                    self.showAlert(
-                        title: "GUS is up to date",
-                        text: "You are running the latest version, GUS \(current).")
+            }
+            DispatchQueue.main.async { completion(info) }
+        }.resume()
+    }
+
+    /// Download → verify sha256 → mount → stage the new app beside
+    /// the old one → swap → boot the services out (the relaunched
+    /// app bootstraps them onto the new payload) → relaunch. Any
+    /// failure before the swap leaves the running install exactly
+    /// as it was; a backup copy survives until the new app exists.
+    private func installUpdate(_ info: ReleaseInfo) {
+        guard let dmgURL = URL(string: info.dmgURL) else { return }
+        let fm = FileManager.default
+        let work = fm.temporaryDirectory.appendingPathComponent("gus-update-\(info.version)")
+        try? fm.removeItem(at: work)
+        do { try fm.createDirectory(at: work, withIntermediateDirectories: true) } catch {
+            showAlert(title: "Update failed", text: "Couldn't create a work folder: \(error.localizedDescription). Nothing was changed.")
+            return
+        }
+        statusMenuItem.title = "GUS: downloading update v\(info.version)…"
+        URLSession.shared.downloadTask(with: dmgURL) { [weak self] tmp, _, error in
+            guard let self else { return }
+            func fail(_ why: String) {
+                DispatchQueue.main.async {
+                    self.refreshStatus()
+                    self.showAlert(title: "Update failed", text: "\(why) Nothing was changed.")
                 }
             }
+            guard error == nil, let tmp else { fail("The download didn't complete."); return }
+            let dmg = work.appendingPathComponent("GUS-\(info.version).dmg")
+            do {
+                try fm.moveItem(at: tmp, to: dmg)
+                let data = try Data(contentsOf: dmg)
+                let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+                guard digest == info.sha256.lowercased() else {
+                    fail("The downloaded DMG's checksum does not match the release's published sha256 (\(info.sha256.prefix(12))…).")
+                    return
+                }
+            } catch {
+                fail("Couldn't verify the download: \(error.localizedDescription).")
+                return
+            }
+            // Mount read-only at a known mountpoint.
+            let mount = work.appendingPathComponent("mount")
+            try? fm.createDirectory(at: mount, withIntermediateDirectories: true)
+            let attach = self.runProcess("/usr/bin/hdiutil", ["attach", "-nobrowse", "-readonly", "-mountpoint", mount.path, dmg.path])
+            guard attach.status == 0 else { fail("Couldn't open the disk image."); return }
+            defer { _ = self.runProcess("/usr/bin/hdiutil", ["detach", mount.path, "-force"]) }
+            let newApp = mount.appendingPathComponent("GUS.app")
+            guard fm.fileExists(atPath: newApp.path) else { fail("The disk image doesn't contain GUS.app."); return }
+            // Stage beside the target, keep a backup, then swap.
+            let target = Bundle.main.bundlePath
+            let staged = work.appendingPathComponent("GUS.app")
+            let backup = work.appendingPathComponent("GUS-backup.app")
+            do {
+                try fm.copyItem(at: newApp, to: staged)
+                if fm.fileExists(atPath: target) { try fm.copyItem(at: URL(fileURLWithPath: target), to: backup) }
+                try fm.removeItem(at: URL(fileURLWithPath: target))
+                do {
+                    try fm.moveItem(at: staged, to: URL(fileURLWithPath: target))
+                } catch {
+                    // Restore the backup — never leave /Applications empty.
+                    if fm.fileExists(atPath: backup.path) {
+                        try? fm.moveItem(at: backup, to: URL(fileURLWithPath: target))
+                    }
+                    throw error
+                }
+            } catch {
+                fail("Couldn't swap in the new app: \(error.localizedDescription).")
+                return
+            }
+            try? fm.removeItem(atPath: self.pendingUpdatePath)
+            // Boot the services out; the relaunched app bootstraps
+            // them onto the new payload (ensureServicesRunning).
+            for label in self.labels {
+                _ = self.launchctl(["bootout", "\(self.domain)/\(label)"])
+            }
+            DispatchQueue.main.async {
+                let relaunch = Process()
+                relaunch.executableURL = URL(fileURLWithPath: "/bin/sh")
+                relaunch.arguments = ["-c", "sleep 1; open \"\(target)\""]
+                try? relaunch.run()
+                NSApp.terminate(nil)
+            }
         }.resume()
+    }
+
+    private func runProcess(_ path: String, _ args: [String]) -> (status: Int32, output: String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = args
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        do {
+            try p.run()
+            p.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return (p.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+        } catch {
+            return (-1, error.localizedDescription)
+        }
     }
 
     private func isNewer(_ a: String, than b: String) -> Bool {

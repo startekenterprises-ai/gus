@@ -43,6 +43,10 @@ type PendingCheck =
  */
 export interface UpdateCommands {
   startUpdate(conversationId: string, version: string): string;
+  /** v0.4: stage the latest app release (metadata + checksum into
+   *  pending-update.json) for the app's one-click installer.
+   *  Optional — app-distribution wiring only. */
+  stageUpdate?(conversationId: string): Promise<string>;
   versionText(): string;
 }
 
@@ -235,6 +239,7 @@ export class ChannelHost {
         text === "/resume" ||
         /^\/(approve|deny)\s+\S+$/.test(text) ||
         /^\/update\s+\S+$/.test(text) ||
+        text === "/stageupdate" ||
         text === "/mode" ||
         text.startsWith("/mode "))
     ) {
@@ -281,6 +286,27 @@ export class ChannelHost {
       }
       const ack = this.updateCommands.startUpdate(msg.conversationId, upd[1]);
       await this.sendTo(adapterName, msg.conversationId, ack);
+      return;
+    }
+
+    // v0.4: stage the latest app release for one-click install
+    // (operator-only — refused for delegates above).
+    if (text === "/stageupdate") {
+      if (!this.updateCommands?.stageUpdate) {
+        await this.sendTo(adapterName, msg.conversationId, "Update staging isn't wired up in this deployment. Nothing was changed.");
+        return;
+      }
+      if (this.governor.isKilled()) {
+        await this.sendTo(adapterName, msg.conversationId, "⏹ Kill switch is ON — staging doesn't run while GUS is stopped. Send /resume first.");
+        return;
+      }
+      await this.sendTo(adapterName, msg.conversationId, "Checking GitHub for the latest GUS release…");
+      void this.updateCommands
+        .stageUpdate(msg.conversationId)
+        .then((note) => this.sendTo(adapterName, msg.conversationId, note))
+        .catch((e: unknown) =>
+          this.sendTo(adapterName, msg.conversationId, `Update staging failed: ${e instanceof Error ? e.message : String(e)}. Nothing was changed.`),
+        );
       return;
     }
 
