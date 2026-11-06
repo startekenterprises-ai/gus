@@ -27,6 +27,7 @@ import {
   writePointer,
 } from "../../packages/control-plane/src/slots.js";
 import { CanaryRunner } from "../../packages/control-plane/src/canary.js";
+import { GUS_VERSION } from "../../packages/shared/src/index.js";
 import { JobRunner } from "../../packages/control-plane/src/jobs.js";
 import { PolicyStore } from "../../packages/control-plane/src/policy.js";
 import { LocalReceiptIssuer } from "../../packages/gate/src/index.js";
@@ -219,7 +220,11 @@ async function runCanaryAgainst(entry: string): Promise<Awaited<ReturnType<Canar
   const runner = new CanaryRunner(state, sock, jobs, new PolicyStore(join(state, "absent-policy.json")), stubFetchGate());
   const child = spawnRuntime(entry, sock, ws);
   try {
-    return await runner.run("0.3.0", { healthTimeoutMs: 10_000, scenarioTimeoutMs: 10_000 });
+    // The candidate IS this tree's runtime, so the version it must
+    // announce is this tree's own GUS_VERSION — importing it keeps the
+    // replay green across version bumps (it hardcoded "0.3.0" until
+    // the 0.3.1 bump exposed the coupling).
+    return await runner.run(GUS_VERSION, { healthTimeoutMs: 10_000, scenarioTimeoutMs: 10_000 });
   } finally {
     child.kill("SIGTERM");
   }

@@ -16,14 +16,18 @@
  *     ("anthropic/<model>", "openai/<model>", "ollama/<model>"…), so
  *     caps and the ledger price real calls exactly like stub calls.
  *     Ollama/local is $0 unless the operator prices it.
- *   - v1 scope, stated plainly: real providers return TEXT replies.
- *     Provider-native tool-use wiring (mapping Anthropic/OpenAI tool
- *     calls onto GUS's fixed tool set) is not in this phase — the
- *     agent loop's tool path is exercised by the stub in drills and by
- *     the gateway classes as they are wired per deployment. A reply
- *     with no text is a provider error, never a silent empty success.
+ *   - Tool use (Phase 9): real providers speak the prompt-carried
+ *     tool protocol (TOOL_PROTOCOL below) — the model calls a tool by
+ *     replying with a bare JSON object, and parseToolReply maps it
+ *     onto GUS's fixed tool set with the declared class as a floor.
+ *     Provider-native tool-use APIs are deliberately NOT used: the
+ *     protocol works identically across providers, and every call
+ *     still crosses the classifier, the Shield gate, and the Governor
+ *     exactly like a stub call. A reply with no text is a provider
+ *     error, never a silent empty success.
  */
 import { existsSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import type { ToolClass } from "@gus/shared";
 import type { VaultBroker } from "@gus/vault";
 import {
   estimateTokens,
@@ -179,6 +183,58 @@ export function stubCompletion(prompt: string): ProviderCompletion {
 
 // ---------------------------------------------------------------- remote
 
+/** The prompt-carried tool protocol presented to every real model
+ *  (Phase 9). One tool per reply, as a bare JSON object; plain text
+ *  finishes the task. The arg shapes mirror the executors exactly
+ *  (mac.ts, the comm server's workspace/fetch handlers) — a mismatch
+ *  here makes real models guess, so keep the two in step. */
+const TOOL_PROTOCOL = `You are GUS, a secure AI agent running on the operator's own computer. The operator talks to you through a chat channel and asks you to do tasks on this machine. You act by calling tools, one at a time.
+
+To call a tool, reply with ONLY a JSON object in exactly this shape, and nothing else — no prose, no markdown:
+{"tool": "<tool name>", "args": { ... }}
+
+When the task is done, or to answer a question, reply with plain text (no JSON). Plain text ends the task, so do not answer in plain text until the work is actually done.
+
+Available tools (args in braces):
+- mac.observe {} — look at the screen: returns the front app, its windows, and the visible controls. Call this before clicking or typing when you need the current state.
+- mac.open_app {"app": "Calculator"} — open an application by name.
+- mac.focus_window {"app": "Calculator", "title": "optional window title"} — focus a window.
+- mac.click {"element": "a control label from mac.observe"} OR {"x": 120, "y": 340} — click a control or a point.
+- mac.type {"text": "..."} — type text into the focused control.
+- mac.key {"combo": "cmd+s"} — press a key or shortcut.
+- mac.scroll {"direction": "down", "amount": 3} — scroll the front window.
+- mac.fs.read {"path": "/absolute/path"} — read a file (approved folders only).
+- mac.fs.write {"path": "/absolute/path", "content": "..."} — write a file (approved folders only).
+- mac.shell.run {"command": "git status", "cwd": "/absolute/dir"} — run a shell command; cwd defaults to an approved folder.
+- mac.picker.select {"path": "/absolute/path"} — choose a file in an open file picker.
+- workspace_read {"path": "relative/path"} — read a file in your sandbox workspace.
+- workspace_write {"path": "relative/path", "content": "..."} — write a file in your sandbox workspace.
+- fetch {"url": "https://...", "method": "GET"} — fetch a web page (via the egress proxy).
+
+Rules:
+- Some actions need the operator's approval. The system asks them automatically when your call requires it — never ask for permission in your text, and never describe an action as done until a TOOL_RESULT confirms it.
+- After each tool call you receive a TOOL_RESULT line with the outcome. Use it to decide the next step.
+- Keep final answers short and factual: say what you did and what the tool results showed.`;
+
+/** The declared class a parsed tool call carries into the comm
+ *  server. Only a floor — the classifier re-derives the real class
+ *  from the tool and its arguments before anything executes. Mirrors
+ *  MAC_TOOL_CLASSES (mac.ts) plus the workspace/fetch tools. */
+function toolFloorClass(tool: string, args: Record<string, unknown>): ToolClass {
+  switch (tool) {
+    case "mac.observe":
+    case "mac.fs.read":
+    case "workspace_read":
+      return "read";
+    case "fetch": {
+      const method = typeof args.method === "string" ? args.method.toUpperCase() : "GET";
+      return method === "GET" || method === "HEAD" ? "read" : "write";
+    }
+    default:
+      return "write";
+  }
+}
+
 abstract class RemoteProvider implements Provider {
   abstract readonly id: ProviderId;
   abstract readonly model: string;
@@ -198,6 +254,43 @@ abstract class RemoteProvider implements Provider {
   }
 
   abstract complete(prompt: string): Promise<ProviderCompletion>;
+
+  /** Phase 9: present the tool protocol to a real model. Until now the
+   *  remote providers returned text only, so a real model could chat
+   *  but could never call a tool — the agent loop's tool calls existed
+   *  only in the stub's pattern matching (field finding, 2026-11-05:
+   *  Gemini answered "I can't open apps directly on your device" to a
+   *  request the Mac pack exists to serve). The protocol rides the
+   *  prompt itself, so it works with every chat-completions-shaped
+   *  provider, and the control plane's classifier remains the real
+   *  authority: the declared class parsed here is only a floor. */
+  protected promptWithToolProtocol(prompt: string): string {
+    return `${TOOL_PROTOCOL}\n\n---\n\n${prompt}`;
+  }
+
+  /** Parse a real model's reply: a bare JSON object naming a tool is
+   *  a tool call; anything else is the final answer text. Code fences
+   *  are tolerated; a JSON object without a tool name is treated as
+   *  text (models emit JSON for other reasons). */
+  protected parseToolReply(text: string): ProviderReply {
+    const unfenced = text
+      .trim()
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```$/, "");
+    try {
+      const obj = JSON.parse(unfenced) as { tool?: unknown; args?: unknown };
+      if (obj && typeof obj.tool === "string" && obj.tool) {
+        const args =
+          obj.args && typeof obj.args === "object" && !Array.isArray(obj.args)
+            ? (obj.args as Record<string, unknown>)
+            : {};
+        return { toolCall: { tool: obj.tool, declaredClass: toolFloorClass(obj.tool, args), args } };
+      }
+    } catch {
+      /* not JSON — a final answer */
+    }
+    return { text };
+  }
 
   /**
    * Run an HTTP call whose Authorization comes from a vault secret.
@@ -228,16 +321,29 @@ abstract class RemoteProvider implements Provider {
         },
         body: JSON.stringify(body),
       });
-    if (!this.vault.has(keyName)) {
-      if (keyRequired) {
-        throw new Error(
-          `no vault secret named "${keyName}" — add your provider key in the panel (Setup → Provider); the agent never sees it`,
-        );
+    const attempt = async (): Promise<ProviderTransportResponse> => {
+      if (!this.vault.has(keyName)) {
+        if (keyRequired) {
+          throw new Error(
+            `no vault secret named "${keyName}" — add your provider key in the panel (Setup → Provider); the agent never sees it`,
+          );
+        }
+        return send(undefined);
       }
-      return send(undefined);
+      const res = await this.vault.withSecret(keyName, (key) => send(key));
+      if (!res) throw new Error(`vault secret "${keyName}" vanished mid-call`);
+      return res;
+    };
+    // Transient provider failures (429 rate-limited, 503 overloaded)
+    // are retried with backoff before any refusal reaches the job —
+    // one hiccup shouldn't fail the operator's task (field: Gemini
+    // answered a job with HTTP 503, 2026-11-05).
+    let res = await attempt();
+    for (const delayMs of [1_000, 3_000]) {
+      if (res.status !== 429 && res.status !== 503) break;
+      await new Promise((r) => setTimeout(r, delayMs));
+      res = await attempt();
     }
-    const res = await this.vault.withSecret(keyName, (key) => send(key));
-    if (!res) throw new Error(`vault secret "${keyName}" vanished mid-call`);
     return res;
   }
 
@@ -273,7 +379,7 @@ export class AnthropicProvider extends RemoteProvider {
       {
         model: this.model,
         max_tokens: this.maxTokensOut,
-        messages: [{ role: "user", content: prompt }],
+        messages: [{ role: "user", content: this.promptWithToolProtocol(prompt) }],
       },
       { "anthropic-version": "2023-06-01" },
     );
@@ -284,9 +390,9 @@ export class AnthropicProvider extends RemoteProvider {
       .map((b) => b.text as string)
       .join("");
     const usage = (body.usage ?? {}) as { input_tokens?: number; output_tokens?: number };
-    if (!text) throw new Error("Anthropic returned no text (tool-use-only replies are not wired in v1)");
+    if (!text) throw new Error("Anthropic returned no text");
     return {
-      reply: { text },
+      reply: this.parseToolReply(text),
       tokensIn: usage.input_tokens ?? estimateTokens(prompt),
       tokensOut: usage.output_tokens ?? estimateTokens(text),
     };
@@ -327,7 +433,7 @@ export class OpenAiCompatibleProvider extends RemoteProvider {
     const res = await this.callWithKey(this.keyName, this.keyRequired, "authorization", `${this.base}/chat/completions`, {
       model: this.model,
       max_tokens: this.maxTokensOut,
-      messages: [{ role: "user", content: prompt }],
+      messages: [{ role: "user", content: this.promptWithToolProtocol(prompt) }],
     });
     const body = await this.expectOk(res, this.who);
     const choices = Array.isArray(body.choices) ? (body.choices as Array<Record<string, unknown>>) : [];
@@ -336,7 +442,7 @@ export class OpenAiCompatibleProvider extends RemoteProvider {
     const usage = (body.usage ?? {}) as { prompt_tokens?: number; completion_tokens?: number };
     if (!text) throw new Error(`${this.who} returned no text`);
     return {
-      reply: { text },
+      reply: this.parseToolReply(text),
       tokensIn: usage.prompt_tokens ?? estimateTokens(prompt),
       tokensOut: usage.completion_tokens ?? estimateTokens(text),
     };

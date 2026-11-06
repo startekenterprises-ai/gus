@@ -44,6 +44,7 @@ export class ChannelHost {
   private pendingDeliveries = new Map<string, string>();
   private pendingChecks = new Map<string, PendingCheck>();
   private lastModelHash = new Map<string, string>();
+  private modelRefusals = new Map<string, string>();
   private updateCommands?: UpdateCommands;
 
   constructor(
@@ -428,6 +429,15 @@ export class ChannelHost {
     if (text !== undefined) this.lastModelHash.set(jobId, sha256Hex(text));
   }
 
+  /** Phase 9: a real provider refused the model call itself. The job
+   *  produced no model output, so the output-hash post-condition in
+   *  onJobFinal can never match — without this record the operator
+   *  hears "failed its verification check" when the truth is "the
+   *  provider said no" (field: Gemini HTTP 503, 2026-11-05). */
+  onModelRefused(jobId: string, detail: string): void {
+    this.modelRefusals.set(jobId, detail);
+  }
+
   noteAuthorizedWrite(jobId: string, path: string, content: string): void {
     this.pendingChecks.set(jobId, { type: "write", path, expectedDigest: sha256Hex(content) });
   }
@@ -503,6 +513,20 @@ export class ChannelHost {
     const outText = screened.clean
       ? text
       : "[A reply was withheld by secret-guard: it contained what looked like a secret.]";
+
+    // A provider refusal settles on its own terms: the runtime's
+    // final text already says what happened ("I couldn't complete
+    // that: <provider detail>"), so the operator hears the real
+    // reason — never the verification template for a job that
+    // produced no model output to verify.
+    const refusal = this.modelRefusals.get(jobId);
+    if (refusal) {
+      this.modelRefusals.delete(jobId);
+      this.jobs.transition(jobId, "failed-loudly", `provider refused the model call: ${refusal}`);
+      await this.sendTo(this.adapters[0]?.name ?? "telegram", job.conversationId, outText);
+      this.pendingDeliveries.delete(jobId);
+      return;
+    }
 
     let verified = false;
     let note: string;

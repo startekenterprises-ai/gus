@@ -354,7 +354,11 @@ test("providers: Gemini — vault key injected ONLY at Google's pinned endpoint"
   // Request shaping matches the OpenAI-compatible contract.
   const sentBody = JSON.parse(seen[0].body ?? "{}") as { model?: string; messages?: unknown };
   assert.equal(sentBody.model, "gemini-3.5-flash");
-  assert.deepEqual(sentBody.messages, [{ role: "user", content: "hi" }]);
+  // Phase 9: the prompt carries the tool protocol; the operator's
+  // text rides at the end of it.
+  const sentContent = (sentBody.messages as { content?: string }[])?.[0]?.content ?? "";
+  assert.ok(sentContent.includes("mac.open_app"), "tool protocol lists the tools");
+  assert.ok(sentContent.endsWith("hi"), "the raw prompt closes the message");
 
   // The preview model is a first-class citizen too.
   const preview = new GeminiProvider(vault, "gemini-3-flash-preview", { transport });

@@ -177,6 +177,7 @@ approvals.onExpire = (req) => host.handleApprovalExpired(req);
 const comm = new CommServer(socketPath, governor, jobs, {
   onRuntimeHello: () => host.onRuntimeHello(),
   onModelIssued: (jobId, text) => host.onModelIssued(jobId, text),
+  onModelRefused: (jobId, detail) => host.onModelRefused(jobId, detail),
   noteAuthorizedWrite: (jobId, path, content) => host.noteAuthorizedWrite(jobId, path, content),
   onApprovalRequested: (req) => host.onApprovalRequested(req),
   noteApprovedExecution: (jobId, tool, args) => host.noteApprovedExecution(jobId, tool, args),

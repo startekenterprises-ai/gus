@@ -24,6 +24,10 @@ import { isMacTool } from "./mac.js";
 export interface HostHooks {
   onRuntimeHello(): void;
   onModelIssued(jobId: string, text: string | undefined): void;
+  /** Phase 9: a real provider refused the model call itself (503,
+   *  bad key, …) — the host records it so the job's final notice
+   *  names the provider reason instead of a verification failure. */
+  onModelRefused(jobId: string, detail: string): void;
   noteAuthorizedWrite(jobId: string, path: string, content: string): void;
   /** Phase 2: an approval was created and the job parked — the host
    *  presents the request (with buttons) on the channel. */
@@ -523,6 +527,7 @@ export class CommServer {
           }
           const detail = screenText(e instanceof Error ? e.message : String(e)).redacted;
           this.hooks.logRuntime("error", `provider error for job ${req.jobId}: ${detail}`);
+          this.hooks.onModelRefused(req.jobId, detail);
           this.send({
             t: "model_response",
             reqId: req.reqId,

@@ -131,7 +131,13 @@ async function driveLoop(jobId: string, initialPrompt: string, signal: { aborted
           send({ t: "job_update", jobId, note: "aborted:killed" });
           return;
         }
-        prompt = `TOOL_RESULT ${tc.tool}: ${outcome.summary}`;
+        // The model is stateless across hops (each model_request is a
+        // fresh call), so the continuation carries the operator's
+        // original request after the TOOL_RESULT line — a real model
+        // deciding "what next" needs to know what it is in the middle
+        // of doing. The TOOL_RESULT prefix stays first: the stub's
+        // pattern matching keys on it.
+        prompt = `TOOL_RESULT ${tc.tool}: ${outcome.summary}\n(The operator's original request was: "${initialPrompt}". Continue it, or reply with plain text to finish.)`;
         continue;
       }
       if (res.text !== undefined) {

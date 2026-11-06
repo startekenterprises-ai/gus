@@ -72,7 +72,10 @@ export function fakeComplete(prompt: string): ProviderReply {
     if (get) {
       return { toolCall: { tool: "fetch", declaredClass: "read", args: { url: get[1] } } };
     }
-    return { text: `Done — ${p.slice("TOOL_RESULT".length).trim()}` };
+    // First line only: Phase 9 continuations append the operator's
+    // original request after the TOOL_RESULT line — the stub's "Done"
+    // echoes the tool's outcome, not the framing around it.
+    return { text: `Done — ${p.slice("TOOL_RESULT".length).trim().split("\n")[0]}` };
   }
   let m = p.match(/^write file\s+(\S+)\s+([\s\S]+)$/i);
   if (m) {

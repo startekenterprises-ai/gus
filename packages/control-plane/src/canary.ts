@@ -107,6 +107,9 @@ export class CanaryRunner {
       onModelIssued: (jobId, text) => {
         if (text !== undefined) this.lastModelHash.set(jobId, sha256Hex(text));
       },
+      onModelRefused: () => {
+        /* canary jobs run on the stub, which never refuses */
+      },
       noteAuthorizedWrite: (jobId, path, content) => {
         this.pendingWrite.set(jobId, { path, expectedDigest: sha256Hex(content) });
       },
