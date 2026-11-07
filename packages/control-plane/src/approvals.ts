@@ -304,6 +304,18 @@ export class ApprovalEngine {
       .sort((a, b) => a.createdAt - b.createdAt);
   }
 
+  /** Recently-resolved approvals, newest first (v0.7: the desktop
+   *  app's Approvals history — the same durable records, read back).
+   *  Pending records are excluded; expiry is swept first so a record
+   *  whose time ran out reads as expired, never as still waiting. */
+  recentResolved(limit = 25): ApprovalRequest[] {
+    this.sweepExpired();
+    return [...this.requests.values()]
+      .filter((r) => r.status !== "pending")
+      .sort((a, b) => (b.resolvedAt ?? b.createdAt) - (a.resolvedAt ?? a.createdAt))
+      .slice(0, Math.max(0, limit));
+  }
+
   /** True while any approval is awaiting the operator. Phase 3: part
    *  of the Updater's idle gate — an update never starts while an
    *  approval is parked. */

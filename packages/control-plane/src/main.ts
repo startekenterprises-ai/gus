@@ -450,6 +450,20 @@ const panelBackend: PanelBackend = {
       createdAt: r.createdAt,
       expiresAt: r.expiresAt,
     })),
+  // v0.7: the desktop sidebar's history — resolved records from the
+  // same engine, newest first. Read-only; nothing here can resolve,
+  // widen, or rebind (resolution stays resolveApproval above).
+  approvalsHistory: () =>
+    approvals.recentResolved(25).map((r) => ({
+      id: r.id,
+      jobId: r.jobId,
+      summary: r.summary,
+      reason: r.reason,
+      status: r.status,
+      createdAt: r.createdAt,
+      resolvedAt: r.resolvedAt,
+      resolvedBy: r.resolvedBy,
+    })),
   resolveApproval: async (id, approve) => {
     const req = approvals.get(id);
     if (!req || req.status !== "pending") {

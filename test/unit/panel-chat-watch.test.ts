@@ -160,6 +160,18 @@ async function rig(opts?: { shieldGate?: unknown; macHost?: MacHostAdapter }): P
         createdAt: r.createdAt,
         expiresAt: r.expiresAt,
       })),
+    // Mirrors main.ts (v0.7): resolved records, newest first.
+    approvalsHistory: () =>
+      approvals.recentResolved(25).map((r) => ({
+        id: r.id,
+        jobId: r.jobId,
+        summary: r.summary,
+        reason: r.reason,
+        status: r.status,
+        createdAt: r.createdAt,
+        resolvedAt: r.resolvedAt,
+        resolvedBy: r.resolvedBy,
+      })),
     // Mirrors main.ts: the panel delegates to ChannelHost — the
     // one channel resolution path — never to the engine directly.
     resolveApproval: async (id, approve) => {
@@ -361,6 +373,98 @@ test("chat: POST /api/chat through the real panel server creates the job", async
       headers: { authorization: "Bearer test-token-123" },
     })).json() as { messages: { direction: string; text: string }[] };
     assert.deepEqual(hist.messages.map((m) => m.text), ["hello from the panel"]);
+  } finally {
+    await panel.stop();
+  }
+});
+
+// ------------------------------------------------- approvals history (v0.7)
+
+test("approvals history: resolved records newest-first; pending stays out", async () => {
+  const r = await rig();
+
+  // One approved, one denied, one left pending.
+  r.panelChat.submit("write the first file");
+  await tick();
+  const job1 = r.pushed[0].jobId;
+  r.jobs.transition(job1, "needs-approval");
+  const req1 = r.approvals.create({
+    jobId: job1,
+    conversationId: PANEL_CHAT_CONVERSATION,
+    tool: "workspace_write",
+    args: { path: "one.txt", content: "1" },
+    reason: "first park",
+  });
+  assert.equal((await r.backend.resolveApproval(req1.id, true)).ok, true);
+
+  r.panelChat.submit("write the second file");
+  await tick();
+  const job2 = r.pushed[1].jobId;
+  r.jobs.transition(job2, "needs-approval");
+  const req2 = r.approvals.create({
+    jobId: job2,
+    conversationId: PANEL_CHAT_CONVERSATION,
+    tool: "workspace_write",
+    args: { path: "two.txt", content: "2" },
+    reason: "second park",
+  });
+  assert.equal((await r.backend.resolveApproval(req2.id, false)).ok, true);
+
+  const req3 = r.approvals.create({
+    jobId: job2,
+    conversationId: PANEL_CHAT_CONVERSATION,
+    tool: "workspace_write",
+    args: { path: "three.txt", content: "3" },
+    reason: "still waiting",
+  });
+
+  const history = r.backend.approvalsHistory();
+  assert.deepEqual(
+    history.map((h) => h.id),
+    [req2.id, req1.id],
+    "newest resolution first; the pending record is not history",
+  );
+  assert.equal(history[0].status, "denied");
+  assert.equal(history[1].status, "approved");
+  for (const h of history) {
+    assert.equal(typeof h.resolvedAt, "number");
+    assert.equal(typeof h.resolvedBy, "string", "the resolver is stamped, unedited");
+    assert.equal(h.summary.length > 0, true);
+  }
+  assert.equal(r.approvals.recentResolved(1).length, 1, "the engine caps the list");
+  assert.equal(r.approvals.get(req3.id)?.status, "pending");
+});
+
+test("approvals history: GET /api/approvals/history is token-gated and serves the records", async () => {
+  const r = await rig();
+  r.panelChat.submit("write the file");
+  await tick();
+  const jobId = r.pushed[0].jobId;
+  r.jobs.transition(jobId, "needs-approval");
+  const req = r.approvals.create({
+    jobId,
+    conversationId: PANEL_CHAT_CONVERSATION,
+    tool: "workspace_write",
+    args: { path: "notes.txt", content: "hi" },
+    reason: "history route park",
+  });
+  assert.equal((await r.backend.resolveApproval(req.id, true)).ok, true);
+
+  const panel = new PanelServer(r.backend, { token: "test-token-123", port: 0 });
+  await panel.start();
+  try {
+    const base = `http://127.0.0.1:${panel.port}`;
+    const noAuth = await fetch(`${base}/api/approvals/history`);
+    assert.equal(noAuth.status, 401);
+    const res = await fetch(`${base}/api/approvals/history`, {
+      headers: { authorization: "Bearer test-token-123" },
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { id: string; status: string; jobId: string }[];
+    assert.equal(body.length, 1);
+    assert.equal(body[0].id, req.id);
+    assert.equal(body[0].status, "approved");
+    assert.equal(body[0].jobId, jobId);
   } finally {
     await panel.stop();
   }

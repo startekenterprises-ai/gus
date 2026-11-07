@@ -1,12 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  GUS.app bundle description (Phase 8).
+  GUS.app bundle description (Phase 8; Desktop 1 in v0.7).
 
   build-dmg.sh copies this into GUS.app/Contents/Info.plist,
   substituting __VERSION__ (from the repo package.json) and
-  __BUILD__ (the short git hash). LSUIElement keeps the app a
-  menu-bar citizen — no Dock icon, no main window at launch.
+  __BUILD__ (the short git hash). No LSUIElement: since Desktop 1
+  the app is a real desktop application — Dock presence and a main
+  window at launch — that ALSO keeps its menu-bar status item.
 -->
 <plist version="1.0">
 <dict>
@@ -32,8 +33,6 @@
   <string>__BUILD__</string>
   <key>LSMinimumSystemVersion</key>
   <string>14.0</string>
-  <key>LSUIElement</key>
-  <true/>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSPrincipalClass</key>

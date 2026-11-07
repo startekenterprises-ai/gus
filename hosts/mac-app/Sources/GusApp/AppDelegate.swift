@@ -3,13 +3,13 @@ import CryptoKit
 import Foundation
 import ServiceManagement
 
-/// Menu-bar presence for GUS: a status item whose menu shows the
-/// version and whether the control plane is running, starts/stops
-/// the launchd agents, opens the setup panel, checks for updates,
-/// and quits. Starting GUS.app also starts GusMacHost from
-/// Contents/Helpers and stops it on quit; on an installed machine
-/// the app bootstraps any service that is not loaded, so opening
-/// the app means GUS is on.
+/// Presence for GUS: a main window (v0.7, Desktop 1) plus the
+/// menu-bar status item whose menu shows the version and whether
+/// the control plane is running, starts/stops the launchd agents,
+/// opens the setup panel, checks for updates, and quits. Starting
+/// GUS.app also starts GusMacHost from Contents/Helpers and stops
+/// it on quit; on an installed machine the app bootstraps any
+/// service that is not loaded, so opening the app means GUS is on.
 final class GusAppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var statusMenuItem: NSMenuItem!
@@ -22,6 +22,7 @@ final class GusAppDelegate: NSObject, NSApplicationDelegate {
     private var installStagedItem: NSMenuItem!
     private var helperProcess: Process?
     private var setupWindow: SetupWindowController?
+    private var mainWindow: MainWindowController?
     private var statusTimer: Timer?
 
     private let labels = [
@@ -44,6 +45,11 @@ final class GusAppDelegate: NSObject, NSApplicationDelegate {
         statusTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
             self?.refreshStatus()
         }
+        // v0.7 (Desktop 1): opening the app shows the main window —
+        // the app is a real desktop application now, not a menu-bar
+        // extra with a panel page. The menu bar stays, with every
+        // behavior it already had.
+        showMainWindow()
         // First run (no GUS home yet) opens the setup window on its
         // own; after that it is one menu click away.
         if !FileManager.default.fileExists(atPath: NSHomeDirectory() + "/.gus/state") {
@@ -61,6 +67,13 @@ final class GusAppDelegate: NSObject, NSApplicationDelegate {
         helperProcess?.terminate()
     }
 
+    /// Clicking the Dock icon (or relaunching) reopens the main
+    /// window — the behavior a desktop app is expected to have.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showMainWindow()
+        return true
+    }
+
     // MARK: Menu
 
     private func buildMenu() {
@@ -70,6 +83,7 @@ final class GusAppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         statusMenuItem = NSMenuItem(title: "GUS: …", action: nil, keyEquivalent: "")
         menu.addItem(statusMenuItem)
+        menu.addItem(NSMenuItem(title: "Open GUS…", action: #selector(showMainWindow), keyEquivalent: ""))
         menu.addItem(.separator())
         startItem = NSMenuItem(title: "Start GUS", action: #selector(startGus), keyEquivalent: "")
         menu.addItem(startItem)
@@ -478,6 +492,11 @@ final class GusAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: Windows & links
+
+    @objc private func showMainWindow() {
+        if mainWindow == nil { mainWindow = MainWindowController() }
+        mainWindow?.show()
+    }
 
     @objc private func showSetup() {
         if setupWindow == nil { setupWindow = SetupWindowController() }

@@ -138,6 +138,7 @@ function stubBackend(): PanelBackend {
     }),
     jobs: () => [],
     approvals: () => [],
+    approvalsHistory: () => [],
     resolveApproval: action,
     setKilled: action,
     setGovernorMode: action,

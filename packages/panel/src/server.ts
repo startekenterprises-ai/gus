@@ -176,6 +176,9 @@ export class PanelServer {
     if (method === "GET" && path === "/api/ledger") return json(200, this.backend.ledger());
     if (method === "GET" && path === "/api/jobs") return json(200, this.backend.jobs());
     if (method === "GET" && path === "/api/approvals") return json(200, this.backend.approvals());
+    // v0.7: resolution history for the desktop Approvals sidebar —
+    // read-only, same token gate as every route above.
+    if (method === "GET" && path === "/api/approvals/history") return json(200, this.backend.approvalsHistory());
     if (method === "GET" && path === "/api/vault") return json(200, { names: this.backend.vaultNames() });
     if (method === "GET" && path === "/api/onboarding") return json(200, this.backend.onboarding());
     if (method === "GET" && path === "/api/skills") return json(200, this.backend.skills());

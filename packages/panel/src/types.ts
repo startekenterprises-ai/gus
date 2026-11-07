@@ -112,6 +112,25 @@ export interface PanelApprovalData {
   expiresAt: number;
 }
 
+/** v0.7: a RESOLVED approval, for the desktop app's Approvals
+ *  history (the web panel shows only the pending queue). Read-only:
+ *  the same durable records the engine keeps; jobId ties the entry
+ *  to its job — and through the job, to its settlement receipt. */
+export interface PanelApprovalHistoryData {
+  id: string;
+  jobId: string;
+  summary: string;
+  reason: string;
+  /** approved | denied | expired | consumed */
+  status: string;
+  createdAt: number;
+  resolvedAt?: number;
+  /** Who resolved it — the engine's own stamp, unedited: "panel",
+   *  "channel-button", "channel-command", "timeout", "gus",
+   *  "delegate:<name>", … */
+  resolvedBy?: string;
+}
+
 export interface PanelOnboardingStep {
   done: boolean;
   detail?: string;
@@ -190,6 +209,9 @@ export interface PanelBackend {
   ledger(): PanelLedgerData;
   jobs(): PanelJobData[];
   approvals(): PanelApprovalData[];
+  /** v0.7: resolved approvals, newest first — the history beneath
+   *  the pending queue in the desktop app's Approvals sidebar. */
+  approvalsHistory(): PanelApprovalHistoryData[];
   /** Resolve over the SAME approval engine + execution path the
    *  channel uses — the panel cannot widen, rebind, or forge. */
   resolveApproval(id: string, approve: boolean): Promise<PanelActionResult>;

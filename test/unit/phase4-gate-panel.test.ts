@@ -446,6 +446,9 @@ function stubBackend(calls: string[]): PanelBackend {
     approvals: () => [
       { id: "ap1", jobId: "job-1", summary: "Delete 3 files", reason: "destructive", createdAt: 1, expiresAt: 2 },
     ],
+    approvalsHistory: () => [
+      { id: "ap0", jobId: "job-0", summary: "Write a file", reason: "outside the sandbox", status: "approved", createdAt: 0, resolvedAt: 1, resolvedBy: "panel" },
+    ],
     resolveApproval: async (id, approve) => {
       calls.push(`resolve:${id}:${approve}`);
       return { ok: true, detail: "resolved" };
