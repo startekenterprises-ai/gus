@@ -21,7 +21,18 @@ struct PanelStatus: Decodable {
     var spendTodayUsd: Double
     var spendMonthUsd: Double
     var governorMode: String
+    var permissiveToday: PermissiveToday
     var settings: Settings
+
+    struct PermissiveToday: Decodable {
+        var count: Int
+        var recent: [LetThrough]
+        struct LetThrough: Decodable {
+            var ts: Double
+            var kind: String
+            var detail: String
+        }
+    }
 
     struct Shield: Decodable {
         var provisioned: Bool
