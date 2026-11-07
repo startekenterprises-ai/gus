@@ -22,6 +22,7 @@ final class GusAppDelegate: NSObject, NSApplicationDelegate {
     private var installStagedItem: NSMenuItem!
     private var helperProcess: Process?
     private var setupWindow: SetupWindowController?
+    private var settingsWindow: SettingsWindowController?
     private var mainWindow: MainWindowController?
     private var statusTimer: Timer?
 
@@ -39,6 +40,15 @@ final class GusAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // v0.8: the SwiftUI windows ask for app-owned surfaces via
+        // notifications — Settings is a window the delegate owns,
+        // and Check for Updates is the delegate's own machinery.
+        NotificationCenter.default.addObserver(forName: .gusOpenSettings, object: nil, queue: .main) { [weak self] _ in
+            self?.showSettings()
+        }
+        NotificationCenter.default.addObserver(forName: .gusCheckForUpdates, object: nil, queue: .main) { [weak self] _ in
+            self?.checkForUpdates()
+        }
         startHelper()
         buildMenu()
         refreshStatus()
@@ -103,6 +113,8 @@ final class GusAppDelegate: NSObject, NSApplicationDelegate {
         modePermissiveItem = NSMenuItem(title: "Permissive (record, don't block)", action: #selector(setPermissive), keyEquivalent: "")
         menu.addItem(modePermissiveItem)
         menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ","))
+        menu.addItem(NSMenuItem(title: "First-Run Setup…", action: #selector(runFirstRunSetup), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Setup & Permissions…", action: #selector(showSetup), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Open Setup Panel", action: #selector(openPanel), keyEquivalent: ""))
         menu.addItem(.separator())
@@ -501,6 +513,21 @@ final class GusAppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showSetup() {
         if setupWindow == nil { setupWindow = SetupWindowController() }
         setupWindow?.show()
+    }
+
+    /// v0.8 (Desktop 2): the native Settings window — setup and
+    /// settings live in the app now, over the same panel APIs.
+    @objc private func showSettings() {
+        if settingsWindow == nil { settingsWindow = SettingsWindowController() }
+        settingsWindow?.show()
+    }
+
+    /// The first-run wizard as a sheet on the main window (the
+    /// model presents it); the menu entry just brings the window
+    /// forward and posts the request.
+    @objc private func runFirstRunSetup() {
+        showMainWindow()
+        NotificationCenter.default.post(name: .gusRunSetup, object: nil)
     }
 
     @objc private func openPanel() {

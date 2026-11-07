@@ -519,6 +519,45 @@ const panelBackend: PanelBackend = {
         : "Approval delegation saved — all paths off. Parks are the operator's (and in Permissive they proceed stamped, as before).",
     };
   },
+  // v0.8: the Shield gate's policy write for the desktop Settings
+  // window — required + fail mode into the operator's policy file
+  // (PolicyStore.writeShield, the same write the onboarding shield
+  // step performs after provisioning). No provisioning here, no
+  // endpoint change: the base URL is launch configuration
+  // (GUS_SHIELD_BASE_URL), and the settings UI says so.
+  setShieldPolicy: async (p) => {
+    if (p.onUnavailable !== "open" && p.onUnavailable !== "closed") {
+      return { ok: false, detail: `Unknown fail mode "${p.onUnavailable}" — expected "open" or "closed". Nothing changed.` };
+    }
+    policy.writeShield({ required: p.required === true, onUnavailable: p.onUnavailable });
+    return {
+      ok: true,
+      detail: p.required
+        ? `Agent-Shield gate is REQUIRED, fail-${p.onUnavailable}: ` +
+          (p.onUnavailable === "closed"
+            ? "if the Shield can't be reached, messages and actions are blocked."
+            : "if the Shield can't be reached, things proceed unscanned, flagged, with no receipt.")
+        : "Agent-Shield gate is NOT required — content reaches the model unscanned. Every other control (approvals, caps, receipts for what does run) is unchanged.",
+    };
+  },
+  // v0.8: the settings detail for the desktop Settings window —
+  // the Mac jail's contents and the named delegates, read from the
+  // same operator files the classifier and the bridge read. No
+  // write path: editing stays a file action in this release.
+  settingsDetail: () => {
+    const mac = policy.load().mac;
+    const cfg = loadDelegates(stateDir);
+    return {
+      macWorkDirs: mac.workDirs,
+      macShellAllowlist: mac.shellAllowlist,
+      delegates: Object.entries(cfg.conversations).map(([conversationId, c]) => ({
+        conversationId,
+        operatorId: c.operatorId,
+        delegates: c.delegates.map((d) => ({ name: d.name, senderId: d.senderId })),
+      })),
+      bridge: cfg.bridge,
+    };
+  },
   setKilled: async (on) => {
     if (on) {
       const { settled } = host.killAll("panel");

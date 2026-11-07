@@ -143,6 +143,8 @@ function stubBackend(): PanelBackend {
     setKilled: action,
     setGovernorMode: action,
     setApproverPolicy: action,
+    setShieldPolicy: action,
+    settingsDetail: () => ({ macWorkDirs: [], macShellAllowlist: [], delegates: [] }),
     vaultNames: () => [],
     storeSecret: () => ({ ok: true, detail: "ok" }),
     onboarding: () => ({

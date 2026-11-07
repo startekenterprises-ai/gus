@@ -131,6 +131,42 @@ export interface PanelApprovalHistoryData {
   resolvedBy?: string;
 }
 
+/** v0.8: the Shield gate's operator policy, as written by the
+ *  Settings surface (the wizard's shield step also lands here, via
+ *  onboarding — it provisions the key and records required=true;
+ *  this is the plain policy write: required + fail mode, no
+ *  provisioning side effect). */
+export interface PanelShieldPolicyData {
+  required: boolean;
+  /** "closed" | "open" — what happens when the Shield is unreachable. */
+  onUnavailable: string;
+}
+
+export interface PanelDelegateEntryData {
+  name: string;
+  /** Channel-native sender id (a Telegram user id, as a string). */
+  senderId: string;
+}
+
+export interface PanelDelegateConversationData {
+  conversationId: string;
+  operatorId: string;
+  delegates: PanelDelegateEntryData[];
+}
+
+/** v0.8: the settings detail the status summary only counts — the
+ *  Mac jail's actual contents and the named delegates, for the
+ *  desktop app's Settings window. Read-only in this release:
+ *  editing policy.json / delegates.json stays an operator file
+ *  action, and the app says so rather than pretending otherwise. */
+export interface PanelSettingsDetailData {
+  macWorkDirs: string[];
+  macShellAllowlist: string[];
+  delegates: PanelDelegateConversationData[];
+  /** The file-bridge binding, when one is configured. */
+  bridge?: { conversationId: string; senderId: string };
+}
+
 export interface PanelOnboardingStep {
   done: boolean;
   detail?: string;
@@ -223,6 +259,14 @@ export interface PanelBackend {
    *  in the control plane). Live on the next park; applies only
    *  while the Governor is permissive. */
   setApproverPolicy(policy: PanelApproverPolicyData): Promise<PanelActionResult>;
+  /** v0.8: save the Shield gate's operator policy (required +
+   *  fail mode) into the policy file, via PolicyStore.writeShield.
+   *  Policy only — provisioning the key stays the onboarding
+   *  shield step's job. Live on the next gate decision. */
+  setShieldPolicy(policy: PanelShieldPolicyData): Promise<PanelActionResult>;
+  /** v0.8: the settings detail (Mac jail contents + delegates) —
+   *  read-only; see PanelSettingsDetailData. */
+  settingsDetail(): PanelSettingsDetailData;
   /** Names only — there is no read path for values, here either. */
   vaultNames(): string[];
   storeSecret(name: string, value: string): PanelActionResult;

@@ -35,6 +35,12 @@ struct RootView: View {
             SidebarView(model: model)
         }
         .frame(minWidth: 980, minHeight: 620)
+        // v0.8: the first-run setup flow, in the app — auto-shown
+        // once by the model when a fresh install can't think yet,
+        // and re-openable from the menu or Settings → General.
+        .sheet(isPresented: $model.setupPresented) {
+            SetupFlowView(model: model)
+        }
     }
 }
 
@@ -59,7 +65,7 @@ struct TopBarView: View {
                 Label("Invite", systemImage: "person.badge.plus")
             }
             .disabled(true)
-            .help("Delegate invites arrive in Desktop 3 — delegates are named in the setup panel today.")
+            .help("Delegate invites arrive in Desktop 3 — delegates are named in ~/.gus/state/delegates.json today (see Settings → Delegates).")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
@@ -103,6 +109,12 @@ struct RailView: View {
                 model.newChat()
             }
             Spacer()
+            // v0.8: Settings lives in the app now — the gear opens
+            // the native Settings window (the app delegate owns it).
+            railButton(symbol: "gearshape", label: "Settings",
+                       selected: false) {
+                NotificationCenter.default.post(name: .gusOpenSettings, object: nil)
+            }
         }
         .padding(.vertical, 14)
         .frame(width: 58)

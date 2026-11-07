@@ -1,5 +1,13 @@
 import Foundation
 
+/// Cross-window requests, posted by views and observed by the app
+/// delegate (windows) or this model (the setup sheet).
+extension Notification.Name {
+    static let gusOpenSettings = Notification.Name("gus.openSettings")
+    static let gusCheckForUpdates = Notification.Name("gus.checkForUpdates")
+    static let gusRunSetup = Notification.Name("gus.runSetup")
+}
+
 /// The desktop window's store: a polling read model over the local
 /// panel APIs, plus the three actions the window offers (send a
 /// chat message, approve, deny). Nothing is cached to disk and
@@ -25,6 +33,12 @@ final class DesktopModel: ObservableObject {
     @Published var jobs: [PanelJob] = []
     @Published var approvals: [PanelApproval] = []
     @Published var approvalsHistory: [PanelApprovalHistoryEntry] = []
+    /// v0.8: the wizard's step state — drives the first-run setup
+    /// sheet (auto-presented once when a fresh install can't think
+    /// yet) and is re-read after every setup action.
+    @Published var onboarding: PanelOnboarding?
+    @Published var setupPresented = false
+    private var setupAutoShown = false
     @Published var composerText = ""
     /// The last action's outcome, in the panel's own words (or the
     /// transport error). Shown under the composer / sidebar so a
@@ -42,6 +56,9 @@ final class DesktopModel: ObservableObject {
         refreshAll()
         timer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
             self?.refreshAll()
+        }
+        NotificationCenter.default.addObserver(forName: .gusRunSetup, object: nil, queue: .main) { [weak self] _ in
+            self?.setupPresented = true
         }
     }
 
@@ -125,6 +142,81 @@ final class DesktopModel: ObservableObject {
         refreshChat()
         refreshJobs()
         refreshApprovals()
+        refreshOnboarding()
+    }
+
+    // MARK: First-run setup (v0.8 — the wizard, in the app)
+
+    /// The first-run signal, the same one the web wizard works
+    /// from: the provider step isn't done AND GUS has no working
+    /// brain yet (the offline stub, or a key-requiring provider
+    /// whose key is missing). A hand-configured install whose
+    /// wizard steps were never recorded does NOT trip this — its
+    /// provider works, so there is nothing to set up.
+    var needsSetup: Bool {
+        guard let onboarding, let status else { return false }
+        if onboarding.steps.provider.done { return false }
+        return status.provider.id == "stub" || status.settings.providerKey == "missing"
+    }
+
+    private func refreshOnboarding() {
+        client.get("/api/onboarding", as: PanelOnboarding.self) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if case .success(let o) = result {
+                    self.onboarding = o
+                    if self.needsSetup && !self.setupAutoShown {
+                        self.setupAutoShown = true
+                        self.setupPresented = true
+                    }
+                }
+            }
+        }
+    }
+
+    /// One wizard step. Every step is the panel's own onboarding
+    /// endpoint — the same call the web wizard makes, with the
+    /// same vault/governor landings; the app adds no path of its
+    /// own. The panel's detail text becomes the notice verbatim.
+    private func setupAction(_ path: String, body: [String: Any] = [:], thenChat: Bool = false) {
+        client.post(path, jsonBody: body) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch result {
+                case .success(let r):
+                    self.notice = r.detail
+                case .failure(let e):
+                    self.notice = "Could not reach the panel: \(e.localizedDescription)"
+                }
+                self.refreshOnboarding()
+                self.refreshStatus()
+                if thenChat { self.refreshChat(); self.refreshJobs() }
+            }
+        }
+    }
+
+    func setupShield(failMode: String) {
+        setupAction("/api/onboarding/shield", body: ["onUnavailable": failMode])
+    }
+
+    func setupTelegram(token: String) {
+        setupAction("/api/onboarding/telegram", body: ["token": token])
+    }
+
+    func setupProvider(provider: String, model: String, apiKey: String, baseUrl: String) {
+        var body: [String: Any] = ["provider": provider, "model": model]
+        if !apiKey.isEmpty { body["apiKey"] = apiKey }
+        if !baseUrl.isEmpty { body["baseUrl"] = baseUrl }
+        setupAction("/api/onboarding/provider", body: body)
+    }
+
+    func setupCaps(task: Double, day: Double, month: Double) {
+        setupAction("/api/onboarding/caps",
+                    body: ["maxUsdPerTask": task, "maxUsdPerDay": day, "maxUsdPerMonth": month])
+    }
+
+    func setupFirstJob() {
+        setupAction("/api/onboarding/first-job", thenChat: true)
     }
 
     private func refreshStatus() {

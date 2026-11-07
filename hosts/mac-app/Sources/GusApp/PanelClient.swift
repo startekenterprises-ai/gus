@@ -105,6 +105,77 @@ struct PanelActionResult: Decodable {
     var detail: String
 }
 
+/// The onboarding read model (GET /api/onboarding) — the wizard's
+/// step state, shared by the web setup panel and (v0.8) the app's
+/// first-run setup flow and Settings window. `currentProvider` is
+/// optional in the payload until a provider step has been saved.
+struct PanelOnboarding: Decodable {
+    var steps: Steps
+    var suggestedCaps: SuggestedCaps
+    var currentProvider: CurrentProvider?
+
+    struct Steps: Decodable {
+        var shield: Step
+        var telegram: Step
+        var provider: Step
+        var caps: Step
+        var firstJob: Step
+    }
+    struct Step: Decodable {
+        var done: Bool
+        var detail: String?
+    }
+    struct SuggestedCaps: Decodable {
+        var maxUsdPerTask: Double
+        var maxUsdPerDay: Double
+        var maxUsdPerMonth: Double
+    }
+    struct CurrentProvider: Decodable {
+        var provider: String
+        var model: String
+        var baseUrl: String?
+    }
+}
+
+/// One entry of the help registry (GET /api/help) — the SAME
+/// registry (packages/panel/src/help.ts) the web panel's pop-ups
+/// and /help page render from. The app fetches it; no help copy is
+/// duplicated in Swift, so the surfaces cannot drift apart.
+struct PanelHelpEntry: Decodable, Identifiable {
+    var id: String
+    var title: String
+    var tip: String
+    var body: String
+}
+
+struct PanelHelpResponse: Decodable {
+    var entries: [PanelHelpEntry]
+}
+
+/// The settings detail (GET /api/settings-detail, v0.8): what the
+/// status summary only counts — the Mac jail's contents and the
+/// named delegates. Read-only in this release.
+struct PanelSettingsDetail: Decodable {
+    var macWorkDirs: [String]
+    var macShellAllowlist: [String]
+    var delegates: [DelegateConversation]
+    var bridge: Bridge?
+
+    struct DelegateConversation: Decodable {
+        var conversationId: String
+        var operatorId: String
+        var delegates: [DelegateEntry]
+    }
+    struct DelegateEntry: Decodable {
+        var name: String
+        var senderId: String
+    }
+    struct Bridge: Decodable {
+        var conversationId: String
+        var senderId: String
+    }
+}
+
 final class PanelClient {
     private let baseURL = URL(string: "http://127.0.0.1:8731")!
 
@@ -149,6 +220,15 @@ final class PanelClient {
                 completion(.failure(error))
             }
         }.resume()
+    }
+
+    /// An authenticated panel URL for opening in the browser (the
+    /// panel plants its cookie from a valid ?t= link, so this is
+    /// how in-app "open the web panel / help page" links work).
+    func panelURL(_ path: String) -> URL {
+        var comps = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false)
+        comps?.queryItems = [URLQueryItem(name: "t", value: token)]
+        return comps?.url ?? baseURL
     }
 
     /// POST an action. The panel answers every action — success,

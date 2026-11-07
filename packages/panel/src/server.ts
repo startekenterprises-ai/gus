@@ -23,7 +23,7 @@ import { createServer, type Server } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import type { PanelBackend } from "./types.js";
 import { PANEL_HTML } from "./page.js";
-import { HELP_HTML } from "./help.js";
+import { HELP_ENTRIES, HELP_HTML } from "./help.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
 
@@ -172,6 +172,17 @@ export class PanelServer {
       return json(result.ok ? 200 : 400, result);
     }
 
+    // v0.8: the help registry as JSON, for the desktop app's
+    // native Settings (per-control help pop-overs + the Help &
+    // support section). Same registry object the /help page and
+    // the panel's own pop-ups render from — one source of truth,
+    // third surface. No backend call: the registry lives in this
+    // package.
+    if (method === "GET" && path === "/api/help") return json(200, { entries: HELP_ENTRIES });
+    // v0.8: the settings detail (Mac jail contents + named
+    // delegates) for the desktop Settings window — read-only.
+    if (method === "GET" && path === "/api/settings-detail") return json(200, this.backend.settingsDetail());
+
     if (method === "GET" && path === "/api/status") return json(200, this.backend.status());
     if (method === "GET" && path === "/api/ledger") return json(200, this.backend.ledger());
     if (method === "GET" && path === "/api/jobs") return json(200, this.backend.jobs());
@@ -210,6 +221,14 @@ export class PanelServer {
         scope: body.scope === "all_except_floors" ? "all_except_floors" : "bounded",
         maxApprovalsPerHour:
           typeof body.maxApprovalsPerHour === "number" ? body.maxApprovalsPerHour : 30,
+      });
+      return json(result.ok ? 200 : 400, result);
+    }
+    if (method === "POST" && path === "/api/shield-policy") {
+      const body = await this.readJson(req);
+      const result = await this.backend.setShieldPolicy({
+        required: body.required === true,
+        onUnavailable: typeof body.onUnavailable === "string" ? body.onUnavailable : "",
       });
       return json(result.ok ? 200 : 400, result);
     }

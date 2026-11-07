@@ -465,6 +465,18 @@ function stubBackend(calls: string[]): PanelBackend {
       calls.push(`approver:${p.scope}`);
       return { ok: true, detail: "approver policy set" };
     },
+    setShieldPolicy: async (p) => {
+      calls.push(`shield:${p.required}:${p.onUnavailable}`);
+      return { ok: true, detail: "shield policy set" };
+    },
+    settingsDetail: () => ({
+      macWorkDirs: ["/Users/op/work"],
+      macShellAllowlist: ["ls"],
+      delegates: [
+        { conversationId: "-1001", operatorId: "42", delegates: [{ name: "Nova", senderId: "99" }] },
+      ],
+      bridge: { conversationId: "-1001", senderId: "99" },
+    }),
     vaultNames: () => ["agent-shield"],
     storeSecret: (name) => {
       calls.push(`vault:${name}`);

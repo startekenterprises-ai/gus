@@ -1,11 +1,12 @@
 import SwiftUI
 
-/// Gateways: the governed connections on file, read-only in
-/// Desktop 1 — the same "Settings on file" readout the web panel
-/// shows (provider, Shield, channels, caps), rendered natively.
-/// Editing stays in the setup panel until Desktop 2; this view
-/// never shows a secret value, because the panel API never sends
-/// one: key state arrives as stored / missing / not-required.
+/// Gateways: the governed connections on file — the same
+/// "Settings on file" readout the web panel shows (provider,
+/// Shield, channels, caps), rendered natively. Editing moved
+/// into the app's Settings window in Desktop 2 (rail gear, or
+/// ⌘,); this view stays the at-a-glance summary, and it never
+/// shows a secret value, because the panel API never sends one:
+/// key state arrives as stored / missing / not-required.
 struct GatewaysView: View {
     @ObservedObject var model: DesktopModel
 
@@ -13,7 +14,7 @@ struct GatewaysView: View {
         Group {
             if let status = model.status {
                 List {
-                    Section("On file — read-only in Desktop 1; edit in the setup panel") {
+                    Section("On file — the summary; edit in Settings") {
                         row("Model provider",
                             "\(status.provider.id) · \(status.provider.model)",
                             "API key: \(status.settings.providerKey)")
@@ -37,7 +38,7 @@ struct GatewaysView: View {
                                 + "\(GusFormat.usdCap(status.settings.caps.maxUsdPerMonth)) / month")
                         row("Kill switch",
                             status.killed ? "ON — GUS is stopped" : "Off — GUS is live",
-                            "Stop and resume live in the menu bar")
+                            "Stop and resume in Settings → Data controls (or /stop in chat)")
                     }
                 }
             } else {
