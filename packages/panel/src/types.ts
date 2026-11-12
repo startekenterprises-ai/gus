@@ -185,6 +185,12 @@ export interface PanelVoiceSettingsData {
   ttsBaseUrl: string;
   ttsModel: string;
   ttsVoice: string;
+  /** v0.9.1: barge-in for the live call — talking over a reply
+   *  cuts its speech. Optional on the wire so older surfaces
+   *  that omit it keep working; the config default is ON and
+   *  the control plane preserves the stored value on a save
+   *  that doesn't mention it. */
+  bargeIn?: boolean;
 }
 
 /** v0.9: one push-to-talk exchange. Audio crosses as base64 inside
@@ -201,6 +207,64 @@ export interface PanelVoiceCallData {
   detail: string;
   transcript?: string;
   replyText?: string;
+  audioBase64?: string;
+  audioContentType?: string;
+}
+
+/** v0.9.1: one turn's stage timings in a live call — utterance
+ *  end → transcript (sttMs) → reply (jobMs) → first spoken
+ *  sentence (ttsFirstMs). The local-vs-cloud speech data; it
+ *  lives in the session state and nowhere else. */
+export interface PanelVoiceTurnLatencyData {
+  utteranceEndAt: number;
+  sttMs: number;
+  jobMs: number;
+  ttsFirstMs?: number;
+  totalMs: number;
+}
+
+/** v0.9.1: one settled turn of a live call, as the transcript
+ *  record carries it. */
+export interface PanelVoiceSessionTurnData {
+  index: number;
+  startedAt: number;
+  transcript?: string;
+  kind: string;
+  detail: string;
+  replyText?: string;
+  /** Barge-in cut this reply's speech; the job was NOT stopped. */
+  interrupted: boolean;
+  latency?: PanelVoiceTurnLatencyData;
+}
+
+/** v0.9.1: the live call's state — what the app polls while a
+ *  call runs. Phase is listening | thinking | speaking | ended;
+ *  an inactive state carries endedReason (operator |
+ *  idle-timeout | max-length | kill-phrase | disabled) when the
+ *  call ended on its own or was ended. */
+export interface PanelVoiceSessionData {
+  ok: boolean;
+  detail: string;
+  active: boolean;
+  sessionId?: string;
+  phase?: string;
+  startedAt?: number;
+  elapsedMs?: number;
+  endedReason?: string;
+  bargeIn?: boolean;
+  turns: PanelVoiceSessionTurnData[];
+  lastLatency?: PanelVoiceTurnLatencyData;
+}
+
+/** v0.9.1: one spoken segment of a live call's reply — a single
+ *  sentence's audio, fetched in seq order by the app's playback
+ *  queue. ok with no seq means nothing is ready yet. */
+export interface PanelVoiceAudioSegmentData {
+  ok: boolean;
+  detail: string;
+  seq?: number;
+  turnIndex?: number;
+  sentenceIndex?: number;
   audioBase64?: string;
   audioContentType?: string;
 }
@@ -350,4 +414,19 @@ export interface PanelBackend {
    *  of its own: this delegates to the voice call service, which
    *  drives the same ChannelHost every surface drives. */
   voiceCall(audio: Uint8Array, contentType: string): Promise<PanelVoiceCallData>;
+  /** v0.9.1: the live call. Start opens the one session (the
+   *  0.9 call's guards apply: voice off refuses loudly); audio
+   *  takes the streamed mic chunks (raw PCM16) the VAD segments
+   *  into utterances; state is the poll the app renders its
+   *  transcript + latency from; nextAudio feeds its playback
+   *  queue one sentence-segment at a time; interrupt is
+   *  barge-in (speech only — never a job, never an approval);
+   *  end hangs up. All delegate to the voice session service —
+   *  the backend adds no path of its own. */
+  voiceSessionStart(): PanelVoiceSessionData;
+  voiceSessionAudio(sessionId: string, audio: Uint8Array): PanelActionResult;
+  voiceSessionState(sessionId: string): PanelVoiceSessionData;
+  voiceSessionNextAudio(sessionId: string, afterSeq: number): PanelVoiceAudioSegmentData;
+  voiceSessionInterrupt(sessionId: string): PanelActionResult;
+  voiceSessionEnd(sessionId: string): PanelVoiceSessionData;
 }

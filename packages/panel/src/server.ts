@@ -31,6 +31,10 @@ const MAX_BODY_BYTES = 64 * 1024;
  *  minutes of headroom, and the voice service enforces the same
  *  cap again on its side of the contract. */
 const MAX_AUDIO_BODY_BYTES = 16 * 1024 * 1024;
+/** v0.9.1: one streamed chunk of a live call (~250 ms of PCM16
+ *  is 8 KB). 1 MB is minutes of headroom per chunk and still
+ *  nothing like a recording — a chunk is a breath, not a file. */
+const MAX_SESSION_CHUNK_BYTES = 1024 * 1024;
 
 export class PanelServer {
   private server?: Server;
@@ -211,6 +215,7 @@ export class PanelServer {
         ttsBaseUrl: typeof body.ttsBaseUrl === "string" ? body.ttsBaseUrl : "",
         ttsModel: typeof body.ttsModel === "string" ? body.ttsModel : "",
         ttsVoice: typeof body.ttsVoice === "string" ? body.ttsVoice : "",
+        bargeIn: typeof body.bargeIn === "boolean" ? body.bargeIn : undefined,
       });
       return json(result.ok ? 200 : 400, result);
     }
@@ -221,6 +226,52 @@ export class PanelServer {
         req.headers["content-type"] ?? "audio/wav",
       );
       return json(result.ok ? 200 : 400, result);
+    }
+
+    // v0.9.1: the live call — one session, streamed both ways.
+    // Audio in is raw PCM16 chunks (the session id rides the
+    // query string; the body is the breath, not a document);
+    // speech out is fetched segment by segment (one sentence
+    // each) by the app's playback queue; state is the poll the
+    // in-call UI renders from. Same token gate as every route.
+    if (method === "POST" && path === "/api/voice/session/start") {
+      const result = this.backend.voiceSessionStart();
+      return json(result.ok ? 200 : 400, result);
+    }
+    if (method === "POST" && path === "/api/voice/session/audio") {
+      const audio = await this.readRaw(req, MAX_SESSION_CHUNK_BYTES);
+      const result = this.backend.voiceSessionAudio(
+        url.searchParams.get("session") ?? "",
+        audio,
+      );
+      return json(result.ok ? 200 : 409, result);
+    }
+    if (method === "GET" && path === "/api/voice/session/state") {
+      return json(200, this.backend.voiceSessionState(url.searchParams.get("session") ?? ""));
+    }
+    if (method === "GET" && path === "/api/voice/session/next-audio") {
+      const after = Number(url.searchParams.get("after") ?? "0");
+      return json(
+        200,
+        this.backend.voiceSessionNextAudio(
+          url.searchParams.get("session") ?? "",
+          Number.isFinite(after) && after > 0 ? Math.floor(after) : 0,
+        ),
+      );
+    }
+    if (method === "POST" && path === "/api/voice/session/interrupt") {
+      const body = await this.readJson(req);
+      const result = this.backend.voiceSessionInterrupt(
+        typeof body.sessionId === "string" ? body.sessionId : "",
+      );
+      return json(result.ok ? 200 : 409, result);
+    }
+    if (method === "POST" && path === "/api/voice/session/end") {
+      const body = await this.readJson(req);
+      const result = this.backend.voiceSessionEnd(
+        typeof body.sessionId === "string" ? body.sessionId : "",
+      );
+      return json(result.ok ? 200 : 409, result);
     }
 
     // v0.8: the help registry as JSON, for the desktop app's

@@ -41,21 +41,39 @@ final class DesktopModel: ObservableObject {
     @Published var setupPresented = false
     private var setupAutoShown = false
     @Published var composerText = ""
-    /// v0.9 (Call GUS): the voice exchange state. Push-to-talk:
-    /// idle → recording → thinking (the call round-trips the
-    /// control plane: transcribe → job → spoken reply) → idle.
-    /// Exchanges are shown in the chat from the call results
-    /// themselves; the jobs behind them are ordinary jobs with
-    /// ordinary receipts in the Jobs view.
-    @Published var voiceState: VoiceState = .idle
-    @Published var voiceExchanges: [PanelChatMessage] = []
-    enum VoiceState {
-        case idle
-        case recording
-        case thinking
-    }
-    private var voiceRecorder: AVAudioRecorder?
+    /// v0.9.1 (Call GUS, live): an open call is a session in the
+    /// control plane. The microphone streams only while
+    /// voiceInCall — nothing listens outside a call the operator
+    /// started. Turns render from the session state's own
+    /// records (the poll below); the jobs behind them are
+    /// ordinary jobs with ordinary receipts in the Jobs view.
+    @Published var voiceInCall = false
+    /// The server-reported phase: listening | thinking | speaking.
+    @Published var voicePhase = "listening"
+    @Published var voiceTurns: [PanelVoiceSessionTurn] = []
+    @Published var voiceElapsedMs: Double = 0
+    /// The last turn's measured stages, for the in-call strip:
+    /// the local-vs-cloud speech evidence, in the open.
+    @Published var voiceLatencyLine: String?
+    private var voiceSessionId: String?
+    private var voiceBargeIn = true
+    private var voiceLastSeq = 0
+    // Capture: AVAudioEngine tap → converter → a PCM16 stash the
+    // chunk timer drains in ~250 ms posts (never from the audio
+    // thread itself).
+    private var voiceEngine: AVAudioEngine?
+    private var voiceConverter: AVAudioConverter?
+    private let voiceTargetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true)!
+    private var voiceStash = Data()
+    private let voiceStashLock = NSLock()
+    private var voiceChunkTimer: Timer?
+    private var voicePollTimer: Timer?
+    private var voiceLoudStreak = 0
+    // Playback: a queue of sentence segments through one player,
+    // advanced by the chunk timer (no delegate — the timer asks
+    // isPlaying, which is all the chaining needs).
     private var voicePlayer: AVAudioPlayer?
+    private var voicePlayQueue: [Data] = []
     /// The last action's outcome, in the panel's own words (or the
     /// transport error). Shown under the composer / sidebar so a
     /// refusal is never silent.
@@ -133,27 +151,14 @@ final class DesktopModel: ObservableObject {
         }
     }
 
-    // MARK: Voice — Call GUS (v0.9)
+    // MARK: Voice — Call GUS, live (v0.9.1)
 
-    private var voiceRecordingURL: URL {
-        FileManager.default.temporaryDirectory.appendingPathComponent("gus-voice-utterance.wav")
-    }
-
-    /// The Call button: tap to start talking, tap again to send.
-    /// Push-to-talk — nothing listens between calls, and the app
-    /// only ever records after the tap.
-    func toggleVoiceCall() {
-        switch voiceState {
-        case .idle:
-            startVoiceRecording()
-        case .recording:
-            finishVoiceRecording()
-        case .thinking:
-            break // a call is already in flight; extra taps do nothing
-        }
-    }
-
-    private func startVoiceRecording() {
+    /// The Call button: open a live call. The mic permission is
+    /// asked first (the same gate as 0.9.0), then the session is
+    /// opened in the control plane, and only then does capture
+    /// start — the order matters: no session, no microphone.
+    func startVoiceCall() {
+        guard !voiceInCall else { return }
         AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -161,69 +166,252 @@ final class DesktopModel: ObservableObject {
                     self.notice = "Microphone access is off for GUS — grant it in System Settings → Privacy & Security → Microphone, then try the call again."
                     return
                 }
-                do {
-                    // 16 kHz mono WAV: speech-to-text's native shape,
-                    // small, and every transcription service takes it.
-                    let settings: [String: Any] = [
-                        AVFormatIDKey: Int(kAudioFormatLinearPCM),
-                        AVSampleRateKey: 16_000,
-                        AVNumberOfChannelsKey: 1,
-                        AVLinearPCMBitDepthKey: 16,
-                        AVLinearPCMIsFloatKey: false,
-                        AVLinearPCMIsBigEndianKey: false,
-                    ]
-                    let recorder = try AVAudioRecorder(url: self.voiceRecordingURL, settings: settings)
-                    guard recorder.record() else {
-                        self.notice = "The microphone wouldn't start recording — nothing was sent."
-                        return
+                self.client.startVoiceSession { [weak self] result in
+                    DispatchQueue.main.async {
+                        guard let self else { return }
+                        switch result {
+                        case .success(let session) where session.ok && session.active:
+                            self.voiceSessionId = session.sessionId
+                            self.voiceBargeIn = session.bargeIn ?? true
+                            self.voiceTurns = session.turns
+                            self.voiceLastSeq = 0
+                            self.voicePlayQueue = []
+                            self.voiceLatencyLine = nil
+                            self.voiceInCall = true
+                            self.notice = session.detail
+                            self.beginVoiceCapture()
+                            self.voiceChunkTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+                                self?.voiceChunkTick()
+                            }
+                            self.voicePollTimer = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: true) { [weak self] _ in
+                                self?.pollVoiceSession()
+                            }
+                        case .success(let session):
+                            self.notice = session.detail
+                        case .failure(let e):
+                            self.notice = "The call didn't reach GUS: \(e.localizedDescription)"
+                        }
                     }
-                    self.voiceRecorder = recorder
-                    self.voiceState = .recording
-                    self.notice = "Listening… tap Stop & Send when you're done. If a job is parked, you'll hear it read back — say \"confirm\" or \"yes, do it\" to run it."
-                } catch {
-                    self.notice = "The microphone wouldn't start: \(error.localizedDescription)"
                 }
             }
         }
     }
 
-    private func finishVoiceRecording() {
-        voiceRecorder?.stop()
-        voiceRecorder = nil
-        guard let audio = try? Data(contentsOf: voiceRecordingURL), !audio.isEmpty else {
-            voiceState = .idle
-            notice = "That recording came out empty — nothing was sent."
+    /// The End Call button: hang up in the control plane and
+    /// close the microphone locally, in that order.
+    func endVoiceCall() {
+        guard voiceInCall else { return }
+        teardownVoice(sendEnd: true)
+        notice = "Call ended."
+    }
+
+    private func beginVoiceCapture() {
+        let engine = AVAudioEngine()
+        let input = engine.inputNode
+        // Voice processing (echo cancellation + gain control)
+        // where the hardware offers it: GUS's own spoken reply
+        // stays out of the microphone, which is what keeps the
+        // barge-in energy check honest. If it's refused, the
+        // plain input still carries the call.
+        try? input.setVoiceProcessingEnabled(true)
+        let format = input.outputFormat(forBus: 0)
+        guard let converter = AVAudioConverter(from: format, to: voiceTargetFormat) else {
+            notice = "This Mac's microphone format can't be converted for the call — nothing is being recorded."
+            teardownVoice(sendEnd: true)
             return
         }
-        voiceState = .thinking
-        client.postVoiceCall(audio: audio, contentType: "audio/wav") { [weak self] result in
+        voiceConverter = converter
+        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+            self?.ingestVoiceBuffer(buffer)
+        }
+        engine.prepare()
+        do {
+            try engine.start()
+            voiceEngine = engine
+        } catch {
+            notice = "The microphone wouldn't start: \(error.localizedDescription)"
+            teardownVoice(sendEnd: true)
+        }
+    }
+
+    /// Audio-thread work: convert one input buffer to the call's
+    /// PCM16 shape and stash it. Nothing here posts, allocates
+    /// UI, or touches published state — the chunk timer does all
+    /// of that on the main thread.
+    private func ingestVoiceBuffer(_ buffer: AVAudioPCMBuffer) {
+        guard let converter = voiceConverter else { return }
+        let ratio = voiceTargetFormat.sampleRate / buffer.format.sampleRate
+        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 128
+        guard let out = AVAudioPCMBuffer(pcmFormat: voiceTargetFormat, frameCapacity: capacity) else { return }
+        var consumed = false
+        var convertError: NSError?
+        let status = converter.convert(to: out, error: &convertError) { _, outStatus in
+            if consumed {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            consumed = true
+            outStatus.pointee = .haveData
+            return buffer
+        }
+        guard status != .error, out.frameLength > 0, let channel = out.int16ChannelData?[0] else { return }
+        let data = Data(bytes: channel, count: Int(out.frameLength) * 2)
+        voiceStashLock.lock()
+        voiceStash.append(data)
+        voiceStashLock.unlock()
+    }
+
+    /// Every ~250 ms while the call is open: ship the mic stash,
+    /// watch for barge-in, fetch the next spoken segment, and
+    /// keep the playback queue moving.
+    private func voiceChunkTick() {
+        guard voiceInCall, let id = voiceSessionId else { return }
+
+        voiceStashLock.lock()
+        let chunk = voiceStash
+        voiceStash = Data()
+        voiceStashLock.unlock()
+
+        if !chunk.isEmpty {
+            // Barge-in, the app's half: sustained speech energy
+            // while GUS is audibly talking means the operator is
+            // talking over it — stop the player here, and tell
+            // the control plane to drop the rest of the reply.
+            if voiceBargeIn, voicePlayer?.isPlaying == true {
+                if Self.pcmRms(chunk) > 900 {
+                    voiceLoudStreak += 1
+                } else {
+                    voiceLoudStreak = 0
+                }
+                if voiceLoudStreak >= 2 {
+                    voiceLoudStreak = 0
+                    cutVoicePlayback()
+                    client.interruptVoiceSession(sessionId: id) { _ in }
+                }
+            } else {
+                voiceLoudStreak = 0
+            }
+            client.postVoiceSessionAudio(sessionId: id, pcm: chunk) { [weak self] result in
+                if case .failure = result {
+                    DispatchQueue.main.async {
+                        guard let self, self.voiceInCall else { return }
+                        self.notice = "The call's audio stopped reaching GUS — the call is closed here; start it again when the control plane answers."
+                        self.teardownVoice(sendEnd: true)
+                    }
+                }
+            }
+        }
+
+        client.voiceSessionNextAudio(sessionId: id, afterSeq: voiceLastSeq) { [weak self] result in
             DispatchQueue.main.async {
-                guard let self else { return }
-                self.voiceState = .idle
-                switch result {
-                case .success(let call):
-                    self.notice = call.detail
-                    if let transcript = call.transcript, !transcript.isEmpty {
-                        self.voiceExchanges.append(PanelChatMessage(ts: Self.nowMs, direction: "in", text: "🎙 \(transcript)"))
-                    }
-                    if let reply = call.replyText, !reply.isEmpty {
-                        self.voiceExchanges.append(PanelChatMessage(ts: Self.nowMs, direction: "out", text: reply))
-                    }
-                    if let b64 = call.audioBase64, let data = Data(base64Encoded: b64) {
-                        self.voicePlayer = try? AVAudioPlayer(data: data)
-                        self.voicePlayer?.play()
-                    }
+                guard let self, self.voiceInCall else { return }
+                if case .success(let seg) = result,
+                   let seq = seg.seq,
+                   let b64 = seg.audioBase64,
+                   let data = Data(base64Encoded: b64) {
+                    self.voiceLastSeq = seq
+                    self.voicePlayQueue.append(data)
+                }
+                self.advanceVoicePlayback()
+            }
+        }
+        advanceVoicePlayback()
+    }
+
+    private func advanceVoicePlayback() {
+        if voicePlayer?.isPlaying == true { return }
+        guard !voicePlayQueue.isEmpty else {
+            voicePlayer = nil
+            return
+        }
+        let data = voicePlayQueue.removeFirst()
+        voicePlayer = try? AVAudioPlayer(data: data)
+        voicePlayer?.play()
+    }
+
+    private func cutVoicePlayback() {
+        voicePlayer?.stop()
+        voicePlayer = nil
+        voicePlayQueue = []
+    }
+
+    /// The state poll (~0.8 s): transcript, phase, elapsed,
+    /// latency — and endings. If the server ended the call (the
+    /// silence limit, the hour, the kill phrase), its detail
+    /// says which, and the local side closes to match.
+    private func pollVoiceSession() {
+        guard voiceInCall, let id = voiceSessionId else { return }
+        client.voiceSessionState(sessionId: id) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self, self.voiceInCall else { return }
+                guard case .success(let s) = result else { return }
+                if !s.active {
+                    self.voiceTurns = s.turns
+                    self.notice = s.detail
+                    self.teardownVoice(sendEnd: false)
                     self.refreshChat()
                     self.refreshJobs()
                     self.refreshApprovals()
-                case .failure(let e):
-                    self.notice = "The voice call didn't reach GUS: \(e.localizedDescription)"
+                    return
+                }
+                self.voiceTurns = s.turns
+                self.voicePhase = s.phase ?? "listening"
+                self.voiceElapsedMs = s.elapsedMs ?? 0
+                self.voiceBargeIn = s.bargeIn ?? self.voiceBargeIn
+                if let l = s.lastLatency {
+                    var line = "last turn — heard \(Self.seconds(l.sttMs)) · thought \(Self.seconds(l.jobMs))"
+                    if let tts = l.ttsFirstMs { line += " · speaking after \(Self.seconds(tts))" }
+                    self.voiceLatencyLine = line
                 }
             }
         }
     }
 
-    private static var nowMs: Double { Date().timeIntervalSince1970 * 1000 }
+    /// Close the local call: timers off, tap removed, engine
+    /// stopped, player cut. sendEnd also hangs up in the control
+    /// plane (exactly once — the session id is gone afterwards).
+    private func teardownVoice(sendEnd: Bool) {
+        if sendEnd, let id = voiceSessionId {
+            client.endVoiceSession(sessionId: id) { _ in }
+        }
+        voiceChunkTimer?.invalidate()
+        voiceChunkTimer = nil
+        voicePollTimer?.invalidate()
+        voicePollTimer = nil
+        voiceEngine?.inputNode.removeTap(onBus: 0)
+        voiceEngine?.stop()
+        voiceEngine = nil
+        voiceConverter = nil
+        cutVoicePlayback()
+        voiceStashLock.lock()
+        voiceStash = Data()
+        voiceStashLock.unlock()
+        voiceSessionId = nil
+        voiceInCall = false
+        voicePhase = "listening"
+    }
+
+    private static func seconds(_ ms: Double) -> String {
+        String(format: "%.1fs", ms / 1000)
+    }
+
+    /// RMS of one raw PCM16 chunk (the call's audio shape), on
+    /// the int16 scale — the barge-in energy check. Read byte by
+    /// byte: no alignment assumptions about the buffer.
+    private static func pcmRms(_ data: Data) -> Double {
+        guard data.count >= 2 else { return 0 }
+        var sum: Double = 0
+        var n = 0
+        var i = 0
+        while i + 1 < data.count {
+            var v = (Int32(data[i + 1]) << 8) | Int32(data[i])
+            if v >= 32_768 { v -= 65_536 }
+            sum += Double(v) * Double(v)
+            n += 1
+            i += 2
+        }
+        return n > 0 ? (sum / Double(n)).squareRoot() : 0
+    }
 
     func resolve(_ approval: PanelApproval, approve: Bool) {
         let path = "/api/approvals/\(approval.id)/\(approve ? "approve" : "deny")"

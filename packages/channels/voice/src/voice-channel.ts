@@ -31,7 +31,7 @@
  *     never approves silently, never resolves by button-forge,
  *     and an ambiguous answer executes nothing.
  *
- * The call itself is request/response (push-to-talk in the app):
+ * The 0.9.0 call was request/response (push-to-talk in the app):
  * one utterance in, the FIRST host delivery back (a result, a
  * block notice, a park read-back, a cap notice) spoken back.
  * Later deliveries for a still-running job are not lost to the
@@ -39,6 +39,14 @@
  * other — but they are not held for a call that already ended;
  * the adapter drops stale deliveries at the next call's start,
  * the way a phone call drops a sentence spoken after hang-up.
+ *
+ * v0.9.1: the live call (session.ts) reuses exactly this turn
+ * logic through processTranscript() — one transcript in, one
+ * settled turn out — and differs only in the ears (a streamed,
+ * segmented utterance instead of one recording) and the mouth
+ * (sentence-streamed speech instead of one synthesis). The
+ * pipeline the words travel is the same one, because that
+ * sameness is the security argument.
  */
 import type {
   ChannelAdapter,
@@ -264,7 +272,24 @@ export class VoiceCallService {
       };
     }
 
-    // --- speech acts ------------------------------------------
+    // --- the turn itself: identical for a push-to-talk call and
+    // a live session; only the speaking differs (one synthesis
+    // here, a sentence stream there). -----------------------------
+    const turn = await this.processTranscript(transcript);
+    return this.speak(config, turn);
+  }
+
+  /**
+   * One settled turn from an existing transcript: speech acts
+   * first (kill / confirm / deny against a parked approval), then
+   * an ordinary job through the channel pipeline, waiting for the
+   * host's first delivery. The result carries the reply TEXT and
+   * no audio — how the text is spoken is the caller's business
+   * (handleAudio synthesizes it whole; the live session streams
+   * it sentence by sentence). Public within the package: the
+   * session service is the second caller, not a second pipeline.
+   */
+  async processTranscript(transcript: string): Promise<VoiceCallResult> {
     this.adapter.drainStale();
     const phrase = classifyTranscript(transcript);
     const pending = this.approvals.pendingFor(VOICE_CONVERSATION);
@@ -273,13 +298,13 @@ export class VoiceCallService {
       const sent = this.adapter.submit("/stop");
       if (!sent.ok) return { ok: false, kind: "unavailable", transcript, detail: sent.detail };
       const reply = await this.adapter.waitForReply(this.replyTimeoutMs);
-      return this.speak(config, {
+      return {
         ok: true,
         kind: "stopped",
         detail: "Kill phrase heard — the stop command ran through the channel's normal /stop path.",
         transcript,
         replyText: reply ?? "Stopped. Kill switch is ON — say resume from any channel when you want me back.",
-      });
+      };
     }
 
     if (pending) {
@@ -289,7 +314,7 @@ export class VoiceCallService {
         );
         if (!sent.ok) return { ok: false, kind: "unavailable", transcript, detail: sent.detail };
         const reply = await this.adapter.waitForReply(this.replyTimeoutMs);
-        return this.speak(config, {
+        return {
           ok: true,
           kind: "approval-resolved",
           detail:
@@ -298,13 +323,13 @@ export class VoiceCallService {
               : "Deny phrase heard — the parked action was denied through the channel's normal /deny path.",
           transcript,
           replyText: reply ?? (phrase.kind === "confirm" ? "Approved." : "Denied. Nothing ran."),
-        });
+        };
       }
       // Ambiguous (or a fresh request) while a park waits: the
       // park owns the floor. Nothing is submitted, nothing runs —
       // the operator hears the read-back again with the phrases
       // that count.
-      return this.speak(config, {
+      return {
         ok: true,
         kind: "awaiting-confirmation",
         detail:
@@ -312,7 +337,7 @@ export class VoiceCallService {
         transcript,
         replyText:
           `Still waiting on your call about this: "${pending.summary}". ` + CONFIRM_INSTRUCTION,
-      });
+      };
     }
 
     // --- a normal job ------------------------------------------
@@ -320,7 +345,7 @@ export class VoiceCallService {
     if (!sent.ok) return { ok: false, kind: "unavailable", transcript, detail: sent.detail };
     const reply = await this.adapter.waitForReply(this.replyTimeoutMs);
     if (reply === undefined) {
-      return this.speak(config, {
+      return {
         ok: true,
         kind: "pending",
         detail:
@@ -328,7 +353,7 @@ export class VoiceCallService {
         transcript,
         replyText:
           "That's with me — it's taking longer than a call can wait, so I'll leave it running. The answer will be in the chat history when it lands.",
-      });
+      };
     }
     // A park notice as the first delivery is the read-back: make
     // sure the spoken form carries the phrases that count, even
@@ -337,13 +362,13 @@ export class VoiceCallService {
     const replyText = reply.includes("Job parked")
       ? `${reply} For voice: ${CONFIRM_INSTRUCTION}`
       : reply;
-    return this.speak(config, {
+    return {
       ok: true,
       kind: "reply",
       detail: "Heard, scanned, and answered through the normal job pipeline.",
       transcript,
       replyText,
-    });
+    };
   }
 
   /** Synthesize the reply for playback. A TTS failure does NOT

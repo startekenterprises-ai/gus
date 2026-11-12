@@ -127,6 +127,9 @@ struct PanelActionResult: Decodable {
 /// the operator's local speech services — an OpenAI-compatible
 /// transcription endpoint (faster-whisper) and speech endpoint
 /// (Kokoro). Plain config; there are no secrets in this shape.
+/// v0.9.1 adds bargeIn (optional here: an older panel that
+/// doesn't send it decodes as nil, and the call treats nil as
+/// the config default, on).
 struct PanelVoiceSettings: Decodable {
     var enabled: Bool
     var sttBaseUrl: String
@@ -134,6 +137,7 @@ struct PanelVoiceSettings: Decodable {
     var ttsBaseUrl: String
     var ttsModel: String
     var ttsVoice: String
+    var bargeIn: Bool?
 }
 
 /// One push-to-talk exchange (POST /api/voice/call, v0.9). On a
@@ -146,6 +150,63 @@ struct PanelVoiceCallResult: Decodable {
     var detail: String
     var transcript: String?
     var replyText: String?
+    var audioBase64: String?
+    var audioContentType: String?
+}
+
+/// One live-call turn's stage timings (v0.9.1): utterance end →
+/// transcript (sttMs) → reply (jobMs) → first spoken sentence
+/// (ttsFirstMs). Milliseconds, measured in the control plane.
+struct PanelVoiceTurnLatency: Decodable {
+    var utteranceEndAt: Double
+    var sttMs: Double
+    var jobMs: Double
+    var ttsFirstMs: Double?
+    var totalMs: Double
+}
+
+/// One settled turn of a live call (v0.9.1), as the session
+/// state's transcript carries it.
+struct PanelVoiceSessionTurn: Decodable, Identifiable {
+    var index: Int
+    var startedAt: Double // unix ms
+    var transcript: String?
+    var kind: String
+    var detail: String
+    var replyText: String?
+    var interrupted: Bool
+    var latency: PanelVoiceTurnLatency?
+    var id: Int { index }
+}
+
+/// The live call's state (v0.9.1) — what the app polls while a
+/// call runs: phase (listening | thinking | speaking | ended),
+/// the transcript so far, the last turn's latency, and after an
+/// ending the endedReason (operator | idle-timeout |
+/// max-length | kill-phrase | disabled).
+struct PanelVoiceSession: Decodable {
+    var ok: Bool
+    var detail: String
+    var active: Bool
+    var sessionId: String?
+    var phase: String?
+    var startedAt: Double?
+    var elapsedMs: Double?
+    var endedReason: String?
+    var bargeIn: Bool?
+    var turns: [PanelVoiceSessionTurn]
+    var lastLatency: PanelVoiceTurnLatency?
+}
+
+/// One spoken segment of a live call's reply (v0.9.1): a single
+/// sentence's audio, fetched in seq order. ok with a nil seq
+/// means nothing is ready yet.
+struct PanelVoiceAudioSegment: Decodable {
+    var ok: Bool
+    var detail: String
+    var seq: Int?
+    var turnIndex: Int?
+    var sentenceIndex: Int?
     var audioBase64: String?
     var audioContentType: String?
 }
@@ -323,6 +384,90 @@ final class PanelClient {
                 completion(.failure(error))
             }
         }.resume()
+    }
+
+    // MARK: Live voice sessions (v0.9.1)
+
+    /// A panel URL with query items — the session routes carry
+    /// the session id on the query string (the audio route's
+    /// body is raw PCM; it can't carry anything else).
+    private func url(_ path: String, query: [URLQueryItem]) -> URL {
+        var comps = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false)
+        comps?.queryItems = query
+        return comps?.url ?? baseURL
+    }
+
+    private func request(url: URL, method: String) -> URLRequest {
+        var req = URLRequest(url: url)
+        req.httpMethod = method
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        return req
+    }
+
+    /// One request, one decoded shape, the body decoded
+    /// regardless of HTTP status — the session routes answer
+    /// refusals with the state shape too, and a refusal is data.
+    private func perform<T: Decodable>(_ req: URLRequest, as type: T.Type, completion: @escaping (Result<T, Error>) -> Void) {
+        URLSession.shared.dataTask(with: req) { data, _, error in
+            if let error {
+                completion(.failure(error))
+                return
+            }
+            guard let data else {
+                completion(.failure(NSError(domain: "gus.panel", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "the panel answered with no data"])))
+                return
+            }
+            do {
+                completion(.success(try JSONDecoder().decode(T.self, from: data)))
+            } catch {
+                completion(.failure(error))
+            }
+        }.resume()
+    }
+
+    /// Open the live call. The answer is the fresh session's
+    /// state — or the refusal, in the same shape.
+    func startVoiceSession(completion: @escaping (Result<PanelVoiceSession, Error>) -> Void) {
+        perform(request(path: "/api/voice/session/start", method: "POST", jsonBody: [:]),
+                as: PanelVoiceSession.self, completion: completion)
+    }
+
+    /// The session poll: phase, transcript, latency, endings.
+    func voiceSessionState(sessionId: String, completion: @escaping (Result<PanelVoiceSession, Error>) -> Void) {
+        perform(request(url: url("/api/voice/session/state", query: [URLQueryItem(name: "session", value: sessionId)]), method: "GET"),
+                as: PanelVoiceSession.self, completion: completion)
+    }
+
+    /// The next spoken segment after `afterSeq`, if one is ready.
+    func voiceSessionNextAudio(sessionId: String, afterSeq: Int, completion: @escaping (Result<PanelVoiceAudioSegment, Error>) -> Void) {
+        perform(request(url: url("/api/voice/session/next-audio", query: [
+                    URLQueryItem(name: "session", value: sessionId),
+                    URLQueryItem(name: "after", value: String(afterSeq)),
+                ]), method: "GET"),
+                as: PanelVoiceAudioSegment.self, completion: completion)
+    }
+
+    /// One streamed mic chunk: raw PCM16 (16 kHz mono) as the
+    /// body, the session id on the query string.
+    func postVoiceSessionAudio(sessionId: String, pcm: Data, completion: @escaping (Result<PanelActionResult, Error>) -> Void) {
+        var req = request(url: url("/api/voice/session/audio", query: [URLQueryItem(name: "session", value: sessionId)]), method: "POST")
+        req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        req.httpBody = pcm
+        perform(req, as: PanelActionResult.self, completion: completion)
+    }
+
+    /// Barge-in: cut the current reply's speech. Speech only —
+    /// the panel route cannot stop a job or move an approval.
+    func interruptVoiceSession(sessionId: String, completion: @escaping (Result<PanelActionResult, Error>) -> Void) {
+        perform(request(path: "/api/voice/session/interrupt", method: "POST", jsonBody: ["sessionId": sessionId]),
+                as: PanelActionResult.self, completion: completion)
+    }
+
+    /// Hang up. The answer is the ended session's final state.
+    func endVoiceSession(sessionId: String, completion: @escaping (Result<PanelVoiceSession, Error>) -> Void) {
+        perform(request(path: "/api/voice/session/end", method: "POST", jsonBody: ["sessionId": sessionId]),
+                as: PanelVoiceSession.self, completion: completion)
     }
 }
 

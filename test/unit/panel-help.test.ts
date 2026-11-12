@@ -179,6 +179,12 @@ function stubBackend(): PanelBackend {
     }),
     setVoiceSettings: action,
     voiceCall: async () => ({ ok: false, kind: "unavailable", detail: "voice is not wired in this stub" }),
+    voiceSessionStart: () => ({ ok: false, active: false, detail: "voice sessions are not wired in this stub", turns: [] }),
+    voiceSessionAudio: () => ({ ok: false, detail: "voice sessions are not wired in this stub" }),
+    voiceSessionState: () => ({ ok: false, active: false, detail: "voice sessions are not wired in this stub", turns: [] }),
+    voiceSessionNextAudio: () => ({ ok: false, detail: "voice sessions are not wired in this stub" }),
+    voiceSessionInterrupt: () => ({ ok: false, detail: "voice sessions are not wired in this stub" }),
+    voiceSessionEnd: () => ({ ok: false, active: false, detail: "voice sessions are not wired in this stub", turns: [] }),
   };
 }
 

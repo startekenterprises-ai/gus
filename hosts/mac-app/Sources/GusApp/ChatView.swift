@@ -33,6 +33,10 @@ struct ChatView: View {
                 }
                 .padding(10)
             }
+            if model.voiceInCall {
+                Divider()
+                callStatusStrip
+            }
             Divider()
             composer
             if let notice = model.notice {
@@ -56,7 +60,7 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
-                    if model.chatMessages.isEmpty && model.chatJobs.isEmpty && model.voiceExchanges.isEmpty {
+                    if model.chatMessages.isEmpty && model.chatJobs.isEmpty && model.voiceTurns.isEmpty {
                         Text("No messages yet. Say hello — or give GUS a job.")
                             .foregroundColor(.secondary)
                             .padding(.top, 8)
@@ -64,8 +68,13 @@ struct ChatView: View {
                     ForEach(Array(model.chatMessages.enumerated()), id: \.offset) { _, message in
                         messageBubble(message)
                     }
-                    ForEach(Array(model.voiceExchanges.enumerated()), id: \.offset) { _, message in
-                        messageBubble(message)
+                    ForEach(model.voiceTurns) { turn in
+                        if let transcript = turn.transcript, !transcript.isEmpty {
+                            messageBubble(PanelChatMessage(ts: turn.startedAt, direction: "in", text: "🎙 \(transcript)"))
+                        }
+                        if let reply = turn.replyText, !reply.isEmpty {
+                            messageBubble(PanelChatMessage(ts: turn.startedAt, direction: "out", text: reply))
+                        }
                     }
                     ForEach(model.chatJobs) { job in
                         jobLine(job)
@@ -80,7 +89,7 @@ struct ChatView: View {
             .onChange(of: model.chatMessages.count) { _, _ in
                 proxy.scrollTo("chat-bottom", anchor: .bottom)
             }
-            .onChange(of: model.voiceExchanges.count) { _, _ in
+            .onChange(of: model.voiceTurns.count) { _, _ in
                 proxy.scrollTo("chat-bottom", anchor: .bottom)
             }
             .onChange(of: model.chatJobs.map(\.id).joined()) { _, _ in
@@ -141,42 +150,64 @@ struct ChatView: View {
         .padding(12)
     }
 
-    /// Call GUS (v0.9): push-to-talk. The transcript the service
-    /// hears becomes a normal job (same scan, caps, receipts), the
-    /// answer comes back spoken. While a job is parked, the call
-    /// is how you answer it: the read-back names the exact phrases
-    /// ("confirm" / "yes, do it" / "no") that count.
+    /// Call GUS (v0.9.1): a live call, not a recording. While
+    /// the call is open the microphone streams, a pause ends
+    /// your turn, replies are spoken sentence by sentence, and
+    /// talking over GUS cuts its speech. While a job is parked,
+    /// the call is how you answer it: the read-back names the
+    /// exact phrases ("confirm" / "yes, do it" / "no") that
+    /// count, and "GUS stop" ends the call at the kill switch.
     private var callButton: some View {
         Group {
-            switch model.voiceState {
-            case .idle:
+            if model.voiceInCall {
                 Button {
-                    model.toggleVoiceCall()
+                    model.endVoiceCall()
+                } label: {
+                    Label("End Call", systemImage: "phone.down.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .help("End the call — the microphone closes with it")
+            } else {
+                Button {
+                    model.startVoiceCall()
                 } label: {
                     Label("Call", systemImage: "phone.fill")
                 }
                 .buttonStyle(.bordered)
-                .help("Call GUS — talk instead of typing. Nothing listens until you tap; the words go through the same pipeline as a typed message.")
-            case .recording:
-                Button {
-                    model.toggleVoiceCall()
-                } label: {
-                    Label("Stop & Send", systemImage: "stop.circle.fill")
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
-                .help("Stop recording and send what you said")
-            case .thinking:
-                HStack(spacing: 6) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("GUS is answering…")
-                        .font(.callout)
-                        .foregroundColor(.secondary)
-                }
-                .help("Transcribing, running, and speaking the reply — a real job sits behind this call")
+                .help("Call GUS — a live voice call. The microphone is on only while the call is open; the words go through the same pipeline as a typed message.")
             }
         }
+    }
+
+    /// The in-call strip: phase, elapsed time, and the last
+    /// turn's measured latency — small, factual, and read from
+    /// the session state, never estimated here.
+    private var callStatusStrip: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "waveform")
+                .foregroundColor(.red)
+            Text(model.voicePhase == "thinking" ? "Thinking…" : model.voicePhase == "speaking" ? "Speaking…" : "Listening…")
+                .font(.callout)
+            Text(Self.callClock(model.voiceElapsedMs))
+                .font(.callout)
+                .foregroundColor(.secondary)
+            if let latency = model.voiceLatencyLine {
+                Text(latency)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private static func callClock(_ ms: Double) -> String {
+        let total = Int(ms / 1000)
+        return String(format: "%d:%02d", total / 60, total % 60)
     }
 }
 

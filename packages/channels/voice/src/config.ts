@@ -32,6 +32,13 @@ export interface VoiceConfig {
   ttsBaseUrl: string;
   ttsModel: string;
   ttsVoice: string;
+  /** v0.9.1: barge-in — in a live call, talking over a spoken
+   *  reply cuts the speech off (the app stops playback and the
+   *  control plane drops pending synthesis). Default ON: only a
+   *  literal `false` in the file turns it off, because the safe
+   *  failure for a mis-typed value is the shipped behavior, not
+   *  a silently different call. */
+  bargeIn: boolean;
 }
 
 export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
@@ -41,6 +48,7 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
   ttsBaseUrl: "http://127.0.0.1:8880/v1",
   ttsModel: "kokoro",
   ttsVoice: "af_heart",
+  bargeIn: true,
 };
 
 const CONFIG_FILE = "voice.json";
@@ -71,6 +79,7 @@ export function parseVoiceConfig(raw: unknown): VoiceConfig {
     ttsBaseUrl: urlOr(r.ttsBaseUrl, DEFAULT_VOICE_CONFIG.ttsBaseUrl),
     ttsModel: textOr(r.ttsModel, DEFAULT_VOICE_CONFIG.ttsModel),
     ttsVoice: textOr(r.ttsVoice, DEFAULT_VOICE_CONFIG.ttsVoice),
+    bargeIn: r.bargeIn === false ? false : true,
   };
 }
 

@@ -117,6 +117,7 @@ async function rig(opts?: {
         ttsBaseUrl: "http://tts.test/v1",
         ttsModel: "kokoro",
         ttsVoice: "af_heart",
+        bargeIn: true,
       },
       "test",
     );
@@ -197,6 +198,7 @@ test("voice config: defensive parse — bad URLs fall back, enable needs a liter
     ttsBaseUrl: "not a url",
     ttsModel: "kokoro",
     ttsVoice: "af_heart",
+    bargeIn: true,
   }, "test");
   const cfg = loadVoiceConfig(dir);
   assert.equal(cfg.enabled, true);
@@ -468,6 +470,12 @@ test("voice panel routes: settings GET/POST and the raw-audio call, token-gated"
         audioContentType: "audio/mpeg",
       };
     },
+    voiceSessionStart: () => ({ ok: false, active: false, detail: "voice sessions are not wired in this stub", turns: [] }),
+    voiceSessionAudio: () => ({ ok: false, detail: "voice sessions are not wired in this stub" }),
+    voiceSessionState: () => ({ ok: false, active: false, detail: "voice sessions are not wired in this stub", turns: [] }),
+    voiceSessionNextAudio: () => ({ ok: false, detail: "voice sessions are not wired in this stub" }),
+    voiceSessionInterrupt: () => ({ ok: false, detail: "voice sessions are not wired in this stub" }),
+    voiceSessionEnd: () => ({ ok: false, active: false, detail: "voice sessions are not wired in this stub", turns: [] }),
   } satisfies PanelBackend;
 
   const panel = new PanelServer(backend, { token: "test-token-123", port: 0 });

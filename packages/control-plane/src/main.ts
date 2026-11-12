@@ -66,9 +66,11 @@ import { PanelChatAdapter, PANEL_CHAT_CONVERSATION } from "./panel-chat.js";
 import {
   VoiceAdapter,
   VoiceCallService,
+  VoiceSessionService,
   loadVoiceConfig,
   voiceConfigured,
   writeVoiceConfig,
+  type VoiceSessionStateData,
 } from "@gus/voice";
 import { WatchFrameSource, readWatchTimeline } from "./watch.js";
 import { loadDelegates } from "./delegates.js";
@@ -226,10 +228,19 @@ const panelChat = new PanelChatAdapter(stateDir);
 // pending list, filtered to this conversation — the park the
 // operator hears read back is the record itself.
 const voiceAdapter = new VoiceAdapter();
-const voiceService = new VoiceCallService(stateDir, voiceAdapter, {
-  pendingFor: (conversationId) =>
+const voiceApprovals = {
+  pendingFor: (conversationId: string) =>
     approvals.pending().find((r) => r.conversationId === conversationId),
-});
+};
+const voiceService = new VoiceCallService(stateDir, voiceAdapter, voiceApprovals);
+// v0.9.1: the live call — a session service over the SAME
+// adapter and the SAME turn logic (its own VoiceCallService
+// instance internally, so a session turn and a push-to-talk
+// turn are the same code path into the host). Streaming ears
+// (VAD-segmented PCM chunks), a streamed mouth (sentence
+// segments), barge-in, idle/max-length endings, per-turn
+// latency — all inside the voice package; this file only wires.
+const voiceSessions = new VoiceSessionService(stateDir, voiceAdapter, voiceApprovals);
 const watchFrames = new WatchFrameSource(macHost);
 const host = new ChannelHost(stateDir, governor, jobs, [adapter, bridge, panelChat, voiceAdapter], approvals, shieldGate);
 approvals.onExpire = (req) => host.handleApprovalExpired(req);
@@ -392,6 +403,34 @@ function toPanelJob(j: JobRecord, urls: Map<string, string>): PanelJobData {
       receiptId: id,
       verifyUrl: urls.get(id),
     })),
+  };
+}
+
+/** v0.9.1: the voice session state, mapped onto the panel
+ *  contract field for field (turns and latency included) — the
+ *  one place the voice package's shape becomes the panel's. */
+function toPanelVoiceSession(s: VoiceSessionStateData) {
+  return {
+    ok: s.ok,
+    detail: s.detail,
+    active: s.active,
+    sessionId: s.sessionId,
+    phase: s.phase,
+    startedAt: s.startedAt,
+    elapsedMs: s.elapsedMs,
+    endedReason: s.endedReason,
+    bargeIn: s.bargeIn,
+    turns: s.turns.map((t) => ({
+      index: t.index,
+      startedAt: t.startedAt,
+      transcript: t.transcript,
+      kind: t.kind,
+      detail: t.detail,
+      replyText: t.replyText,
+      interrupted: t.interrupted,
+      latency: t.latency,
+    })),
+    lastLatency: s.lastLatency,
   };
 }
 
@@ -654,6 +693,9 @@ const panelBackend: PanelBackend = {
         ttsBaseUrl: s.ttsBaseUrl,
         ttsModel: s.ttsModel,
         ttsVoice: s.ttsVoice,
+        // v0.9.1: a save that doesn't mention barge-in keeps the
+        // value on file rather than resetting it to the default.
+        bargeIn: typeof s.bargeIn === "boolean" ? s.bargeIn : loadVoiceConfig(stateDir).bargeIn,
       },
       "panel",
     );
@@ -677,6 +719,17 @@ const panelBackend: PanelBackend = {
       audioContentType: result.audioContentType,
     };
   },
+  // v0.9.1: the live call, delegated whole to the session
+  // service. The state crosses field for field (the voice
+  // package's state shape IS the panel contract, mapped here so
+  // the packages stay decoupled); audio in/out and the
+  // interrupt are the service's own results, passed through.
+  voiceSessionStart: () => toPanelVoiceSession(voiceSessions.start()),
+  voiceSessionAudio: (sessionId, audio) => voiceSessions.pushAudio(sessionId, audio),
+  voiceSessionState: (sessionId) => toPanelVoiceSession(voiceSessions.state(sessionId)),
+  voiceSessionNextAudio: (sessionId, afterSeq) => voiceSessions.nextAudio(sessionId, afterSeq),
+  voiceSessionInterrupt: (sessionId) => voiceSessions.interrupt(sessionId),
+  voiceSessionEnd: (sessionId) => toPanelVoiceSession(voiceSessions.end(sessionId)),
 };
 
 // The operator token: a 0600 file in control-plane state, minted on

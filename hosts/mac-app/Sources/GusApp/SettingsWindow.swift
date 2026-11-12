@@ -110,6 +110,7 @@ final class SettingsModel: ObservableObject {
     // its own endpoint, because voice.json is its own settings
     // file and is NOT part of the status payload.
     @Published var voiceEnabled = false
+    @Published var voiceBargeIn = true
     @Published var voiceSttUrl = ""
     @Published var voiceSttModel = ""
     @Published var voiceTtsUrl = ""
@@ -161,6 +162,7 @@ final class SettingsModel: ObservableObject {
                 guard let self, case .success(let v) = result, !self.voiceSeeded else { return }
                 self.voiceSeeded = true
                 self.voiceEnabled = v.enabled
+                self.voiceBargeIn = v.bargeIn ?? true
                 self.voiceSttUrl = v.sttBaseUrl
                 self.voiceSttModel = v.sttModel
                 self.voiceTtsUrl = v.ttsBaseUrl
@@ -263,6 +265,7 @@ final class SettingsModel: ObservableObject {
     func saveVoice() {
         act("/api/voice/settings", body: [
             "enabled": voiceEnabled,
+            "bargeIn": voiceBargeIn,
             "sttBaseUrl": voiceSttUrl.trimmingCharacters(in: .whitespacesAndNewlines),
             "sttModel": voiceSttModel.trimmingCharacters(in: .whitespacesAndNewlines),
             "ttsBaseUrl": voiceTtsUrl.trimmingCharacters(in: .whitespacesAndNewlines),

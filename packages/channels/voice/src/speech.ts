@@ -104,12 +104,19 @@ export async function transcribe(
  * SpeechServiceError on any failure — the caller reports the
  * failure WITH the reply text, so the operator still reads what
  * GUS said and knows exactly why they didn't hear it.
+ *
+ * v0.9.1: an external AbortSignal may ride along (the live call's
+ * barge-in) — combined with the timeout, whichever fires first.
+ * An interrupted synthesis throws like any other failure; the
+ * session layer checks its generation before enqueueing audio,
+ * so an interrupt that lands a hair too late still never speaks.
  */
 export async function synthesize(
   fetchFn: FetchFn,
   opts: { baseUrl: string; model: string; voice: string },
   text: string,
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<{ audio: Uint8Array; contentType: string }> {
   const url = `${opts.baseUrl}/audio/speech`;
   let res: Response;
@@ -123,9 +130,17 @@ export async function synthesize(
         voice: opts.voice,
         response_format: "mp3",
       }),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+        : AbortSignal.timeout(timeoutMs),
     });
   } catch (e) {
+    if (signal?.aborted) {
+      throw new SpeechServiceError(
+        "tts",
+        "Speech synthesis was interrupted before the service answered — the rest of that reply was not spoken.",
+      );
+    }
     throw new SpeechServiceError(
       "tts",
       `Speech synthesis failed: could not reach the text-to-speech service at ${opts.baseUrl} (${e instanceof Error ? e.message : String(e)}).`,

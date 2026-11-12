@@ -333,10 +333,14 @@ struct SettingsVoiceView: View {
                                 : "Off",
                             help: model.help("voice-call"))
             }
-            Text("Talk to GUS from the chat window's Call button. Your words are transcribed by a speech service on your own machine, then treated exactly like a typed message — same secret-guard, Shield scan, caps, and receipts. The reply is spoken by your speech service; if it fails, you get the reply as text with the reason stated.")
+            Text("Talk to GUS from the chat window's Call button — a live call, not a recording: the microphone is open only while the call is, a pause ends your turn, and the reply is spoken sentence by sentence as it's made. Your words are transcribed by a speech service on your own machine, then treated exactly like a typed message — same secret-guard, Shield scan, caps, and receipts. If a speech service fails, you get the reply as text with the reason stated.")
                 .font(.callout)
                 .foregroundColor(.secondary)
             Toggle("Enable voice calls", isOn: $model.voiceEnabled)
+            Toggle("Interrupt GUS when I talk over it (barge-in)", isOn: $model.voiceBargeIn)
+            Text("Barge-in cuts the spoken reply off when you start talking over it. It stops the talking only — never a running job, never an approval.")
+                .font(.caption)
+                .foregroundColor(.secondary)
             Group {
                 Text("Hearing — transcription (STT)")
                     .font(.headline)
