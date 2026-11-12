@@ -33,11 +33,36 @@ export interface InboundMessage {
    *  requires every path to exist — a text-only "done" no longer
    *  settles a job that promised files. */
   deliverables?: string[];
+  /** v0.9.8: this message is a live voice call's spoken turn (only
+   *  the voice adapter's session/call submits set it). The
+   *  ChannelHost stamps it onto the job record, where it puts a
+   *  plain-chat job in the voice fast lane (brevity note, a reply
+   *  token budget, a steered two-call shape — see
+   *  control-plane/runtime). Command submits (/stop, /approve)
+   *  never become jobs, so the flag on them is inert. */
+  voiceTurn?: boolean;
+}
+
+/** v0.9.8: a job's measured pipeline stages, attached by the
+ *  ChannelHost to the outbound message that delivers the job's
+ *  outcome (final reply, park notice, block notice, denial…). All
+ *  three are MEASURED in the control plane — shieldMs around the
+ *  ingress scan, modelMs summed over the job's completed model
+ *  calls, hops their count — never estimated. The voice channel
+ *  folds them into the turn's latency record (voice-turns.jsonl);
+ *  other adapters ignore the field. */
+export interface JobDeliveryStats {
+  shieldMs: number;
+  modelMs: number;
+  hops: number;
 }
 
 export interface OutboundMessage {
   conversationId: string;
   text: string;
+  /** v0.9.8: the delivering job's stage stats, when the send is a
+   *  job outcome (see JobDeliveryStats). */
+  jobStats?: JobDeliveryStats;
   /** Optional inline approval buttons (Telegram inline keyboard, Teams
    *  adaptive card actions). Adapters that cannot render buttons must
    *  degrade to numbered text choices — never drop the approval. */

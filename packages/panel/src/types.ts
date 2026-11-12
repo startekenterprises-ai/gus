@@ -222,11 +222,18 @@ export interface PanelVoiceCallData {
 /** v0.9.1: one turn's stage timings in a live call — utterance
  *  end → transcript (sttMs) → reply (jobMs) → first spoken
  *  sentence (ttsFirstMs). The local-vs-cloud speech data; it
- *  lives in the session state and nowhere else. */
+ *  lives in the session state and nowhere else.
+ *  v0.9.8: jobMs is split further — queueMs (the turn chain's
+ *  wait) plus the job's own shieldMs / modelMs / hops, measured
+ *  in the control plane and delivered back with the reply. */
 export interface PanelVoiceTurnLatencyData {
   utteranceEndAt: number;
   sttMs: number;
+  queueMs?: number;
   jobMs: number;
+  shieldMs?: number;
+  modelMs?: number;
+  hops?: number;
   ttsFirstMs?: number;
   totalMs: number;
 }

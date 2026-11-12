@@ -32,13 +32,25 @@ import {
 } from "./approver-policy.js";
 import type { Classification } from "./policy.js";
 
+/** v0.9.8: the voice fast lane's reply budget — a spoken answer
+ *  is a few sentences (~200–250 tokens at the outside), so a voice
+ *  chat job's model calls reserve and spend against 320 output
+ *  tokens instead of the provider's full configured budget. The
+ *  clamp applies to the Governor reservation AND the provider
+ *  request alike (the reservation stays honest), and only to jobs
+ *  whose record carries the voiceFastLane stamp. */
+export const VOICE_REPLY_TOKEN_BUDGET = 320;
+
 export interface HostHooks {
   onRuntimeHello(): void;
-  onModelIssued(jobId: string, text: string | undefined): void;
+  /** v0.9.8: modelMs is the call's measured wall time (the host
+   *  sums it into the job's delivery stats). Optional: stubs and
+   *  older hosts omit it and the stat simply doesn't grow. */
+  onModelIssued(jobId: string, text: string | undefined, modelMs?: number): void;
   /** Phase 9: a real provider refused the model call itself (503,
    *  bad key, …) — the host records it so the job's final notice
    *  names the provider reason instead of a verification failure. */
-  onModelRefused(jobId: string, detail: string): void;
+  onModelRefused(jobId: string, detail: string, modelMs?: number): void;
   noteAuthorizedWrite(jobId: string, path: string, content: string): void;
   /** Phase 2: an approval was created and the job parked — the host
    *  presents the request (with buttons) on the channel. */
@@ -300,8 +312,14 @@ export class CommServer {
     this.send(msg);
   }
 
-  pushUserMessage(m: { jobId: string; kind: string; text: string }): void {
-    this.send({ t: "user_message", jobId: m.jobId, kind: m.kind, text: m.text });
+  pushUserMessage(m: { jobId: string; kind: string; text: string; voiceFastLane?: boolean }): void {
+    this.send({
+      t: "user_message",
+      jobId: m.jobId,
+      kind: m.kind,
+      text: m.text,
+      ...(m.voiceFastLane ? { voiceFastLane: true } : {}),
+    });
   }
 
   verify(jobId: string, check: { tool: string; args: Record<string, unknown> }): Promise<{ ok: boolean; digest?: string }> {
@@ -676,6 +694,7 @@ export class CommServer {
           // the reply are computable BEFORE authorization — the
           // Governor's reservation therefore equals the settlement,
           // and cap math is exact (governor.ts).
+          const stubStartedAt = Date.now();
           const { reply, tokensIn, tokensOut } = stubCompletion(req.prompt);
           const decision = this.governor.authorize(req.jobId, tokensIn, tokensOut, FAKE_MODEL_NAME);
           if (!decision.ok) {
@@ -684,7 +703,7 @@ export class CommServer {
           }
           const costUsd = this.governor.settle(decision.reservationId, tokensIn, tokensOut);
           this.jobs.addUsage(req.jobId, tokensIn, tokensOut, costUsd);
-          this.hooks.onModelIssued(req.jobId, reply.text);
+          this.hooks.onModelIssued(req.jobId, reply.text, Date.now() - stubStartedAt);
           this.send({
             t: "model_response",
             reqId: req.reqId,
@@ -702,26 +721,34 @@ export class CommServer {
         // settle the ACTUAL usage the provider reports. A provider
         // failure refunds the reservation — the ledger reconciles and
         // the job hears a provider_error, never a silent stall.
+        // v0.9.8: a voice fast-lane job reserves and spends against
+        // the spoken-reply budget instead (see
+        // VOICE_REPLY_TOKEN_BUDGET) — read off the job record, so
+        // the lane is a property of the job, not of the request.
+        const maxTokensOut = this.jobs.get(req.jobId)?.voiceFastLane
+          ? Math.min(provider.maxTokensOut, VOICE_REPLY_TOKEN_BUDGET)
+          : provider.maxTokensOut;
         const estIn = estimateTokens(req.prompt);
         const decision = this.governor.authorize(
           req.jobId,
           estIn,
-          provider.maxTokensOut,
+          maxTokensOut,
           provider.modelKey,
         );
         if (!decision.ok) {
           this.refuseModel(req, decision);
           break;
         }
+        const modelStartedAt = Date.now();
         try {
-          const completion = await provider.complete(req.prompt);
+          const completion = await provider.complete(req.prompt, { maxTokensOut });
           const costUsd = this.governor.settle(
             decision.reservationId,
             completion.tokensIn,
             completion.tokensOut,
           );
           this.jobs.addUsage(req.jobId, completion.tokensIn, completion.tokensOut, costUsd);
-          this.hooks.onModelIssued(req.jobId, completion.reply.text);
+          this.hooks.onModelIssued(req.jobId, completion.reply.text, Date.now() - modelStartedAt);
           this.send({
             t: "model_response",
             reqId: req.reqId,
@@ -740,7 +767,7 @@ export class CommServer {
           }
           const detail = screenText(e instanceof Error ? e.message : String(e)).redacted;
           this.hooks.logRuntime("error", `provider error for job ${req.jobId}: ${detail}`);
-          this.hooks.onModelRefused(req.jobId, detail);
+          this.hooks.onModelRefused(req.jobId, detail, Date.now() - modelStartedAt);
           this.send({
             t: "model_response",
             reqId: req.reqId,

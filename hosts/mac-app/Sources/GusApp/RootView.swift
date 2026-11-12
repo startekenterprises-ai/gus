@@ -16,7 +16,7 @@ struct RootView: View {
             RailView(model: model)
             Divider()
             VStack(spacing: 0) {
-                TopBarView()
+                TopBarView(model: model)
                 Divider()
                 Group {
                     switch model.section {
@@ -45,21 +45,23 @@ struct RootView: View {
 }
 
 /// The window's top bar: the conversation title, plus the Call and
-/// Invite buttons the layout target has. Both are DISABLED with an
-/// explanation — visible because the layout calls for them, honest
-/// because they do not pretend to work before their builds land.
+/// Invite buttons the layout target has. Invite is still a DISABLED
+/// placeholder with its explanation. Call is the real thing — the
+/// SAME VoiceCallButton the chat composer carries (v0.9.8: through
+/// 0.9.7 this bar kept its Desktop-1 placeholder, disabled with
+/// "voice calls arrive with the Call GUS build" long after that
+/// build shipped, so the header's Call looked permanently greyed
+/// out next to the working one below — one button, one source of
+/// truth, both places).
 struct TopBarView: View {
+    @ObservedObject var model: DesktopModel
+
     var body: some View {
         HStack(spacing: 10) {
             Text("Chats")
                 .font(.headline)
             Spacer()
-            Button {
-            } label: {
-                Label("Call", systemImage: "phone")
-            }
-            .disabled(true)
-            .help("Voice calls arrive with the Call GUS build — this button is a placeholder until then.")
+            VoiceCallButton(model: model)
             Button {
             } label: {
                 Label("Invite", systemImage: "person.badge.plus")

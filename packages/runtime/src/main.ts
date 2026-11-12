@@ -18,6 +18,7 @@ import type { ControlMessage, RuntimeRequest } from "@gus/shared";
 import { GUS_VERSION } from "@gus/shared";
 import { Workspace, executeTool } from "./tools.js";
 import { TurnQueue } from "./turn-queue.js";
+import { VoiceLane } from "./voice-lane.js";
 
 /** v0.3.4: turns are serialized — the loop's waiters match by
  *  message type and `currentTurn` is a singleton, so two turns in
@@ -63,11 +64,11 @@ function request<T extends ControlMessage>(req: RuntimeRequest, match: (m: Contr
  */
 const MAX_HOPS = 1000;
 
-async function runTurn(jobId: string, text: string): Promise<void> {
+async function runTurn(jobId: string, text: string, voiceFastLane = false): Promise<void> {
   const signal = { aborted: killed };
   currentTurn = { jobId, signal };
   try {
-    await driveLoop(jobId, text, signal);
+    await driveLoop(jobId, text, signal, new VoiceLane(voiceFastLane));
   } finally {
     if (currentTurn?.jobId === jobId) currentTurn = null;
   }
@@ -75,8 +76,15 @@ async function runTurn(jobId: string, text: string): Promise<void> {
 
 /** The turn loop proper: model -> authorize -> execute -> report ->
  *  model(TOOL_RESULT ...) -> ... -> job_final. Shared by fresh turns
- *  and by continuations after an approved execution (Phase 2). */
-async function driveLoop(jobId: string, initialPrompt: string, signal: { aborted: boolean }): Promise<void> {
+ *  and by continuations after an approved execution (Phase 2) —
+ *  those enter with no lane (an approved execution is deliberate
+ *  work, never a spoken quick answer). */
+async function driveLoop(
+  jobId: string,
+  initialPrompt: string,
+  signal: { aborted: boolean },
+  lane: VoiceLane = new VoiceLane(false),
+): Promise<void> {
     let prompt = initialPrompt;
     for (let hop = 0; hop < MAX_HOPS; hop++) {
       if (signal.aborted) {
@@ -143,8 +151,13 @@ async function driveLoop(jobId: string, initialPrompt: string, signal: { aborted
         // original request after the TOOL_RESULT line — a real model
         // deciding "what next" needs to know what it is in the middle
         // of doing. The TOOL_RESULT prefix stays first: the stub's
-        // pattern matching keys on it.
-        prompt = `TOOL_RESULT ${tc.tool}: ${outcome.summary}\n(The operator's original request was: "${initialPrompt}". Continue it, or reply with plain text to finish.)`;
+        // pattern matching keys on it. v0.9.8: a voice fast-lane job's
+        // first continuation additionally carries the final-call note
+        // (voice-lane.ts) — the steering that keeps a spoken reply to
+        // two model calls without ever stranding a tool-using turn.
+        prompt = lane.continuationPrompt(
+          `TOOL_RESULT ${tc.tool}: ${outcome.summary}\n(The operator's original request was: "${initialPrompt}". Continue it, or reply with plain text to finish.)`,
+        );
         continue;
       }
       if (res.text !== undefined) {
@@ -162,7 +175,7 @@ function onMessage(m: ControlMessage): void {
       killed = m.killed;
       break;
     case "user_message":
-      turns.enqueue(() => runTurn(m.jobId, m.text));
+      turns.enqueue(() => runTurn(m.jobId, m.text, m.voiceFastLane === true));
       break;
     case "approved_execution": {
       // Phase 2: the operator approved this exact action on the channel

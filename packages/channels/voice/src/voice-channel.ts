@@ -51,6 +51,7 @@
 import type {
   ChannelAdapter,
   ChannelEvent,
+  JobDeliveryStats,
   OutboundMessage,
 } from "@gus/shared";
 import {
@@ -96,6 +97,12 @@ export interface VoiceCallResult {
   replyText?: string;
   audioBase64?: string;
   audioContentType?: string;
+  /** v0.9.8: the delivering job's measured pipeline stages,
+   *  carried on the host's delivery (see JobDeliveryStats). The
+   *  live session folds them into the turn's latency record;
+   *  absent when the delivery carried none (a locally-composed
+   *  answer, a wait that timed out). */
+  stats?: JobDeliveryStats;
 }
 
 /** The pending-approval lookup the service needs — the control
@@ -108,8 +115,17 @@ export interface PendingApprovalLookup {
 const MAX_AUDIO_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REPLY_TIMEOUT_MS = 120_000;
 
+/** One host delivery to the voice conversation: its text plus,
+ *  v0.9.8, the delivering job's stage stats when the send carried
+ *  them (job outcomes do; locally-composed texts don't exist at
+ *  this layer — every delivery here came from the host). */
+export interface VoiceDelivery {
+  text: string;
+  stats?: JobDeliveryStats;
+}
+
 interface Waiter {
-  resolve: (text: string) => void;
+  resolve: (delivery: VoiceDelivery) => void;
   timer: ReturnType<typeof setTimeout>;
 }
 
@@ -117,7 +133,7 @@ export class VoiceAdapter implements ChannelAdapter {
   readonly name = "voice";
   private onEvent?: (ev: ChannelEvent) => void;
   private counter = 0;
-  private outQueue: string[] = [];
+  private outQueue: VoiceDelivery[] = [];
   private waiters: Waiter[] = [];
 
   async start(onEvent: (ev: ChannelEvent) => void): Promise<void> {
@@ -127,7 +143,7 @@ export class VoiceAdapter implements ChannelAdapter {
   async stop(): Promise<void> {
     for (const w of this.waiters.splice(0)) {
       clearTimeout(w.timer);
-      w.resolve("");
+      w.resolve({ text: "" });
     }
   }
 
@@ -153,6 +169,13 @@ export class VoiceAdapter implements ChannelAdapter {
         senderId: VOICE_SENDER,
         text: trimmed,
         receivedAt: Date.now(),
+        // v0.9.8: every submit from this adapter is a voice
+        // turn's words. The host turns the flag into the job's
+        // fast-lane stamp for plain chat; command submits
+        // ("/stop", "/approve <id>") are consumed by the host's
+        // command paths before any job exists, so for them the
+        // flag never takes effect.
+        voiceTurn: true,
       },
     });
     return { ok: true, detail: "Sent." };
@@ -165,12 +188,13 @@ export class VoiceAdapter implements ChannelAdapter {
    *  by spoken command; the text carries everything. */
   async send(msg: OutboundMessage): Promise<void> {
     if (msg.conversationId !== VOICE_CONVERSATION) return;
+    const delivery: VoiceDelivery = { text: msg.text, ...(msg.jobStats ? { stats: msg.jobStats } : {}) };
     const waiter = this.waiters.shift();
     if (waiter) {
       clearTimeout(waiter.timer);
-      waiter.resolve(msg.text);
+      waiter.resolve(delivery);
     } else {
-      this.outQueue.push(msg.text);
+      this.outQueue.push(delivery);
     }
   }
 
@@ -183,12 +207,12 @@ export class VoiceAdapter implements ChannelAdapter {
 
   /** The next delivery for this conversation, or undefined when
    *  none arrives inside the timeout. */
-  waitForReply(timeoutMs: number): Promise<string | undefined> {
+  waitForReply(timeoutMs: number): Promise<VoiceDelivery | undefined> {
     const queued = this.outQueue.shift();
     if (queued !== undefined) return Promise.resolve(queued);
     return new Promise((resolve) => {
       const waiter: Waiter = {
-        resolve: (text) => resolve(text === "" ? undefined : text),
+        resolve: (delivery) => resolve(delivery.text === "" ? undefined : delivery),
         timer: setTimeout(() => {
           const i = this.waiters.indexOf(waiter);
           if (i >= 0) this.waiters.splice(i, 1);
@@ -303,7 +327,7 @@ export class VoiceCallService {
         kind: "stopped",
         detail: "Kill phrase heard — the stop command ran through the channel's normal /stop path.",
         transcript,
-        replyText: reply ?? "Stopped. Kill switch is ON — say resume from any channel when you want me back.",
+        replyText: reply?.text ?? "Stopped. Kill switch is ON — say resume from any channel when you want me back.",
       };
     }
 
@@ -322,7 +346,8 @@ export class VoiceCallService {
               ? "Confirm phrase heard — the parked action was approved through the channel's normal /approve path."
               : "Deny phrase heard — the parked action was denied through the channel's normal /deny path.",
           transcript,
-          replyText: reply ?? (phrase.kind === "confirm" ? "Approved." : "Denied. Nothing ran."),
+          replyText: reply?.text ?? (phrase.kind === "confirm" ? "Approved." : "Denied. Nothing ran."),
+          ...(reply?.stats ? { stats: reply.stats } : {}),
         };
       }
       // Ambiguous (or a fresh request) while a park waits: the
@@ -359,15 +384,16 @@ export class VoiceCallService {
     // sure the spoken form carries the phrases that count, even
     // though the typed form (which names /approve) stays the
     // record other surfaces show.
-    const replyText = reply.includes("Job parked")
-      ? `${reply} For voice: ${CONFIRM_INSTRUCTION}`
-      : reply;
+    const replyText = reply.text.includes("Job parked")
+      ? `${reply.text} For voice: ${CONFIRM_INSTRUCTION}`
+      : reply.text;
     return {
       ok: true,
       kind: "reply",
       detail: "Heard, scanned, and answered through the normal job pipeline.",
       transcript,
       replyText,
+      ...(reply.stats ? { stats: reply.stats } : {}),
     };
   }
 

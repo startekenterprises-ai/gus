@@ -89,7 +89,12 @@ export interface Provider {
   /** "stub" completions are deterministic and free to pre-compute (the
    *  CommServer's exact-estimate path); "remote" completions spend. */
   readonly kind: "stub" | "remote";
-  complete(prompt: string): Promise<ProviderCompletion>;
+  /** v0.9.8: opts.maxTokensOut clamps THIS call's reply budget
+   *  below the provider's configured maxTokensOut (the voice fast
+   *  lane's spoken-reply budget). Absent = the configured budget,
+   *  exactly as before. The Governor reservation for the call is
+   *  made against the same clamped number (comm-server). */
+  complete(prompt: string, opts?: { maxTokensOut?: number }): Promise<ProviderCompletion>;
 }
 
 export type ProviderTransportResponse = {
@@ -159,7 +164,10 @@ export class StubProvider implements Provider {
   readonly maxTokensOut = 0;
   readonly kind = "stub" as const;
 
-  async complete(prompt: string): Promise<ProviderCompletion> {
+  async complete(prompt: string, _opts?: { maxTokensOut?: number }): Promise<ProviderCompletion> {
+    // The stub's replies are fixed scripts; a reply budget has
+    // nothing to clamp (the CommServer's stub path never passes
+    // one — its estimates are exact by construction).
     const reply = fakeComplete(prompt);
     return {
       reply,
@@ -376,7 +384,7 @@ export class AnthropicProvider extends RemoteProvider {
     this.base = (opts?.baseUrl ?? "https://api.anthropic.com").replace(/\/+$/, "");
   }
 
-  async complete(prompt: string): Promise<ProviderCompletion> {
+  async complete(prompt: string, opts?: { maxTokensOut?: number }): Promise<ProviderCompletion> {
     const res = await this.callWithKey(
       "anthropic",
       true,
@@ -384,7 +392,7 @@ export class AnthropicProvider extends RemoteProvider {
       `${this.base}/v1/messages`,
       {
         model: this.model,
-        max_tokens: this.maxTokensOut,
+        max_tokens: opts?.maxTokensOut ?? this.maxTokensOut,
         messages: [{ role: "user", content: this.promptWithToolProtocol(prompt) }],
       },
       { "anthropic-version": "2023-06-01" },
@@ -435,10 +443,10 @@ export class OpenAiCompatibleProvider extends RemoteProvider {
     this.who = opts.who;
   }
 
-  async complete(prompt: string): Promise<ProviderCompletion> {
+  async complete(prompt: string, opts?: { maxTokensOut?: number }): Promise<ProviderCompletion> {
     const res = await this.callWithKey(this.keyName, this.keyRequired, "authorization", `${this.base}/chat/completions`, {
       model: this.model,
-      max_tokens: this.maxTokensOut,
+      max_tokens: opts?.maxTokensOut ?? this.maxTokensOut,
       messages: [{ role: "user", content: this.promptWithToolProtocol(prompt) }],
     });
     const body = await this.expectOk(res, this.who);

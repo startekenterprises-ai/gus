@@ -1,5 +1,42 @@
 import SwiftUI
 
+/// THE Call button (v0.9.8) — one view, one source of truth,
+/// carried by BOTH the chat composer and the window's top bar:
+/// the label, the icon, the action, and the (absence of a)
+/// disabled condition live here and nowhere else. Through
+/// 0.9.7 the top bar kept a Desktop-1 placeholder that was
+/// disabled unconditionally ("voice calls arrive with the Call
+/// GUS build") while the composer's button did the real work —
+/// the header's Call read as greyed out forever. In a call the
+/// button is End Call (the hang-up); out of one it is Call (the
+/// preflight + session start, in the model). There is no state
+/// in which it is disabled: a call that can't start says why in
+/// the notice rather than greying the button.
+struct VoiceCallButton: View {
+    @ObservedObject var model: DesktopModel
+
+    var body: some View {
+        if model.voiceInCall {
+            Button {
+                model.endVoiceCall()
+            } label: {
+                Label("End Call", systemImage: "phone.down.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
+            .help("End the call — the microphone closes with it")
+        } else {
+            Button {
+                model.startVoiceCall()
+            } label: {
+                Label("Call", systemImage: "phone.fill")
+            }
+            .buttonStyle(.bordered)
+            .help("Call GUS — a live voice call. The microphone is on only while the call is open; the words go through the same pipeline as a typed message.")
+        }
+    }
+}
+
 /// Chat — the home screen. Renders the same durable transcript the
 /// web panel renders (chat.jsonl via /api/chat/history): the
 /// operator's messages, GUS's delivered replies, and a status line
@@ -178,37 +215,44 @@ struct ChatView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(model.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .help("Send — the message goes through the same scan, caps, and receipts as any channel")
-            callButton
+            // v0.9.8: the Mute button lives in the in-call bar,
+            // immediately before End Call — one click, mid-call.
+            if model.voiceInCall {
+                muteButton
+            }
+            VoiceCallButton(model: model)
         }
         .padding(12)
     }
 
-    /// Call GUS (v0.9.1): a live call, not a recording. While
-    /// the call is open the microphone streams, a pause ends
-    /// your turn, replies are spoken sentence by sentence, and
-    /// talking over GUS cuts its speech. While a job is parked,
-    /// the call is how you answer it: the read-back names the
-    /// exact phrases ("confirm" / "yes, do it" / "no") that
-    /// count, and "GUS stop" ends the call at the kill switch.
-    private var callButton: some View {
+    /// Mute (v0.9.8): the dog-barking control. While the call is
+    /// open, one click stops the microphone feed dead — nothing
+    /// is transcribed, nothing is posted to the session, room
+    /// noise can't trigger barge-in, and any half-finished
+    /// sentence is discarded (the model's toggleVoiceMute owns
+    /// all of that; this is only its face). GUS can still speak
+    /// while muted; unmuting resumes listening. Muted wears the
+    /// prominent red, like End Call: the mic being OFF is the
+    /// state the operator must be able to see at a glance.
+    private var muteButton: some View {
         Group {
-            if model.voiceInCall {
+            if model.voiceMuted {
                 Button {
-                    model.endVoiceCall()
+                    model.toggleVoiceMute()
                 } label: {
-                    Label("End Call", systemImage: "phone.down.fill")
+                    Label("Unmute", systemImage: "mic.slash.fill")
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
-                .help("End the call — the microphone closes with it")
+                .help("Unmute — start listening again")
             } else {
                 Button {
-                    model.startVoiceCall()
+                    model.toggleVoiceMute()
                 } label: {
-                    Label("Call", systemImage: "phone.fill")
+                    Label("Mute", systemImage: "mic.fill")
                 }
                 .buttonStyle(.bordered)
-                .help("Call GUS — a live voice call. The microphone is on only while the call is open; the words go through the same pipeline as a typed message.")
+                .help("Mute — GUS hears nothing until you unmute. For the dog barking, the doorbell, the side conversation.")
             }
         }
     }

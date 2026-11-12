@@ -58,6 +58,15 @@ export interface JobRecord {
    *  with the path named, however convincing the reply text was.
    *  Absent = no artifact post-condition (the pre-v0.5.1 behavior). */
   deliverables?: string[];
+  /** v0.9.8: this job is a live voice call's spoken turn AND its
+   *  kind is plain chat — it runs in the voice fast lane (brevity
+   *  note on the prompt, a clamped reply token budget at the
+   *  provider, a steered primary + one-continuation shape in the
+   *  runtime; a turn that actually invokes tools past that leaves
+   *  the lane and takes the normal path). Stamped by the
+   *  ChannelHost from the channel message's voiceTurn flag —
+   *  never from message text. Absent = the ordinary lane. */
+  voiceFastLane?: boolean;
   conversationId: string;
   createdAt: number;
   updatedAt: number;

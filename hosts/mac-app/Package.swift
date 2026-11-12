@@ -36,7 +36,13 @@
 //     nothing ever triggered), the call opens with a spoken
 //     greeting from the control plane, and a Dictation/Siri or
 //     permission wall is met with an in-app prompt deep-linking
-//     to the exact Settings panes).
+//     to the exact Settings panes; v0.9.8: voice, smoothed —
+//     the top bar's Call button is the real shared
+//     VoiceCallButton (through 0.9.7 it was a disabled Desktop-1
+//     placeholder), and an in-call Mute button stops the
+//     microphone feed whole — no recognizer appends, no chunks
+//     posted, the partial discarded, the strip reading Muted —
+//     until Unmute restarts listening).
 //     It launches GusMacHost from inside the bundle (so
 //     Accessibility / Screen Recording grants attach to
 //     GUS.app), shows status, starts/stops the launchd agents, and

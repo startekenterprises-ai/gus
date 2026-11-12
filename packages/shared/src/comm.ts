@@ -80,6 +80,11 @@ export type ControlMessage =
       jobId: string;
       kind: string;
       text: string;
+      /** v0.9.8: the job is a live voice call's spoken chat turn —
+       *  the runtime runs it in the voice fast lane (see
+       *  runtime/src/voice-lane.ts). Set only from the job
+       *  record's own flag, never from message content. */
+      voiceFastLane?: boolean;
     }
   | {
       t: "model_response";

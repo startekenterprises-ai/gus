@@ -59,7 +59,7 @@ export class JobRunner {
     kind: JobKind,
     conversationId: string,
     redactedInput: string,
-    opts?: { deliverables?: string[] },
+    opts?: { deliverables?: string[]; voiceFastLane?: boolean },
   ): JobRecord {
     const id = `job_${Date.now().toString(36)}_${(counter++).toString(36)}${Math.floor(Math.random() * 1e4)}`;
     // v0.5: the origin is read off the input the ChannelHost hands
@@ -77,6 +77,9 @@ export class JobRunner {
       // so the completion check in the ChannelHost can enforce them
       // (and a restart mid-job cannot lose them).
       ...(opts?.deliverables?.length ? { deliverables: [...opts.deliverables] } : {}),
+      // v0.9.8: the voice fast-lane stamp rides the record so a
+      // restart mid-call (and the runtime re-push) cannot lose it.
+      ...(opts?.voiceFastLane ? { voiceFastLane: true } : {}),
       conversationId,
       createdAt: Date.now(),
       updatedAt: Date.now(),

@@ -82,6 +82,23 @@
  * The greeting is a segment, not a turn: no transcript, no job,
  * no turn record — and barge-in cuts it like any other speech.
  *
+ * Voice, smoothed (v0.9.8): the 0.9.7 field call answered — and
+ * took 8–16 s of brain time to say "Hi", because a spoken turn
+ * ran the identical unbounded job a typed research request runs,
+ * and the turn record's single jobMs couldn't say where the time
+ * went. Three answers here (the fast lane itself lives in the
+ * control plane + runtime): the latency record now splits jobMs
+ * into the stages the pipeline measures — queueMs (utterance end
+ * → this turn began processing: the serial chain's wait), and
+ * the job's own shieldMs / modelMs / hops, measured around the
+ * ingress scan and the model calls and delivered back with the
+ * reply (JobDeliveryStats) — and a turn whose job is still
+ * running 2.5 s after it started processing queues ONE spoken
+ * filler ("Just a second.") through the same segment path as
+ * any speech, so a slow answer isn't met with dead air. The
+ * filler is a segment, never a turn: no transcript, no record,
+ * barge-in drops it like any unfetched speech.
+ *
  * The microphone's liveness is the app's side of the contract:
  * this service only ever sees audio the app chose to stream, and
  * only while a session the operator started is active. There is
@@ -106,6 +123,7 @@ import {
   VoiceCallService,
   type PendingApprovalLookup,
   type VoiceAdapter,
+  type VoiceCallResult,
 } from "./voice-channel.js";
 import {
   UtteranceSegmenter,
@@ -121,8 +139,28 @@ export interface VoiceTurnLatency {
   utteranceEndAt: number;
   /** Utterance end → transcript in hand. */
   sttMs: number;
+  /** v0.9.8: utterance end → this turn began processing — the
+   *  serial turn chain's wait, measured at the chain (for a
+   *  built-in transcript, from the moment the app posted it).
+   *  Transcription time is NOT in here: the endpoint path starts
+   *  its turn before transcribing, so sttMs stays separate. */
+  queueMs: number;
   /** Transcript → the host's reply (scan, job, settlement). */
   jobMs: number;
+  /** v0.9.8: the job's Agent-Shield ingress scan, measured by
+   *  the ChannelHost around the scan itself and delivered back
+   *  with the reply. Absent when the delivery carried no stats
+   *  (a locally-composed or timed-out turn). */
+  shieldMs?: number;
+  /** v0.9.8: total measured time inside the job's model calls,
+   *  summed by the control plane (Governor-refused calls count
+   *  as calls that never reached the provider and are excluded;
+   *  the approver-decision call is a separate path and is also
+   *  excluded — see comm-server). Absent like shieldMs. */
+  modelMs?: number;
+  /** v0.9.8: how many model calls the job made (issued or
+   *  provider-refused), counted by the control plane. */
+  hops?: number;
   /** Reply in hand → first sentence's audio ready to play. */
   ttsFirstMs?: number;
   /** Utterance end → first audio (or → turn settled, if the
@@ -295,6 +333,23 @@ export const VOICE_GREETING_TEXT =
  *  (interrupted flags, latency) simply doesn't apply to it. */
 const GREETING_TURN_INDEX = -1;
 
+/** v0.9.8: the spoken filler for a slow turn — queued once when
+ *  a turn's job is still running this long after the turn started
+ *  processing (see completeTurn). Fixed text, like the greeting:
+ *  it is the product's own voice bridging a wait, not a model
+ *  output — never scanned, jobbed, or recorded as a turn. */
+export const VOICE_FILLER_TEXT = "Just a second.";
+
+/** How long a turn's job may run before the filler is queued. */
+const DEFAULT_FILLER_DELAY_MS = 2_500;
+
+/** The filler's sentence index within its turn: reply sentences
+ *  are indexed from 0, so -1 marks "not a reply sentence" — the
+ *  segment belongs to the turn (a reply stream's supersede keeps
+ *  it, an interrupt drops it) without pretending to be part of
+ *  the answer. */
+const FILLER_SENTENCE_INDEX = -1;
+
 export class VoiceSessionService {
   private fetchFn: FetchFn;
   private now: () => number;
@@ -303,6 +358,7 @@ export class VoiceSessionService {
   private silenceMs?: number;
   private vadThreshold?: number;
   private probeTimeoutMs: number;
+  private fillerDelayMs: number;
   private calls: VoiceCallService;
   private session?: ActiveSession;
   /** The last ended session's state, kept so the app's poll can
@@ -324,6 +380,7 @@ export class VoiceSessionService {
       silenceMs?: number;
       vadThreshold?: number;
       probeTimeoutMs?: number;
+      fillerDelayMs?: number;
     },
   ) {
     this.fetchFn = opts?.fetchFn ?? fetch;
@@ -333,6 +390,7 @@ export class VoiceSessionService {
     this.silenceMs = opts?.silenceMs;
     this.vadThreshold = opts?.vadThreshold;
     this.probeTimeoutMs = opts?.probeTimeoutMs ?? 2_500;
+    this.fillerDelayMs = opts?.fillerDelayMs ?? DEFAULT_FILLER_DELAY_MS;
     this.calls = new VoiceCallService(stateDir, adapter, approvals, {
       fetchFn: this.fetchFn,
       replyTimeoutMs: opts?.replyTimeoutMs,
@@ -874,7 +932,18 @@ export class VoiceSessionService {
     sttMs: number,
   ): Promise<void> {
     const jobStart = this.now();
-    const result = await this.calls.processTranscript(transcript);
+    // v0.9.8: arm the spoken filler — if the job is still
+    // running when the delay elapses, ONE "Just a second." is
+    // queued through the segment path (queueFiller). Disarming
+    // the moment the reply lands is what keeps a fast turn
+    // filler-free.
+    const filler = this.armFiller(session, turn, config);
+    let result: VoiceCallResult;
+    try {
+      result = await this.calls.processTranscript(transcript);
+    } finally {
+      filler.disarm();
+    }
     const jobMs = this.now() - jobStart;
     turn.kind = result.kind;
     turn.detail =
@@ -885,7 +954,14 @@ export class VoiceSessionService {
     const latency: VoiceTurnLatency = {
       utteranceEndAt,
       sttMs,
+      // v0.9.8: the chain's wait, and the job's own measured
+      // stages as delivered back with its reply (absent when the
+      // delivery carried none).
+      queueMs: Math.max(0, turn.startedAt - utteranceEndAt),
       jobMs,
+      ...(result.stats
+        ? { shieldMs: result.stats.shieldMs, modelMs: result.stats.modelMs, hops: result.stats.hops }
+        : {}),
       totalMs: this.now() - utteranceEndAt,
     };
     turn.latency = latency;
@@ -906,6 +982,85 @@ export class VoiceSessionService {
       // confirmation has been spoken.
       this.finish(session, "kill-phrase");
     }
+  }
+
+  /**
+   * v0.9.8: arm a turn's spoken filler. The timer is the whole
+   * mechanism: it fires at most once, only while the turn's job
+   * is still running (completeTurn disarms it the moment the
+   * reply lands), and queueFiller re-checks the world before
+   * queueing anything. The delay runs on the REAL clock even
+   * when the session's record clock is injected — a filler is
+   * about the operator's experienced wait, not the ledger's.
+   */
+  private armFiller(
+    session: ActiveSession,
+    turn: VoiceSessionTurn,
+    config: VoiceConfig,
+  ): { disarm: () => void } {
+    const gen = session.speechGen;
+    const timer = setTimeout(() => {
+      void this.queueFiller(session, turn, config, gen);
+    }, this.fillerDelayMs);
+    timer.unref?.();
+    return { disarm: () => clearTimeout(timer) };
+  }
+
+  /**
+   * v0.9.8: queue the one filler segment for a slow turn —
+   * through the SAME segment path as any speech (a speak-text
+   * segment for the built-in mouth, one synthesize() call for
+   * an endpoint), owned by the turn itself so the reply's
+   * stream keeps it (it precedes the answer in seq order) and
+   * an interrupt drops it unfetched like any speech. Guards,
+   * checked before AND after any synthesis: the session must
+   * still be this call, and the speech generation must be the
+   * one the filler was armed under — an interrupt bumps it, and
+   * the reply's own stream bumps it too, so a filler can never
+   * land after the answer started speaking. Best-effort by
+   * design: a failed synthesis queues nothing and fails
+   * nothing — comfort must not become a failure mode.
+   */
+  private async queueFiller(
+    session: ActiveSession,
+    turn: VoiceSessionTurn,
+    config: VoiceConfig,
+    genAtArm: number,
+  ): Promise<void> {
+    if (this.session !== session || genAtArm !== session.speechGen) return;
+    if (session.ttsMode === "local") {
+      session.segments.push({
+        seq: session.nextSeq++,
+        turnIndex: turn.index,
+        sentenceIndex: FILLER_SENTENCE_INDEX,
+        audioBase64: "",
+        audioContentType: "",
+        text: VOICE_FILLER_TEXT,
+        fetched: false,
+      });
+      return;
+    }
+    let out: { audio: Uint8Array; contentType: string };
+    try {
+      out = await synthesize(
+        this.fetchFn,
+        { baseUrl: config.ttsBaseUrl, model: config.ttsModel, voice: config.ttsVoice },
+        VOICE_FILLER_TEXT,
+        undefined,
+        session.speechAbort?.signal,
+      );
+    } catch {
+      return;
+    }
+    if (this.session !== session || genAtArm !== session.speechGen) return;
+    session.segments.push({
+      seq: session.nextSeq++,
+      turnIndex: turn.index,
+      sentenceIndex: FILLER_SENTENCE_INDEX,
+      audioBase64: Buffer.from(out.audio).toString("base64"),
+      audioContentType: out.contentType,
+      fetched: false,
+    });
   }
 
   /**

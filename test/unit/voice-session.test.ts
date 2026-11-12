@@ -41,6 +41,7 @@ import {
   VoiceAdapter,
   VoiceSessionService,
   VOICE_CONVERSATION,
+  VOICE_FILLER_TEXT,
   VOICE_GREETING_TEXT,
   chunkRms,
   normalizePcm16Gain,
@@ -390,6 +391,7 @@ async function sessionRig(opts?: {
   bargeIn?: boolean;
   idleTimeoutMs?: number;
   maxSessionMs?: number;
+  fillerDelayMs?: number;
 }): Promise<SessionRig> {
   const dir = mkdtempSync(join(tmpdir(), "gus-voice-session-"));
   if (opts?.enableVoice !== false) {
@@ -448,6 +450,7 @@ async function sessionRig(opts?: {
     now: () => clock.now,
     idleTimeoutMs: opts?.idleTimeoutMs,
     maxSessionMs: opts?.maxSessionMs,
+    fillerDelayMs: opts?.fillerDelayMs,
   });
   return { dir, governor, jobs, approvals, voice, host, pushed, executed, sessions, script, clock };
 }
@@ -1331,4 +1334,131 @@ test("session panel routes: start/audio/state/next-audio/interrupt/end, token-ga
   } finally {
     await panel.stop();
   }
+});
+
+// ---------------------------------------------------------------- v0.9.8: voice, smoothed
+
+test("latency staging (v0.9.8): a built-in turn's record splits jobMs — queue, shield, model, hops", async () => {
+  const r = await sessionRig({ sttEngine: "local", ttsEngine: "local" });
+  const id = await startCall(r);
+  const greeting = r.sessions.nextAudio(id, 0);
+  assert.equal(greeting.text, VOICE_GREETING_TEXT);
+
+  // Two transcripts back to back: the second waits out the
+  // first's job on the serial chain — its queueMs is exactly
+  // that wait, on the session clock.
+  r.sessions.submitTranscript(id, "first question");
+  r.sessions.submitTranscript(id, "second question");
+  await until(() => r.pushed.length === 1, "the first turn's job");
+  r.clock.now += 4_000; // the first job "runs" four seconds
+  const job1 = r.pushed[0].jobId;
+  r.host.onModelIssued(job1, "First answer.", 1_500);
+  await r.host.onJobFinal(job1, "First answer.");
+
+  await until(() => r.pushed.length === 2, "the second turn's job");
+  r.clock.now += 300;
+  const job2 = r.pushed[1].jobId;
+  r.host.onModelIssued(job2, "Second answer.", 250);
+  await r.host.onJobFinal(job2, "Second answer.");
+  await r.sessions.drain();
+
+  const state = r.sessions.state(id);
+  assert.equal(state.turns.length, 2);
+  const first = state.turns[0].latency!;
+  assert.equal(first.queueMs, 0, "the first turn waited for nobody");
+  assert.equal(first.jobMs, 4_000);
+  assert.equal(first.shieldMs, 0, "no Shield gate in this rig — the scan stage is honestly zero");
+  assert.equal(first.modelMs, 1_500, "modelMs is the control plane's measured call time");
+  assert.equal(first.hops, 1);
+  assert.ok(first.shieldMs! + first.modelMs! <= first.jobMs + 50, "the stages fit inside the job time");
+  const second = state.turns[1].latency!;
+  assert.equal(second.queueMs, 4_000, "the second turn queued behind the first's job");
+  assert.equal(second.jobMs, 300);
+  assert.equal(second.modelMs, 250);
+  assert.equal(second.hops, 1);
+
+  // The durable record carries the same split.
+  const lines = readFileSync(join(r.dir, "voice-turns.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l) as { latency?: Record<string, number> });
+  assert.equal(lines.length, 2);
+  assert.equal(lines[0].latency?.queueMs, 0);
+  assert.equal(lines[0].latency?.modelMs, 1_500);
+  assert.equal(lines[0].latency?.hops, 1);
+  assert.equal(lines[1].latency?.queueMs, 4_000);
+  r.sessions.end(id);
+});
+
+test("filler (v0.9.8): a slow job gets exactly one 'Just a second.' before the reply — and it is not a turn", async () => {
+  const r = await sessionRig({ transcripts: ["hello gus"], fillerDelayMs: 40 });
+  const id = await startCall(r);
+  const greeting = r.sessions.nextAudio(id, 0);
+  assert.ok(greeting.seq !== undefined);
+
+  say(r, id);
+  await until(() => r.pushed.length === 1, "the utterance to become a job");
+  // The job is NOT driven: let the filler delay elapse.
+  await new Promise((res) => setTimeout(res, 250));
+  const filler = r.sessions.nextAudio(id, greeting.seq!);
+  assert.ok(filler.seq !== undefined, "a filler segment was queued");
+  assert.equal(
+    Buffer.from(filler.audioBase64!, "base64").toString("utf8"),
+    VOICE_FILLER_TEXT,
+  );
+
+  await driveJob(r, "All good.");
+  await r.sessions.drain();
+  const reply = r.sessions.nextAudio(id, filler.seq!);
+  assert.equal(Buffer.from(reply.audioBase64!, "base64").toString("utf8"), "All good.");
+  const none = r.sessions.nextAudio(id, reply.seq!);
+  assert.equal(none.seq, undefined, "exactly one filler — the queue drains after the reply");
+  assert.deepEqual(r.script.ttsInputs, [VOICE_GREETING_TEXT, VOICE_FILLER_TEXT, "All good."]);
+
+  const state = r.sessions.state(id);
+  assert.equal(state.turns.length, 1, "the filler is not a turn");
+  assert.equal(state.turns[0].replyText, "All good.");
+  const lines = readFileSync(join(r.dir, "voice-turns.jsonl"), "utf8").trim().split("\n");
+  assert.equal(lines.length, 1, "and it left no turn record");
+  r.sessions.end(id);
+});
+
+test("filler (v0.9.8): a fast job gets no filler — the timer is disarmed at the reply", async () => {
+  const r = await sessionRig({ transcripts: ["hello gus"], fillerDelayMs: 250 });
+  const id = await startCall(r);
+  const greeting = r.sessions.nextAudio(id, 0);
+  say(r, id);
+  await driveJob(r, "Quick answer.");
+  await r.sessions.drain();
+  // Wait well past the filler delay: had the timer survived the
+  // reply, a filler would be sitting in the queue by now.
+  await new Promise((res) => setTimeout(res, 400));
+  const first = r.sessions.nextAudio(id, greeting.seq!);
+  assert.equal(Buffer.from(first.audioBase64!, "base64").toString("utf8"), "Quick answer.");
+  const none = r.sessions.nextAudio(id, first.seq!);
+  assert.equal(none.seq, undefined);
+  assert.deepEqual(r.script.ttsInputs, [VOICE_GREETING_TEXT, "Quick answer."]);
+  r.sessions.end(id);
+});
+
+test("filler (v0.9.8): barge-in drops an unfetched filler like any other speech", async () => {
+  const r = await sessionRig({ transcripts: ["hello gus"], fillerDelayMs: 40 });
+  const id = await startCall(r);
+  const greeting = r.sessions.nextAudio(id, 0);
+  say(r, id);
+  await until(() => r.pushed.length === 1, "the utterance to become a job");
+  await new Promise((res) => setTimeout(res, 250));
+  assert.ok(r.script.ttsInputs.includes(VOICE_FILLER_TEXT), "the filler was synthesized and queued");
+  // The operator talks over it before it is ever fetched.
+  const cut = r.sessions.interrupt(id);
+  assert.equal(cut.ok, true);
+  await driveJob(r, "After the bark.");
+  await r.sessions.drain();
+  const first = r.sessions.nextAudio(id, greeting.seq!);
+  assert.equal(
+    Buffer.from(first.audioBase64!, "base64").toString("utf8"),
+    "After the bark.",
+    "the dropped filler is never fetched — the reply is the next speech",
+  );
+  r.sessions.end(id);
 });

@@ -7,7 +7,13 @@
  * through the CommServer; channels never touch the sandbox directly.
  */
 import { appendFileSync, existsSync } from "node:fs";
-import type { ApprovalButton, ChannelAdapter, ChannelEvent, JobKind } from "@gus/shared";
+import type {
+  ApprovalButton,
+  ChannelAdapter,
+  ChannelEvent,
+  JobDeliveryStats,
+  JobKind,
+} from "@gus/shared";
 import { guardEvent, screenText } from "@gus/shared";
 import { sha256Hex, type ShieldGate } from "@gus/gate";
 import type { Governor } from "./governor.js";
@@ -27,6 +33,17 @@ const SECRET_WARNING = (classes: string[]) =>
   `⚠️ That looked like a secret (${classes.join(", ")}), so I refused it: ` +
   `I didn't forward it to the agent, store it, or put it in any log. ` +
   `If it was real, rotate it now — I can't unsend what other people in this chat may already have seen.`;
+
+/** v0.9.8 (voice fast lane): appended by the HOST — after the
+ *  Shield ingress scan, which therefore scans the operator's words
+ *  exactly as spoken, unmodified — to a voice chat job's runtime
+ *  prompt. Control-plane-authored text, the same construction as
+ *  the delegate "[from <name>]" prefix: the job record's inputHash
+ *  keeps the operator's verbatim words (the create text), and only
+ *  the runtime prompt carries the steering. */
+export const VOICE_BREVITY_NOTE =
+  "\n\n(Voice call: this was spoken aloud, and your reply will be read aloud. " +
+  "Answer in plain text, no markdown, and keep it short — a few sentences at most — unless the operator asks for more.)";
 
 /** A post-condition the control plane will verify before a job may
  *  settle verified-done: a written file's content hash, or the absence
@@ -57,6 +74,27 @@ export class ChannelHost {
   private pendingChecks = new Map<string, PendingCheck>();
   private lastModelHash = new Map<string, string>();
   private modelRefusals = new Map<string, string>();
+  /** v0.9.8: per-job pipeline stage timings (see JobDeliveryStats
+   *  in @gus/shared) — created with the job, grown by the Shield
+   *  scan timing here and by onModelIssued/onModelRefused from the
+   *  CommServer, and attached to the outbound message that
+   *  delivers the job's outcome. Deleted when the job settles. */
+  private stageStats = new Map<string, JobDeliveryStats>();
+
+  /** A copy of the job's stage stats so far (undefined when the
+   *  job predates stats tracking — e.g. a system job). */
+  private statsFor(jobId: string): JobDeliveryStats | undefined {
+    const s = this.stageStats.get(jobId);
+    return s ? { ...s } : undefined;
+  }
+
+  /** statsFor + forget: the job is settling, so its outcome
+   *  delivery is the last one that can carry the numbers. */
+  private takeStats(jobId: string): JobDeliveryStats | undefined {
+    const s = this.statsFor(jobId);
+    this.stageStats.delete(jobId);
+    return s;
+  }
   private updateCommands?: UpdateCommands;
   /** v0.6: which adapter each conversation arrived on. Deliveries
    *  the host originates (job results, park notices, cap/denial
@@ -148,6 +186,7 @@ export class ChannelHost {
     conversationId: string,
     text: string,
     buttons?: ApprovalButton[],
+    jobStats?: JobDeliveryStats,
   ): Promise<void> {
     const adapter = this.adapters.find((a) => a.name === adapterName) ?? this.adapters[0];
     if (!adapter) return;
@@ -157,7 +196,7 @@ export class ChannelHost {
       : "[message withheld by secret-guard: it contained what looked like a secret]";
     if (!screened.clean) this.logEvent("guard.jsonl", guardEvent("egress", screened));
     try {
-      await adapter.send({ conversationId, text: out, buttons });
+      await adapter.send({ conversationId, text: out, buttons, ...(jobStats ? { jobStats } : {}) });
     } catch (e) {
       // A failed send must never take the control plane down. Field
       // bug (2026-11-05): a panel-started job finished and its result
@@ -433,6 +472,11 @@ export class ChannelHost {
         : /^fetch\b/i.test(text)
           ? "fetch-summarize"
           : "chat";
+    // v0.9.8: the voice fast lane is for SPOKEN CHAT only — a voice
+    // turn the classifier made a fetch (or a demo kind) keeps the
+    // ordinary lane and its full budget. The stamp comes from the
+    // channel flag, never from the text.
+    const voiceFastLane = msg.voiceTurn === true && kind === "chat";
     // A delegate's request carries its origin into the job record and
     // the runtime prompt alike: the model knows who asked, and the
     // receipt chain covers the prefixed text.
@@ -442,8 +486,11 @@ export class ChannelHost {
     // only — chat messages never carry them) ride into the record.
     const job = this.jobs.create(kind, msg.conversationId, createText, {
       deliverables: msg.deliverables,
+      voiceFastLane,
     });
     this.jobs.transition(job.id, "running");
+    // v0.9.8: the job's stage-timing ledger opens with the job.
+    this.stageStats.set(job.id, { shieldMs: 0, modelMs: 0, hops: 0 });
 
     // --- Phase 4: the Shield gate scans the inbound message before
     // it can reach the runtime (spec §1.7, choke point 1). Operator
@@ -452,7 +499,13 @@ export class ChannelHost {
     // handled above. A blocked message settles its job failed-loudly
     // WITH the Shield receipt; the runtime never sees the text.
     if (this.shieldGate) {
+      // v0.9.8: the scan is TIMED, never changed — the ingress
+      // scan stays exactly as mandatory as it is for typed text;
+      // only its duration joins the job's stage record.
+      const scanStartedAt = Date.now();
       const decision = await this.shieldGate.scanSurface("inbound-message", job.id, text);
+      const stats = this.stageStats.get(job.id);
+      if (stats) stats.shieldMs = Date.now() - scanStartedAt;
       if (decision.receipt) {
         this.jobs.noteShieldReceipt(job.id, decision.receipt.receiptId);
       }
@@ -472,6 +525,8 @@ export class ChannelHost {
           msg.conversationId,
           `🛡 That message was blocked by the Agent-Shield gate before it reached the agent: ${decision.detail}. ` +
             `Nothing ran. The job ended as failed-loudly with the Shield receipt on its record.`,
+          undefined,
+          this.takeStats(job.id),
         );
         return;
       }
@@ -496,9 +551,15 @@ export class ChannelHost {
       }
     }
 
-    const jobText = role.role === "delegate" ? `[from ${role.name}] ${text}` : text;
+    // v0.9.8: a voice fast-lane job's runtime prompt carries the
+    // brevity note (the record's inputHash keeps the words as
+    // spoken — createText above is untouched). Delegate jobs are
+    // never voice jobs, so the two prefixes never compose.
+    const jobText =
+      (role.role === "delegate" ? `[from ${role.name}] ${text}` : text) +
+      (voiceFastLane ? VOICE_BREVITY_NOTE : "");
     this.pendingDeliveries.set(job.id, jobText);
-    this.comm.pushUserMessage({ jobId: job.id, kind, text: jobText });
+    this.comm.pushUserMessage({ jobId: job.id, kind, text: jobText, voiceFastLane });
   }
 
   async kill(adapterName: string, conversationId: string, by: string): Promise<void> {
@@ -671,6 +732,8 @@ export class ChannelHost {
         route,
         conversationId,
         `🚫 Denied: "${req.summary}". Nothing ran. The job ended as failed-loudly with a receipt.`,
+        undefined,
+        this.takeStats(req.jobId),
       );
       return;
     }
@@ -680,6 +743,10 @@ export class ChannelHost {
       agentResolver
         ? `✅ Approved by ${agentResolver.name} under the delegation policy: "${req.summary}". Executing exactly that now.`
         : `✅ Approved: "${req.summary}". Executing exactly that now.`,
+      undefined,
+      // v0.9.8: a snapshot, not a take — the job continues to its
+      // own final, whose delivery carries the completed stats.
+      this.statsFor(req.jobId),
     );
     await this.comm.executeApproval(req);
   }
@@ -697,6 +764,8 @@ export class ChannelHost {
       this.adapterNameFor(req.conversationId),
       req.conversationId,
       `⌛ Approval expired (no answer in time = denied): "${req.summary}". Nothing ran. The job ended as failed-loudly with a receipt.`,
+      undefined,
+      this.takeStats(req.jobId),
     );
   }
 
@@ -706,13 +775,22 @@ export class ChannelHost {
     for (const [jobId, text] of this.pendingDeliveries) {
       const job = this.jobs.get(jobId);
       if (job && job.state === "running") {
-        this.comm.pushUserMessage({ jobId, kind: job.kind, text });
+        // v0.9.8: the re-push carries the record's own lane stamp,
+        // so a runtime restart mid-call can't drop the fast lane.
+        this.comm.pushUserMessage({ jobId, kind: job.kind, text, voiceFastLane: job.voiceFastLane === true });
       }
     }
   }
 
-  onModelIssued(jobId: string, text: string | undefined): void {
+  onModelIssued(jobId: string, text: string | undefined, modelMs?: number): void {
     if (text !== undefined) this.lastModelHash.set(jobId, sha256Hex(text));
+    // v0.9.8: the job's stage ledger counts the call and its
+    // measured time (see JobDeliveryStats).
+    const stats = this.stageStats.get(jobId);
+    if (stats) {
+      stats.hops += 1;
+      stats.modelMs += modelMs ?? 0;
+    }
   }
 
   /** Phase 9: a real provider refused the model call itself. The job
@@ -720,8 +798,15 @@ export class ChannelHost {
    *  onJobFinal can never match — without this record the operator
    *  hears "failed its verification check" when the truth is "the
    *  provider said no" (field: Gemini HTTP 503, 2026-11-05). */
-  onModelRefused(jobId: string, detail: string): void {
+  onModelRefused(jobId: string, detail: string, modelMs?: number): void {
     this.modelRefusals.set(jobId, detail);
+    // v0.9.8: a refused call still SPENT its time in the model
+    // stage — the ledger counts it like an issued one.
+    const stats = this.stageStats.get(jobId);
+    if (stats) {
+      stats.hops += 1;
+      stats.modelMs += modelMs ?? 0;
+    }
   }
 
   noteAuthorizedWrite(jobId: string, path: string, content: string): void {
@@ -762,6 +847,9 @@ export class ChannelHost {
           : ``) +
         `No answer within ${secs}s counts as a denial.`,
       buttons,
+      // v0.9.8: a snapshot — the job is parked, not settled; its
+      // final delivery carries the completed stats.
+      this.statsFor(req.jobId),
     );
   }
 
@@ -780,6 +868,8 @@ export class ChannelHost {
       job.conversationId,
       `💸 Governor cap reached — the job was stopped by the spend ceiling, not by the agent: ${detail}. ` +
         `It ended as failed-loudly with a receipt; the ledger shows every charge.`,
+      undefined,
+      this.takeStats(jobId),
     );
   }
 
@@ -790,6 +880,8 @@ export class ChannelHost {
       this.adapterNameFor(job.conversationId),
       job.conversationId,
       `🚫 Denied by the control plane: "${tool}" was refused (${note}). The job ended as failed-loudly with a receipt.`,
+      undefined,
+      this.takeStats(jobId),
     );
   }
 
@@ -819,7 +911,7 @@ export class ChannelHost {
     if (refusal) {
       this.modelRefusals.delete(jobId);
       this.jobs.transition(jobId, "failed-loudly", `provider refused the model call: ${refusal}`);
-      await this.sendTo(this.adapterNameFor(job.conversationId), job.conversationId, outText);
+      await this.sendTo(this.adapterNameFor(job.conversationId), job.conversationId, outText, undefined, this.takeStats(jobId));
       this.pendingDeliveries.delete(jobId);
       return;
     }
@@ -874,15 +966,21 @@ export class ChannelHost {
       }
     }
 
+    // v0.9.8: whichever way the job settles, its outcome delivery
+    // carries the stage stats (the voice channel folds them into
+    // the turn's latency record).
+    const stats = this.takeStats(jobId);
     if (verified) {
       this.jobs.transition(jobId, "verified-done", note);
-      await this.sendTo(this.adapterNameFor(job.conversationId), job.conversationId, outText);
+      await this.sendTo(this.adapterNameFor(job.conversationId), job.conversationId, outText, undefined, stats);
     } else {
       this.jobs.transition(jobId, "failed-loudly", note);
       await this.sendTo(
         this.adapterNameFor(job.conversationId),
         job.conversationId,
         "⚠️ That job failed its verification check, so I won't call it done. It ended as failed-loudly with a receipt in the log.",
+        undefined,
+        stats,
       );
     }
     this.pendingDeliveries.delete(jobId);

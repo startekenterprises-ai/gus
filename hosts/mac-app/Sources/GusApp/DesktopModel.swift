@@ -215,6 +215,15 @@ final class DesktopModel: ObservableObject {
     /// walled off by macOS — ChatView presents it; its buttons
     /// deep-link to the panes GUS can't flip itself.
     @Published var voiceSpeechPrompt: VoiceSpeechPrompt?
+    /// v0.9.8: the call's mute state — the operator's
+    /// dog-barking control. Published for the Mute button and
+    /// the hearing line; the audio thread reads the lock-guarded
+    /// twin below (voiceCaptureMuted, under voiceStashLock like
+    /// every other capture-side flag) and drops buffers whole
+    /// while it stands. Muted stops the ears only: GUS can
+    /// still speak, the session stays open, the timers run.
+    @Published var voiceMuted = false
+    private var voiceCaptureMuted = false
     /// The last action's outcome, in the panel's own words (or the
     /// transport error). Shown under the composer / sidebar so a
     /// refusal is never silent.
@@ -460,7 +469,10 @@ final class DesktopModel: ObservableObject {
                     self.voiceLatencyLine = nil
                     self.voiceHearingLine = nil
                     self.voiceMicLevel = 0
+                    // v0.9.8: every call starts unmuted.
+                    self.voiceMuted = false
                     self.voiceStashLock.lock()
+                    self.voiceCaptureMuted = false
                     self.voiceStash = Data()
                     self.voiceStashLock.unlock()
                     self.voiceInCall = true
@@ -496,6 +508,49 @@ final class DesktopModel: ObservableObject {
         guard voiceInCall else { return }
         teardownVoice(sendEnd: true)
         notice = "Call ended."
+    }
+
+    /// The Mute button (v0.9.8), mid-call only. Muting is
+    /// immediate and total on the capture side: the flag the
+    /// tap handler reads flips first, so the very next buffer
+    /// is dropped whole — never appended to the recognizer,
+    /// never converted or stashed, so nothing posts to the
+    /// session and room noise can't open a sentence or trigger
+    /// barge-in. The in-progress partial is DISCARDED, not
+    /// banked: the recognition task ends without a final (the
+    /// generation bump makes its trailing callbacks no-ops,
+    /// the same discipline as stopVoiceRecognition), the
+    /// unposted stash clears, and the barge-in streak resets.
+    /// Unmuting restarts the recognizer task if this call's
+    /// ears are built-in; endpoint calls just resume posting
+    /// chunks. Playback is untouched either way — muting is
+    /// about the ears, not the mouth.
+    func toggleVoiceMute() {
+        guard voiceInCall else { return }
+        let muted = !voiceMuted
+        voiceStashLock.lock()
+        voiceCaptureMuted = muted
+        if muted { voiceStash = Data() }
+        voiceStashLock.unlock()
+        voiceMuted = muted
+        if muted {
+            voiceRecognitionGen += 1
+            voiceRecognitionTask?.cancel()
+            voiceRecognitionTask = nil
+            voiceStashLock.lock()
+            voiceRecognitionRequest = nil
+            voiceStashLock.unlock()
+            voicePartialText = ""
+            voicePartialLastChange = Date()
+            voiceEndAudioSent = false
+            voiceLoudStreak = 0
+            notice = "Muted — GUS hears nothing until you unmute."
+        } else {
+            notice = "Unmuted — listening again."
+            if voiceSttMode == "local" {
+                beginVoiceRecognitionTask()
+            }
+        }
     }
 
     /// Start the microphone: engine first, tap second, converter
@@ -610,6 +665,17 @@ final class DesktopModel: ObservableObject {
     /// state — the chunk timer does all of that on the main
     /// thread.
     private func ingestVoiceBuffer(_ buffer: AVAudioPCMBuffer) {
+        // v0.9.8: muted means the buffer goes NOWHERE — not
+        // measured (the hearing line reads "Muted", not a
+        // level), not appended to the recognizer, not
+        // converted or stashed. The converter guard is safe
+        // by construction: it trips on raw-speech deltas, and
+        // a muted mic produces none.
+        voiceStashLock.lock()
+        let muted = voiceCaptureMuted
+        voiceStashLock.unlock()
+        if muted { return }
+
         // The raw level FIRST, from the buffer exactly as the
         // microphone delivered it, before conversion touches
         // it (v0.9.3): this is the number the hearing line
@@ -1010,7 +1076,13 @@ final class DesktopModel: ObservableObject {
                     if let tts = l.ttsFirstMs { line += " · speaking after \(Self.seconds(tts))" }
                     self.voiceLatencyLine = line
                 }
-                if let h = s.hearing {
+                if self.voiceMuted {
+                    // v0.9.8: muted replaces the level readout
+                    // wholesale — a level line ticking along
+                    // behind a mute would claim hearing that
+                    // isn't happening.
+                    self.voiceHearingLine = "Muted — the microphone is off; GUS hears nothing until you unmute."
+                } else if let h = s.hearing {
                     self.voiceHearingLine = "hearing — mic \(self.voiceMicLevel) · level \(Int(h.lastRms.rounded())) · peak \(Int(h.maxRms.rounded())) · in a sentence \(Self.seconds(h.inUtteranceMs)) · heard \(h.utterancesCompleted)"
                 } else {
                     self.voiceHearingLine = nil
@@ -1036,6 +1108,11 @@ final class DesktopModel: ObservableObject {
         voiceSessionId = nil
         voiceInCall = false
         voicePhase = "listening"
+        // v0.9.8: mute never outlives its call.
+        voiceMuted = false
+        voiceStashLock.lock()
+        voiceCaptureMuted = false
+        voiceStashLock.unlock()
     }
 
     private static func seconds(_ ms: Double) -> String {

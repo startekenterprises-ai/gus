@@ -31,7 +31,7 @@ import type {
   ChannelAdapter,
   OutboundMessage,
 } from "../../packages/shared/src/index.js";
-import { ChannelHost } from "../../packages/control-plane/src/channel-host.js";
+import { ChannelHost, VOICE_BREVITY_NOTE } from "../../packages/control-plane/src/channel-host.js";
 import { Governor } from "../../packages/control-plane/src/governor.js";
 import { JobRunner } from "../../packages/control-plane/src/jobs.js";
 import { ApprovalEngine } from "../../packages/control-plane/src/approvals.js";
@@ -267,7 +267,11 @@ test("voice: a clean transcript becomes a normal job and the reply is spoken", a
   const callPromise = r.service.handleAudio(AUDIO, "audio/wav");
   await until(() => r.pushed.length === 1, "the transcript to reach the runtime as a job");
   const jobId = r.pushed[0].jobId;
-  assert.equal(r.pushed[0].text, "hello gus");
+  // v0.9.8: the runtime prompt for a voice chat job carries the
+  // host's brevity note (the job record's inputHash keeps the
+  // words exactly as spoken) and the job runs in the fast lane.
+  assert.equal(r.pushed[0].text, "hello gus" + VOICE_BREVITY_NOTE);
+  assert.equal(r.jobs.get(jobId)?.voiceFastLane, true);
   assert.equal(r.jobs.get(jobId)?.conversationId, VOICE_CONVERSATION);
 
   const REPLY = "Hello — voice works.";
