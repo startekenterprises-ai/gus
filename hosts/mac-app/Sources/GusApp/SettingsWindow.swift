@@ -39,7 +39,7 @@ final class SettingsWindowController: NSWindowController {
 }
 
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case general, provider, shield, caps, governor, telegram, macBridge, delegates, dataControls, help
+    case general, provider, shield, caps, governor, telegram, voice, macBridge, delegates, dataControls, help
 
     var id: String { rawValue }
 
@@ -51,6 +51,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .caps: return "Spend caps"
         case .governor: return "Governor & delegation"
         case .telegram: return "Telegram"
+        case .voice: return "Voice"
         case .macBridge: return "Mac bridge"
         case .delegates: return "Delegates"
         case .dataControls: return "Data controls"
@@ -66,6 +67,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .caps: return "dollarsign.circle"
         case .governor: return "slider.horizontal.3"
         case .telegram: return "paperplane"
+        case .voice: return "waveform"
         case .macBridge: return "desktopcomputer"
         case .delegates: return "person.2"
         case .dataControls: return "folder"
@@ -104,6 +106,16 @@ final class SettingsModel: ObservableObject {
     @Published var delScope = "bounded"
     @Published var delMax = "30"
     @Published var tgToken = ""
+    // Voice drafts (v0.9): seeded from GET /api/voice/settings —
+    // its own endpoint, because voice.json is its own settings
+    // file and is NOT part of the status payload.
+    @Published var voiceEnabled = false
+    @Published var voiceSttUrl = ""
+    @Published var voiceSttModel = ""
+    @Published var voiceTtsUrl = ""
+    @Published var voiceTtsModel = ""
+    @Published var voiceTtsVoice = ""
+    private var voiceSeeded = false
 
     let client = PanelClient()
     private var seeded = false
@@ -142,6 +154,18 @@ final class SettingsModel: ObservableObject {
         client.get("/api/settings-detail", as: PanelSettingsDetail.self) { [weak self] result in
             DispatchQueue.main.async {
                 if case .success(let d) = result { self?.detail = d }
+            }
+        }
+        client.get("/api/voice/settings", as: PanelVoiceSettings.self) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self, case .success(let v) = result, !self.voiceSeeded else { return }
+                self.voiceSeeded = true
+                self.voiceEnabled = v.enabled
+                self.voiceSttUrl = v.sttBaseUrl
+                self.voiceSttModel = v.sttModel
+                self.voiceTtsUrl = v.ttsBaseUrl
+                self.voiceTtsModel = v.ttsModel
+                self.voiceTtsVoice = v.ttsVoice
             }
         }
     }
@@ -236,6 +260,17 @@ final class SettingsModel: ObservableObject {
         act("/api/onboarding/telegram", body: ["token": token])
     }
 
+    func saveVoice() {
+        act("/api/voice/settings", body: [
+            "enabled": voiceEnabled,
+            "sttBaseUrl": voiceSttUrl.trimmingCharacters(in: .whitespacesAndNewlines),
+            "sttModel": voiceSttModel.trimmingCharacters(in: .whitespacesAndNewlines),
+            "ttsBaseUrl": voiceTtsUrl.trimmingCharacters(in: .whitespacesAndNewlines),
+            "ttsModel": voiceTtsModel.trimmingCharacters(in: .whitespacesAndNewlines),
+            "ttsVoice": voiceTtsVoice.trimmingCharacters(in: .whitespacesAndNewlines),
+        ])
+    }
+
     func setKilled(_ on: Bool) {
         act("/api/kill", body: ["on": on])
     }
@@ -319,6 +354,7 @@ struct SettingsRootView: View {
                         case .caps: SettingsCapsView(model: model)
                         case .governor: SettingsGovernorView(model: model)
                         case .telegram: SettingsTelegramView(model: model)
+                        case .voice: SettingsVoiceView(model: model)
                         case .macBridge: SettingsMacBridgeView(model: model)
                         case .delegates: SettingsDelegatesView(model: model)
                         case .dataControls: SettingsDataView(model: model)

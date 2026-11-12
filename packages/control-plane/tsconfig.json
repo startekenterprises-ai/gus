@@ -25,6 +25,9 @@
       "path": "../channels/telegram"
     },
     {
+      "path": "../channels/voice"
+    },
+    {
       "path": "../panel"
     }
   ]

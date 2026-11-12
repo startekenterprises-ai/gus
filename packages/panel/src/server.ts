@@ -26,6 +26,11 @@ import { PANEL_HTML } from "./page.js";
 import { HELP_ENTRIES, HELP_HTML } from "./help.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
+/** v0.9: the voice call's raw-audio body cap. A push-to-talk
+ *  utterance is seconds of speech (~32 KB/s as WAV); 16 MB is
+ *  minutes of headroom, and the voice service enforces the same
+ *  cap again on its side of the contract. */
+const MAX_AUDIO_BODY_BYTES = 16 * 1024 * 1024;
 
 export class PanelServer {
   private server?: Server;
@@ -113,6 +118,23 @@ export class PanelServer {
     return parsed as Record<string, unknown>;
   }
 
+  /** v0.9: the call route's raw body — recorded audio, not JSON.
+   *  The content type rides the request header and passes through
+   *  to the transcription service untouched. */
+  private async readRaw(
+    req: import("node:http").IncomingMessage,
+    maxBytes: number,
+  ): Promise<Uint8Array> {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const chunk of req) {
+      size += (chunk as Buffer).length;
+      if (size > maxBytes) throw new Error("request body too large");
+      chunks.push(chunk as Buffer);
+    }
+    return new Uint8Array(Buffer.concat(chunks));
+  }
+
   private async handle(
     req: import("node:http").IncomingMessage,
     res: import("node:http").ServerResponse,
@@ -168,6 +190,35 @@ export class PanelServer {
       const body = await this.readJson(req);
       const result = await this.backend.submitChat(
         typeof body.text === "string" ? body.text : "",
+      );
+      return json(result.ok ? 200 : 400, result);
+    }
+
+    // v0.9: the voice channel — settings (the operator's local
+    // speech services) and the push-to-talk call itself. The call
+    // takes the raw recording as its body; the answer is JSON
+    // carrying the transcript, the reply text, and the spoken
+    // reply as base64. Same operator-token gate as every route.
+    if (method === "GET" && path === "/api/voice/settings") {
+      return json(200, this.backend.voiceSettings());
+    }
+    if (method === "POST" && path === "/api/voice/settings") {
+      const body = await this.readJson(req);
+      const result = await this.backend.setVoiceSettings({
+        enabled: body.enabled === true,
+        sttBaseUrl: typeof body.sttBaseUrl === "string" ? body.sttBaseUrl : "",
+        sttModel: typeof body.sttModel === "string" ? body.sttModel : "",
+        ttsBaseUrl: typeof body.ttsBaseUrl === "string" ? body.ttsBaseUrl : "",
+        ttsModel: typeof body.ttsModel === "string" ? body.ttsModel : "",
+        ttsVoice: typeof body.ttsVoice === "string" ? body.ttsVoice : "",
+      });
+      return json(result.ok ? 200 : 400, result);
+    }
+    if (method === "POST" && path === "/api/voice/call") {
+      const audio = await this.readRaw(req, MAX_AUDIO_BODY_BYTES);
+      const result = await this.backend.voiceCall(
+        audio,
+        req.headers["content-type"] ?? "audio/wav",
       );
       return json(result.ok ? 200 : 400, result);
     }

@@ -150,6 +150,14 @@ export const HELP_ENTRIES: HelpEntry[] = [
       "The Watch view asks the Mac bridge for a fresh observation — the same observation path GUS itself uses — at most about once a second, and only while you are looking. Nothing is captured in the background, frames are never written to disk or sent anywhere, and pausing the view stops the requests entirely.\n\n" +
       "The frame needs the Screen Recording permission macOS grants to GUS.app. Without it the frame area says so plainly and the view still shows the timeline: every action, park, approval and gate decision from the durable event and gate logs, each line traceable to its receipt where one exists.",
   },
+  {
+    id: "voice-call",
+    title: "Voice — Call GUS",
+    tip: "Talk to GUS and hear the answer. Your words are transcribed by your own local speech service and then treated exactly like a typed message: same secret-guard, Shield scan, caps and receipts. Voice is a channel, not a bypass.",
+    body:
+      "The Call button records while you hold it and sends the audio to the voice channel in the control plane. Your transcription service (an OpenAI-compatible endpoint you run — faster-whisper by default) turns it into text on your own machine; from that moment the transcript is an ordinary channel message and everything that applies to typed text applies to it, including a Shield block with its receipt. The reply is spoken by your text-to-speech service (Kokoro by default) — if that service fails, you still get the reply as text, with the failure stated plainly.\\n\\n" +
+      "Approvals by voice are deliberately narrow. When a job parks, you hear the exact summary from the approval record read back. Only an exact \"confirm\" or \"yes, do it\" runs it, only an exact \"no\" denies it, and anything else — including a plain \"yes\" — runs nothing and leaves the park waiting. \"Stop\" or \"GUS stop\" trips the same kill switch as typing /stop. Voice never approves silently, and a spoken prompt injection is scanned and blocked like any other.",
+  },
 ];
 
 export const HELP_BY_ID: ReadonlyMap<string, HelpEntry> = new Map(

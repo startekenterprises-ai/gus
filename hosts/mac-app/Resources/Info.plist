@@ -11,6 +11,8 @@
 -->
 <plist version="1.0">
 <dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>GUS uses the microphone only while you hold a voice call: the recording goes to the speech service on your own machine, and the transcript is treated exactly like a typed message.</string>
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleDisplayName</key>

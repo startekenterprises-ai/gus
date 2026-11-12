@@ -45,6 +45,11 @@ export interface PanelStatusData {
      *  policy.ts in the control plane). It only takes effect while
      *  the Governor is permissive; the readout shows it either way. */
     approverPolicy: PanelApproverPolicyData;
+    /** v0.9: the voice channel on file (voice.json in the control
+     *  plane). Presence only, like everything in this readout:
+     *  enabled + both endpoints set reads "configured"; the URLs
+     *  themselves live behind /api/voice/settings. */
+    voice: { enabled: boolean; configured: boolean };
   };
 }
 
@@ -165,6 +170,39 @@ export interface PanelSettingsDetailData {
   delegates: PanelDelegateConversationData[];
   /** The file-bridge binding, when one is configured. */
   bridge?: { conversationId: string; senderId: string };
+}
+
+/** v0.9: the voice channel's settings (voice.json in the control
+ *  plane) — the operator's local speech services. Plain config, no
+ *  secrets: the reference STT/TTS servers are unauthenticated on
+ *  loopback, and a credential has no business in a settings file. */
+export interface PanelVoiceSettingsData {
+  enabled: boolean;
+  /** OpenAI-compatible transcription base URL (faster-whisper). */
+  sttBaseUrl: string;
+  sttModel: string;
+  /** OpenAI-compatible speech base URL (Kokoro-FastAPI). */
+  ttsBaseUrl: string;
+  ttsModel: string;
+  ttsVoice: string;
+}
+
+/** v0.9: one push-to-talk exchange. Audio crosses as base64 inside
+ *  the JSON result (a spoken reply is ~100 KB — the frame route's
+ *  raw bytes exist because frames are polled; a call is a single
+ *  request/response, so JSON keeps one content type per route).
+ *  On a TTS failure ok is false, the detail says why, AND the
+ *  reply text still rides along — loud, never silently text-only. */
+export interface PanelVoiceCallData {
+  ok: boolean;
+  /** reply | pending | stopped | approval-resolved |
+   *  awaiting-confirmation | unavailable */
+  kind: string;
+  detail: string;
+  transcript?: string;
+  replyText?: string;
+  audioBase64?: string;
+  audioContentType?: string;
 }
 
 export interface PanelOnboardingStep {
@@ -296,4 +334,20 @@ export interface PanelBackend {
   /** v0.6: the Watch timeline (events + gate decisions), newest
    *  first. */
   watchTimeline(): PanelTimelineEntryData[];
+  /** v0.9: the voice channel's settings, read from the same file
+   *  the call service reads per call. */
+  voiceSettings(): PanelVoiceSettingsData;
+  /** v0.9: save the voice channel's settings (voice.json via the
+   *  voice package's defensive parse — a bad URL fails toward the
+   *  default, and only a literal true enables the channel). Live
+   *  on the next call; no restart. */
+  setVoiceSettings(settings: PanelVoiceSettingsData): Promise<PanelActionResult>;
+  /** v0.9: one push-to-talk exchange. The audio becomes a
+   *  transcript, the transcript becomes a NORMAL job through the
+   *  channel pipeline (the voice channel adapter — secret-guard,
+   *  Shield scan, classifier, caps, receipts), and the host's
+   *  answer is synthesized for playback. The panel adds no path
+   *  of its own: this delegates to the voice call service, which
+   *  drives the same ChannelHost every surface drives. */
+  voiceCall(audio: Uint8Array, contentType: string): Promise<PanelVoiceCallData>;
 }

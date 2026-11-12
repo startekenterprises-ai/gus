@@ -63,6 +63,13 @@ import { Onboarding, DIGEST_PROMPT } from "./onboarding.js";
 import { resolveChannelAdapter } from "./channel-setup.js";
 import { BridgeInboxAdapter } from "./bridge-inbox.js";
 import { PanelChatAdapter, PANEL_CHAT_CONVERSATION } from "./panel-chat.js";
+import {
+  VoiceAdapter,
+  VoiceCallService,
+  loadVoiceConfig,
+  voiceConfigured,
+  writeVoiceConfig,
+} from "@gus/voice";
 import { WatchFrameSource, readWatchTimeline } from "./watch.js";
 import { loadDelegates } from "./delegates.js";
 import {
@@ -208,8 +215,23 @@ const bridge = new BridgeInboxAdapter(stateDir, {
   sendVia: (msg) => adapter.send(msg),
 });
 const panelChat = new PanelChatAdapter(stateDir);
+// v0.9: the voice channel — "Call GUS". A third channel adapter
+// next to the panel chat, with the same standing: transcripts
+// enter as ordinary inbound messages (secret-guard, Shield
+// ingress scan, classifier, caps, receipts — no bypass), kill and
+// confirm/deny speech acts become the channel's existing /stop,
+// /approve <id> and /deny <id> commands, and the speech services
+// are the operator's own local endpoints (voice.json). The call
+// service's pending-approval lookup is the Approval Engine's own
+// pending list, filtered to this conversation — the park the
+// operator hears read back is the record itself.
+const voiceAdapter = new VoiceAdapter();
+const voiceService = new VoiceCallService(stateDir, voiceAdapter, {
+  pendingFor: (conversationId) =>
+    approvals.pending().find((r) => r.conversationId === conversationId),
+});
 const watchFrames = new WatchFrameSource(macHost);
-const host = new ChannelHost(stateDir, governor, jobs, [adapter, bridge, panelChat], approvals, shieldGate);
+const host = new ChannelHost(stateDir, governor, jobs, [adapter, bridge, panelChat, voiceAdapter], approvals, shieldGate);
 approvals.onExpire = (req) => host.handleApprovalExpired(req);
 const comm = new CommServer(socketPath, governor, jobs, {
   onRuntimeHello: () => host.onRuntimeHello(),
@@ -418,6 +440,10 @@ const panelBackend: PanelBackend = {
           ),
           macWorkDirs: policy.load().mac.workDirs.length,
           approverPolicy: loadApproverPolicy(stateDir),
+          voice: (() => {
+            const vc = loadVoiceConfig(stateDir);
+            return { enabled: vc.enabled, configured: voiceConfigured(vc) };
+          })(),
         };
       })(),
       governorMode: loadGovernorMode(stateDir),
@@ -610,6 +636,47 @@ const panelBackend: PanelBackend = {
   // written to disk; the model never sees it.
   watchFrame: () => watchFrames.frame(),
   watchTimeline: () => readWatchTimeline(stateDir, 60),
+  // v0.9: the voice channel — settings read/write on voice.json
+  // (the call service re-reads per call, so a save is live on the
+  // next call), and the push-to-talk exchange itself, delegated
+  // whole to the call service over the voice adapter. The backend
+  // adds no path: no transcript is minted here, no approval is
+  // resolved here — those happen inside the ChannelHost, reached
+  // through the adapter like every other channel's business.
+  voiceSettings: () => loadVoiceConfig(stateDir),
+  setVoiceSettings: async (s) => {
+    writeVoiceConfig(
+      stateDir,
+      {
+        enabled: s.enabled === true,
+        sttBaseUrl: s.sttBaseUrl,
+        sttModel: s.sttModel,
+        ttsBaseUrl: s.ttsBaseUrl,
+        ttsModel: s.ttsModel,
+        ttsVoice: s.ttsVoice,
+      },
+      "panel",
+    );
+    const saved = loadVoiceConfig(stateDir);
+    return {
+      ok: true,
+      detail: saved.enabled
+        ? `Voice is ON — transcription: ${saved.sttModel} at ${saved.sttBaseUrl}; speech: ${saved.ttsModel} (${saved.ttsVoice}) at ${saved.ttsBaseUrl}. Live on the next call. Transcripts are scanned, capped, and receipted like typed messages; approvals by voice need an exact "confirm" or "yes, do it".`
+        : "Voice is OFF — the call endpoint will refuse until you enable it here. Settings saved.",
+    };
+  },
+  voiceCall: async (audio, contentType) => {
+    const result = await voiceService.handleAudio(audio, contentType);
+    return {
+      ok: result.ok,
+      kind: result.kind,
+      detail: result.detail,
+      transcript: result.transcript,
+      replyText: result.replyText,
+      audioBase64: result.audioBase64,
+      audioContentType: result.audioContentType,
+    };
+  },
 };
 
 // The operator token: a 0600 file in control-plane state, minted on

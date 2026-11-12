@@ -51,6 +51,13 @@ struct PanelStatus: Decodable {
         var delegates: Int
         var macWorkDirs: Int
         var approverPolicy: ApproverPolicy
+        var voice: Voice
+    }
+    /// v0.9: the voice channel on file — presence only, like the
+    /// rest of the readout (the URLs live behind /api/voice/settings).
+    struct Voice: Decodable {
+        var enabled: Bool
+        var configured: Bool
     }
     struct Caps: Decodable {
         var maxUsdPerTask: Double?
@@ -114,6 +121,33 @@ struct PanelApprovalHistoryEntry: Decodable, Identifiable {
 struct PanelActionResult: Decodable {
     var ok: Bool
     var detail: String
+}
+
+/// The voice channel's settings (GET /api/voice/settings, v0.9):
+/// the operator's local speech services — an OpenAI-compatible
+/// transcription endpoint (faster-whisper) and speech endpoint
+/// (Kokoro). Plain config; there are no secrets in this shape.
+struct PanelVoiceSettings: Decodable {
+    var enabled: Bool
+    var sttBaseUrl: String
+    var sttModel: String
+    var ttsBaseUrl: String
+    var ttsModel: String
+    var ttsVoice: String
+}
+
+/// One push-to-talk exchange (POST /api/voice/call, v0.9). On a
+/// speech-synthesis failure ok is false and the detail says why,
+/// but the reply text still arrives — the chat shows what GUS
+/// said and the notice says why it wasn't spoken.
+struct PanelVoiceCallResult: Decodable {
+    var ok: Bool
+    var kind: String
+    var detail: String
+    var transcript: String?
+    var replyText: String?
+    var audioBase64: String?
+    var audioContentType: String?
 }
 
 /// The onboarding read model (GET /api/onboarding) — the wizard's
@@ -258,6 +292,33 @@ final class PanelClient {
             }
             do {
                 completion(.success(try JSONDecoder().decode(PanelActionResult.self, from: data)))
+            } catch {
+                completion(.failure(error))
+            }
+        }.resume()
+    }
+    /// POST a voice call: the raw recording as the body (its
+    /// content type rides the header — that is the panel route's
+    /// contract), the exchange as the decoded answer. A spoken
+    /// reply can take as long as the job behind it, so this call
+    /// gets a long timeout instead of URLSession's 60s default.
+    func postVoiceCall(audio: Data, contentType: String, completion: @escaping (Result<PanelVoiceCallResult, Error>) -> Void) {
+        var req = request(path: "/api/voice/call", method: "POST")
+        req.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        req.httpBody = audio
+        req.timeoutInterval = 180
+        URLSession.shared.dataTask(with: req) { data, _, error in
+            if let error {
+                completion(.failure(error))
+                return
+            }
+            guard let data else {
+                completion(.failure(NSError(domain: "gus.panel", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "the panel answered with no data"])))
+                return
+            }
+            do {
+                completion(.success(try JSONDecoder().decode(PanelVoiceCallResult.self, from: data)))
             } catch {
                 completion(.failure(error))
             }

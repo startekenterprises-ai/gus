@@ -435,6 +435,7 @@ function stubBackend(calls: string[]): PanelBackend {
           scope: "bounded" as const,
           maxApprovalsPerHour: 30,
         },
+        voice: { enabled: false, configured: false },
       },
     }),
     ledger: () => ({
@@ -506,6 +507,16 @@ function stubBackend(calls: string[]): PanelBackend {
     chatHistory: () => ({ conversationId: "panel-chat", messages: [], jobs: [] }),
     watchFrame: async () => ({ ok: false as const, detail: "no frame in the stub" }),
     watchTimeline: () => [],
+    voiceSettings: () => ({
+      enabled: false,
+      sttBaseUrl: "http://127.0.0.1:8000/v1",
+      sttModel: "whisper-1",
+      ttsBaseUrl: "http://127.0.0.1:8880/v1",
+      ttsModel: "kokoro",
+      ttsVoice: "af_heart",
+    }),
+    setVoiceSettings: () => action("voice:settings"),
+    voiceCall: async () => ({ ok: false, kind: "unavailable", detail: "voice is not wired in this stub" }),
   };
 }
 

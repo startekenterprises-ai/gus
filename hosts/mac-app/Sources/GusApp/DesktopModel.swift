@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 
 /// Cross-window requests, posted by views and observed by the app
@@ -40,6 +41,21 @@ final class DesktopModel: ObservableObject {
     @Published var setupPresented = false
     private var setupAutoShown = false
     @Published var composerText = ""
+    /// v0.9 (Call GUS): the voice exchange state. Push-to-talk:
+    /// idle → recording → thinking (the call round-trips the
+    /// control plane: transcribe → job → spoken reply) → idle.
+    /// Exchanges are shown in the chat from the call results
+    /// themselves; the jobs behind them are ordinary jobs with
+    /// ordinary receipts in the Jobs view.
+    @Published var voiceState: VoiceState = .idle
+    @Published var voiceExchanges: [PanelChatMessage] = []
+    enum VoiceState {
+        case idle
+        case recording
+        case thinking
+    }
+    private var voiceRecorder: AVAudioRecorder?
+    private var voicePlayer: AVAudioPlayer?
     /// The last action's outcome, in the panel's own words (or the
     /// transport error). Shown under the composer / sidebar so a
     /// refusal is never silent.
@@ -116,6 +132,98 @@ final class DesktopModel: ObservableObject {
             }
         }
     }
+
+    // MARK: Voice — Call GUS (v0.9)
+
+    private var voiceRecordingURL: URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("gus-voice-utterance.wav")
+    }
+
+    /// The Call button: tap to start talking, tap again to send.
+    /// Push-to-talk — nothing listens between calls, and the app
+    /// only ever records after the tap.
+    func toggleVoiceCall() {
+        switch voiceState {
+        case .idle:
+            startVoiceRecording()
+        case .recording:
+            finishVoiceRecording()
+        case .thinking:
+            break // a call is already in flight; extra taps do nothing
+        }
+    }
+
+    private func startVoiceRecording() {
+        AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard granted else {
+                    self.notice = "Microphone access is off for GUS — grant it in System Settings → Privacy & Security → Microphone, then try the call again."
+                    return
+                }
+                do {
+                    // 16 kHz mono WAV: speech-to-text's native shape,
+                    // small, and every transcription service takes it.
+                    let settings: [String: Any] = [
+                        AVFormatIDKey: Int(kAudioFormatLinearPCM),
+                        AVSampleRateKey: 16_000,
+                        AVNumberOfChannelsKey: 1,
+                        AVLinearPCMBitDepthKey: 16,
+                        AVLinearPCMIsFloatKey: false,
+                        AVLinearPCMIsBigEndianKey: false,
+                    ]
+                    let recorder = try AVAudioRecorder(url: self.voiceRecordingURL, settings: settings)
+                    guard recorder.record() else {
+                        self.notice = "The microphone wouldn't start recording — nothing was sent."
+                        return
+                    }
+                    self.voiceRecorder = recorder
+                    self.voiceState = .recording
+                    self.notice = "Listening… tap Stop & Send when you're done. If a job is parked, you'll hear it read back — say \"confirm\" or \"yes, do it\" to run it."
+                } catch {
+                    self.notice = "The microphone wouldn't start: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func finishVoiceRecording() {
+        voiceRecorder?.stop()
+        voiceRecorder = nil
+        guard let audio = try? Data(contentsOf: voiceRecordingURL), !audio.isEmpty else {
+            voiceState = .idle
+            notice = "That recording came out empty — nothing was sent."
+            return
+        }
+        voiceState = .thinking
+        client.postVoiceCall(audio: audio, contentType: "audio/wav") { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.voiceState = .idle
+                switch result {
+                case .success(let call):
+                    self.notice = call.detail
+                    if let transcript = call.transcript, !transcript.isEmpty {
+                        self.voiceExchanges.append(PanelChatMessage(ts: Self.nowMs, direction: "in", text: "🎙 \(transcript)"))
+                    }
+                    if let reply = call.replyText, !reply.isEmpty {
+                        self.voiceExchanges.append(PanelChatMessage(ts: Self.nowMs, direction: "out", text: reply))
+                    }
+                    if let b64 = call.audioBase64, let data = Data(base64Encoded: b64) {
+                        self.voicePlayer = try? AVAudioPlayer(data: data)
+                        self.voicePlayer?.play()
+                    }
+                    self.refreshChat()
+                    self.refreshJobs()
+                    self.refreshApprovals()
+                case .failure(let e):
+                    self.notice = "The voice call didn't reach GUS: \(e.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private static var nowMs: Double { Date().timeIntervalSince1970 * 1000 }
 
     func resolve(_ approval: PanelApproval, approve: Bool) {
         let path = "/api/approvals/\(approval.id)/\(approve ? "approve" : "deny")"

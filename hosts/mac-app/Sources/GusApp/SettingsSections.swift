@@ -313,6 +313,82 @@ struct SettingsTelegramView: View {
     }
 }
 
+/// Voice (v0.9) — Call GUS. The channel's whole configuration:
+/// an on/off switch and the operator's own local speech services
+/// (OpenAI-compatible endpoints — faster-whisper for ears, Kokoro
+/// for the mouth by default). Saving posts /api/voice/settings;
+/// the call service re-reads the file per call, so a save is live
+/// on the next call with no restart. No secrets live here: the
+/// reference services are unauthenticated on the local machine.
+struct SettingsVoiceView: View {
+    @ObservedObject var model: SettingsModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SettingsPaneTitle(text: "Voice — Call GUS")
+            if let s = model.status {
+                SettingsRow(title: "Voice channel",
+                            value: s.settings.voice.enabled
+                                ? (s.settings.voice.configured ? "On — endpoints on file" : "On — an endpoint is missing")
+                                : "Off",
+                            help: model.help("voice-call"))
+            }
+            Text("Talk to GUS from the chat window's Call button. Your words are transcribed by a speech service on your own machine, then treated exactly like a typed message — same secret-guard, Shield scan, caps, and receipts. The reply is spoken by your speech service; if it fails, you get the reply as text with the reason stated.")
+                .font(.callout)
+                .foregroundColor(.secondary)
+            Toggle("Enable voice calls", isOn: $model.voiceEnabled)
+            Group {
+                Text("Hearing — transcription (STT)")
+                    .font(.headline)
+                HStack {
+                    Text("Endpoint")
+                        .frame(width: 90, alignment: .leading)
+                    TextField("http://127.0.0.1:8000/v1", text: $model.voiceSttUrl)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.callout, design: .monospaced))
+                }
+                HStack {
+                    Text("Model")
+                        .frame(width: 90, alignment: .leading)
+                    TextField("whisper-1", text: $model.voiceSttModel)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 240)
+                }
+                Text("Speech — synthesis (TTS)")
+                    .font(.headline)
+                HStack {
+                    Text("Endpoint")
+                        .frame(width: 90, alignment: .leading)
+                    TextField("http://127.0.0.1:8880/v1", text: $model.voiceTtsUrl)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.callout, design: .monospaced))
+                }
+                HStack {
+                    Text("Model")
+                        .frame(width: 90, alignment: .leading)
+                    TextField("kokoro", text: $model.voiceTtsModel)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 240)
+                }
+                HStack {
+                    Text("Voice")
+                        .frame(width: 90, alignment: .leading)
+                    TextField("af_heart", text: $model.voiceTtsVoice)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 240)
+                }
+            }
+            Button("Save voice settings") {
+                model.saveVoice()
+            }
+            .buttonStyle(.borderedProminent)
+            Text("Approvals by voice are narrow on purpose: a parked job is read back to you, and only an exact \"confirm\" or \"yes, do it\" runs it — a plain \"yes\" runs nothing. \"Stop\" or \"GUS stop\" trips the same kill switch as typing /stop.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+}
+
 struct SettingsMacBridgeView: View {
     @ObservedObject var model: SettingsModel
     @State private var grantTick = 0

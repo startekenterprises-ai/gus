@@ -143,6 +143,7 @@ async function rig(opts?: { shieldGate?: unknown; macHost?: MacHostAdapter }): P
           scope: "bounded",
           maxApprovalsPerHour: 30,
         },
+        voice: { enabled: false, configured: false },
       },
     }),
     ledger: () => ({
@@ -218,6 +219,16 @@ async function rig(opts?: { shieldGate?: unknown; macHost?: MacHostAdapter }): P
     }),
     watchFrame: () => frames.frame(),
     watchTimeline: () => readWatchTimeline(dir, 60),
+    voiceSettings: () => ({
+      enabled: false,
+      sttBaseUrl: "http://127.0.0.1:8000/v1",
+      sttModel: "whisper-1",
+      ttsBaseUrl: "http://127.0.0.1:8880/v1",
+      ttsModel: "kokoro",
+      ttsVoice: "af_heart",
+    }),
+    setVoiceSettings: async () => ({ ok: true, detail: "ok" }),
+    voiceCall: async () => ({ ok: false, kind: "unavailable", detail: "voice is not wired in this stub" }),
   };
   return { dir, jobs, approvals, telegram, panelChat, host, pushed, executed, backend };
 }
