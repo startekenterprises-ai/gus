@@ -178,13 +178,65 @@ test("host (v0.9.9): the scan skip is voice-only — other channels are still sc
   assert.equal(calls.n, 1, "the telegram message WAS scanned — the flag cannot leak across channels");
 });
 
+test("host (v0.9.10): voice inbound scans FAST; panel and telegram inbound keep the full scan", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "gus-voice-fast-host-"));
+  const scans: { surface: string; fast: boolean }[] = [];
+  const gate = {
+    scanSurface: async (surface: string, _jobId: string, _text: string, opts?: { fastScan?: boolean }) => {
+      scans.push({ surface, fast: opts?.fastScan === true });
+      return { action: "allow", scanned: true, detail: "test verdict: clean" };
+    },
+  };
+  const governor = new Governor(dir, { maxTokensPerJob: 100_000, maxTokensPerDay: 10_000_000 });
+  const jobs = new JobRunner(dir, new LocalReceiptIssuer(join(dir, "receipt-stub.key")));
+  const approvals = new ApprovalEngine(dir, () => 120_000);
+  const telegram = new CaptureAdapter("telegram");
+  const panel = new CaptureAdapter("panel");
+  const voice = new VoiceAdapter();
+  // The shieldScan switch is ON (predicate false) — the fast-mode
+  // case: the scan runs, in the mode each channel is owed.
+  const host = new ChannelHost(dir, governor, jobs, [telegram, panel, voice], approvals, gate as never, () => false);
+  const pushed: { jobId: string; text: string }[] = [];
+  host.attachComm({
+    pushUserMessage: (m: { jobId: string; text: string }) => pushed.push(m),
+    broadcast: () => {},
+    executeApproval: () => {},
+  } as never);
+  await host.start();
+
+  // Voice: scanned, fast, and the delivery stats name the mode.
+  const submitted = voice.submit("hello from a voice turn");
+  assert.equal(submitted.ok, true);
+  await until(() => pushed.length === 1, "the voice turn to become a job");
+  assert.deepEqual(scans, [{ surface: "inbound-message", fast: true }], "the voice turn's scan ran fast");
+  const voiceJobId = pushed[0].jobId;
+  host.onModelIssued(voiceJobId, "voice reply");
+  await host.onJobFinal(voiceJobId, "voice reply");
+  const delivery = await voice.waitForReply(1_000);
+  assert.ok(delivery, "the voice reply was delivered");
+  assert.equal(delivery.stats?.shieldFastMode, true, "the delivery stats name the fast scan");
+  assert.equal(delivery.stats?.shieldSkipped, undefined, "a fast scan is not a skip — the record keeps them distinct");
+
+  // Telegram: scanned, full.
+  telegram.emit("hello from telegram", "tg-1");
+  await until(() => pushed.length === 2, "the telegram message to become a job");
+  assert.equal(scans.length, 2);
+  assert.equal(scans[1].fast, false, "the telegram message got the full scan");
+
+  // Panel: scanned, full.
+  panel.emit("hello from the panel", "panel-1");
+  await until(() => pushed.length === 3, "the panel message to become a job");
+  assert.equal(scans.length, 3);
+  assert.equal(scans[2].fast, false, "the panel message got the full scan");
+});
+
 // ---------------------------------------------------------------- panel routes
 
 function stubBackend(rec: Record<string, unknown>, wired: boolean): PanelBackend {
   const action = async () => ({ ok: true, detail: "ok" });
   const backend: PanelBackend = {
     status: () => ({
-      version: "0.9.9",
+      version: "0.9.10",
       killed: false,
       shield: { provisioned: true, required: true, onUnavailable: "closed", baseUrl: "" },
       provider: { id: "stub", model: "stub-v0" },

@@ -50,7 +50,12 @@
 //     and speaker check (live mic level, a test sentence through
 //     the selected engine, and a built-in dictation trial with
 //     a measured speed verdict for this Mac), and the
-//     Shield-scan switch for spoken turns.
+//     Shield-scan switch for spoken turns; v0.9.10: fast
+//     voice scans — a spoken turn's Shield scan (switch on)
+//     runs in the Shield's fast mode, deterministic patterns
+//     only, so a reply is no longer gated on the full semantic
+//     review's seconds; typed messages keep the full review,
+//     and each turn record names the scan it got.
 //     It launches GusMacHost from inside the bundle (so
 //     Accessibility / Screen Recording grants attach to
 //     GUS.app), shows status, starts/stops the launchd agents, and

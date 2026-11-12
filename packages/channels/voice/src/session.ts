@@ -111,6 +111,15 @@
  * latency, and the words in the detail. Nothing else about the
  * turn changes: same secret-guard, same caps, same receipts.
  *
+ * Fast voice scans (v0.9.10): with the switch ON, the scan that
+ * remains is the Shield's fast mode — deterministic patterns
+ * only, the semantic LLM stage skipped (~1–2 s against the full
+ * review's ~7–12 s, measured live). Typed messages keep the
+ * full review. The mode rides the same delivery stats back and
+ * is recorded the same three ways (shieldFastMode on the turn,
+ * the latency, and the words in the detail), so a turn's record
+ * always says which scan it got: full, fast, or none.
+ *
  * The microphone's liveness is the app's side of the contract:
  * this service only ever sees audio the app chose to stream, and
  * only while a session the operator started is active. There is
@@ -179,6 +188,12 @@ export interface VoiceTurnLatency {
    *  this flag is what keeps that 0 from reading as "scanned,
    *  fast". Absent on every scanned turn. */
   shieldSkipped?: boolean;
+  /** v0.9.10: this turn's ingress scan ran in the Shield's
+   *  fast mode (deterministic patterns only, the semantic
+   *  stage skipped). Absent on full-review scans and on
+   *  skipped turns — the three scan outcomes stay distinct
+   *  in the record. */
+  shieldFastMode?: boolean;
   /** Reply in hand → first sentence's audio ready to play. */
   ttsFirstMs?: number;
   /** Utterance end → first audio (or → turn settled, if the
@@ -210,6 +225,11 @@ export interface VoiceSessionTurn {
    *  voice-turns.jsonl — a skipped scan is a stated fact about
    *  the turn, never a silent gap in its record. */
   scanSkippedByOperator?: boolean;
+  /** v0.9.10: this turn's ingress Shield scan ran in fast
+   *  mode (deterministic patterns only). Recorded on the turn
+   *  and in voice-turns.jsonl, like the skip — which of the
+   *  three scans a turn got is always a stated fact. */
+  shieldFastMode?: boolean;
   latency?: VoiceTurnLatency;
 }
 
@@ -975,10 +995,17 @@ export class VoiceSessionService {
     // answered…") must not claim a scan that never ran.
     const scanSkipped = result.stats?.shieldSkipped === true;
     if (scanSkipped) turn.scanSkippedByOperator = true;
+    // v0.9.10: a fast-mode scan is stated too — the stock detail
+    // must not imply the full semantic review read the words
+    // when deterministic patterns were all that ran.
+    const shieldFastMode = result.stats?.shieldFastMode === true;
+    if (shieldFastMode) turn.shieldFastMode = true;
     turn.detail =
       (scanSkipped
         ? `${result.detail} Shield scan skipped for this turn — scan-skipped-by-operator (the Settings → Voice switch is off).`
-        : result.detail) +
+        : shieldFastMode
+          ? `${result.detail} Shield scan ran in fast mode for this turn (deterministic patterns only; typed messages still get the full semantic review).`
+          : result.detail) +
       (turn.via === "local" ? " (Built-in transcription on this Mac.)" : "");
     turn.replyText = result.replyText;
     const latency: VoiceTurnLatency = {
@@ -995,6 +1022,7 @@ export class VoiceSessionService {
             modelMs: result.stats.modelMs,
             hops: result.stats.hops,
             ...(result.stats.shieldSkipped ? { shieldSkipped: true } : {}),
+            ...(result.stats.shieldFastMode ? { shieldFastMode: true } : {}),
           }
         : {}),
       totalMs: this.now() - utteranceEndAt,
@@ -1120,6 +1148,9 @@ export class VoiceSessionService {
         /** v0.9.9: present (and true) only when the operator's
          *  switch skipped this turn's ingress Shield scan. */
         scanSkippedByOperator?: boolean;
+        /** v0.9.10: present (and true) only when this turn's
+         *  ingress scan ran in the Shield's fast mode. */
+        shieldFastMode?: boolean;
         latency?: VoiceTurnLatency;
       } = {
         ts: this.now(),
@@ -1129,6 +1160,7 @@ export class VoiceSessionService {
         kind: turn.kind,
         detail: turn.detail,
         ...(turn.scanSkippedByOperator ? { scanSkippedByOperator: true } : {}),
+        ...(turn.shieldFastMode ? { shieldFastMode: true } : {}),
         ...(turn.latency !== undefined ? { latency: turn.latency } : {}),
       };
       appendFileSync(join(this.stateDir, "voice-turns.jsonl"), JSON.stringify(rec) + "\n");

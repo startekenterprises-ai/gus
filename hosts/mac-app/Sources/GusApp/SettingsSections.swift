@@ -336,7 +336,7 @@ struct SettingsVoiceView: View {
                                 : "Off",
                             help: model.help("voice-call"))
             }
-            Text("Talk to GUS from the chat window's Call button — a live call, not a recording: the microphone is open only while the call is, a pause ends your turn, and the reply is spoken sentence by sentence as it's made. Your words are transcribed on your own machine — by the app's built-in speech, or by a speech service you run — then treated exactly like a typed message — same secret-guard, caps, and receipts, and the same Shield scan unless you switch it off for voice below. If endpoint speech fails, you get the reply as text with the reason stated.")
+            Text("Talk to GUS from the chat window's Call button — a live call, not a recording: the microphone is open only while the call is, a pause ends your turn, and the reply is spoken sentence by sentence as it's made. Your words are transcribed on your own machine — by the app's built-in speech, or by a speech service you run — then treated like a typed message — same secret-guard, caps, and receipts, and the Shield's fast scan (typed messages get the full review) unless you switch it off for voice below. If endpoint speech fails, you get the reply as text with the reason stated.")
                 .font(.callout)
                 .foregroundColor(.secondary)
             Toggle("Enable voice calls", isOn: $model.voiceEnabled)
@@ -346,7 +346,7 @@ struct SettingsVoiceView: View {
                 .foregroundColor(.secondary)
             Toggle("Shield-scan my spoken requests (Agent-Shield)", isOn: $model.voiceShieldScan)
             Text(model.voiceShieldScan
-                 ? "On: what you say is scanned by Agent-Shield before it becomes a job — safer, and it adds seconds to each turn. Typed messages are always scanned either way."
+                 ? "On: what you say gets Agent-Shield's fast scan (deterministic patterns) before it becomes a job — safer, and quick. Typed messages always get the full review."
                  : "Off: spoken turns become jobs WITHOUT the injection scan — faster, and meant for testing and troubleshooting. Nothing checks your spoken words before they reach the agent. Typed messages are still scanned, and caps, approvals, and receipts still apply. Every skipped turn is recorded as scan-skipped-by-operator.")
                 .font(.caption)
                 .foregroundColor(.secondary)

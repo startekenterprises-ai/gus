@@ -159,11 +159,18 @@ export class ShieldClient {
   }
 
   /** Scan one piece of content. The key is attached inside the
-   *  withSecret callback; it never exists in this method's frame. */
+   *  withSecret callback; it never exists in this method's frame.
+   *  v0.9.10: opts.fastScan asks the Shield for its fast mode —
+   *  deterministic patterns only, the semantic LLM stage skipped
+   *  (the voice channel's ingress scan; the verdict and the signed
+   *  receipt are unchanged in shape, and the response echoes
+   *  fast: true). Absent/false sends the byte-identical request
+   *  this client has always sent. */
   async scan(
     content: string,
     contentType: "text" | "prompt" | "tool_output" | "email" | "webpage",
     nonce?: string,
+    opts?: { fastScan?: boolean },
   ): Promise<ShieldScanOutcome> {
     if (!this.hasKey()) return { status: "no-key" };
     let res: ShieldTransportResponse;
@@ -180,6 +187,7 @@ export class ShieldClient {
             content,
             content_type: contentType,
             mode: "enforce",
+            ...(opts?.fastScan ? { fast: true } : {}),
             ...(nonce ? { nonce } : {}),
           }),
         }),

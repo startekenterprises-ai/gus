@@ -536,10 +536,29 @@ export class ChannelHost {
       // v0.9.8: the scan is TIMED, never changed — the ingress
       // scan stays exactly as mandatory as it is for typed text;
       // only its duration joins the job's stage record.
+      // v0.9.10: a VOICE turn's scan runs in the Shield's fast
+      // mode (deterministic patterns only; the semantic LLM
+      // stage is skipped — ~1–2s instead of ~7–12s, which is
+      // the difference between a conversation and a voicemail).
+      // Checked against the adapter the message actually
+      // arrived on, like the skip above: typed text on every
+      // other channel keeps the full semantic review, and the
+      // mode is stamped on the stats so the turn record names
+      // it. The verdict, the receipt, and every block/flag
+      // consequence are the scan's own, exactly as before.
+      const fastScan = adapterName === "voice";
       const scanStartedAt = Date.now();
-      const decision = await this.shieldGate.scanSurface("inbound-message", job.id, text);
+      const decision = await this.shieldGate.scanSurface(
+        "inbound-message",
+        job.id,
+        text,
+        fastScan ? { fastScan: true } : undefined,
+      );
       const stats = this.stageStats.get(job.id);
-      if (stats) stats.shieldMs = Date.now() - scanStartedAt;
+      if (stats) {
+        stats.shieldMs = Date.now() - scanStartedAt;
+        if (fastScan) stats.shieldFastMode = true;
+      }
       if (decision.receipt) {
         this.jobs.noteShieldReceipt(job.id, decision.receipt.receiptId);
       }

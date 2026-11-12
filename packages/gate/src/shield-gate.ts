@@ -92,6 +92,9 @@ export interface GateLogEntry {
    *  permissive mode relaxed it — what enforcing would have done. */
   mode?: GateMode;
   wouldBe?: string;
+  /** v0.9.10: the scan ran in fast mode (deterministic patterns
+   *  only, semantic stage skipped) at the caller's request. */
+  fast?: boolean;
 }
 
 function sha256Hex(text: string): string {
@@ -138,9 +141,14 @@ export class ShieldGate {
     surface: GateSurface,
     jobId: string,
     content: string,
+    opts?: { fastScan?: boolean },
   ): Promise<GateDecision> {
     const policy = this.opts.policy();
     const contentSha256 = sha256Hex(content);
+    // v0.9.10: fast mode is a property of the REQUEST (the caller
+    // asked for deterministic-only); it rides to the client call
+    // and into the log entry above, whatever the decision.
+    const fastMode = opts?.fastScan === true;
     const decide = (d: GateDecision, receiptRaw?: Record<string, unknown> | null): GateDecision => {
       const entry: GateLogEntry = {
         ts: Date.now(),
@@ -156,6 +164,10 @@ export class ShieldGate {
         detail: d.detail,
         mode: this.mode(),
         ...(d.wouldBe ? { wouldBe: d.wouldBe } : {}),
+        // v0.9.10: a fast-mode scan (deterministic only, the
+        // semantic stage skipped at the caller's request) is
+        // named in the record — present only when it ran fast.
+        ...(fastMode ? { fast: true } : {}),
       };
       try {
         appendFileSync(this.opts.logPath, JSON.stringify(entry) + "\n");
@@ -183,7 +195,7 @@ export class ShieldGate {
       );
     }
 
-    const outcome = await this.opts.client.scan(content, CONTENT_TYPE_FOR[surface], jobId);
+    const outcome = await this.opts.client.scan(content, CONTENT_TYPE_FOR[surface], jobId, opts);
     if (outcome.status === "no-key") {
       // Raced with a key removal between hasKey and scan.
       if (!policy.required) {

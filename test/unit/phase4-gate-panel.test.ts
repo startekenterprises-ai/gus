@@ -151,6 +151,87 @@ test("shield client: scan parses verdict + receipt; key rides only in the header
   assert.equal(verified, true);
 });
 
+/** A transport that captures the /v2/scan request BODIES — the
+ *  fast-mode tests' witness: the flag must be in the JSON, and
+ *  only when it was asked for. */
+function bodyCapturingTransport(bodies: Record<string, unknown>[]): ShieldTransport {
+  return async (url, init) => {
+    if (url.endsWith("/v1/signup")) {
+      return { status: 200, json: async () => ({ api_key: FAKE_SHIELD_KEY, tier: "free" }) };
+    }
+    if (url.endsWith("/v2/scan")) {
+      bodies.push(JSON.parse(init.body ?? "{}") as Record<string, unknown>);
+      return {
+        status: 200,
+        json: async () => ({
+          verdict: "no_signals",
+          action: "allow",
+          findings: [],
+          receipt: { ...RECEIPT, receipt_id: "rcpt_0123456789abcdef04", verdict: "no_signals" },
+        }),
+      };
+    }
+    return { status: 404, json: async () => ({}) };
+  };
+}
+
+test("shield client (v0.9.10): fastScan sends fast:true — and only then", async () => {
+  const { vault } = tempVault();
+  const bodies: Record<string, unknown>[] = [];
+  const client = new ShieldClient({
+    vault,
+    baseUrl: "https://shield.example",
+    transport: bodyCapturingTransport(bodies),
+  });
+  await client.provision("gus");
+
+  const plain = await client.scan("an ordinary message", "prompt", "job-plain");
+  assert.equal(plain.status, "ok");
+  assert.equal(bodies.length, 1);
+  assert.ok(!("fast" in bodies[0]), "the default request carries no fast field — byte-identical to before");
+  assert.equal(bodies[0].mode, "enforce");
+  assert.equal(bodies[0].content_type, "prompt");
+
+  const fast = await client.scan("a spoken message", "prompt", "job-fast", { fastScan: true });
+  assert.equal(fast.status, "ok");
+  assert.equal(bodies.length, 2);
+  assert.equal(bodies[1].fast, true, "the fast request carries fast: true");
+
+  const explicitOff = await client.scan("another message", "prompt", "job-off", { fastScan: false });
+  assert.equal(explicitOff.status, "ok");
+  assert.ok(!("fast" in bodies[2]), "fastScan:false is the default request too — never fast: false");
+});
+
+test("shield gate (v0.9.10): scanSurface's fastScan rides to the request and the log — only when passed", async () => {
+  const { dir, vault } = tempVault();
+  const bodies: Record<string, unknown>[] = [];
+  const client = new ShieldClient({
+    vault,
+    baseUrl: "https://shield.example",
+    transport: bodyCapturingTransport(bodies),
+  });
+  const gate = new ShieldGate({
+    client,
+    policy: () => ({ required: true, onUnavailable: "closed" }),
+    logPath: join(dir, "gate.jsonl"),
+  });
+  await gate.provision();
+
+  const fastDecision = await gate.scanSurface("inbound-message", "job-v", "a spoken turn", { fastScan: true });
+  assert.equal(fastDecision.action, "allow");
+  assert.equal(fastDecision.scanned, true);
+  assert.equal(bodies[0].fast, true, "the voice-shaped call asked for fast mode");
+
+  const fullDecision = await gate.scanSurface("tool-result", "job-t", "a fetched page");
+  assert.equal(fullDecision.action, "allow");
+  assert.ok(!("fast" in bodies[1]), "a tool-result scan without opts never goes fast");
+
+  const lines = readFileSync(join(dir, "gate.jsonl"), "utf8").trim().split("\n");
+  const entries = lines.map((l) => JSON.parse(l) as { jobId: string; fast?: boolean });
+  assert.equal(entries.find((e) => e.jobId === "job-v")?.fast, true, "the gate log names the fast scan");
+  assert.equal(entries.find((e) => e.jobId === "job-t")?.fast, undefined, "and stays silent about full scans");
+});
+
 test("shield gate: malicious blocks with receipt, suspicious flags, clean allows; log holds no content", async () => {
   const { dir, vault } = tempVault();
   const { gate } = makeGate(vault, dir, { required: true, onUnavailable: "closed" });

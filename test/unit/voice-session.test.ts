@@ -1546,3 +1546,39 @@ test("scan skip (v0.9.9): shieldScan ON (the default) — the same turn IS scann
   assert.equal(rec.scanSkippedByOperator, undefined, "and neither does its durable record");
   r.sessions.end(id);
 });
+
+// ---------------------------------------------------------------- v0.9.10: fast voice scans
+
+test("fast scan (v0.9.10): a scanned voice turn records the fast mode — turn, latency, detail, durable record", async () => {
+  const calls = { n: 0 };
+  const r = await sessionRig({
+    shieldGate: countingGate(calls),
+    transcripts: ["hello gus"],
+  });
+  const id = await startCall(r);
+  say(r, id);
+  await driveJob(r, "Heard you, fast-scanned.");
+  await r.sessions.drain();
+
+  assert.ok(calls.n >= 1, "the gate scanned the voice turn");
+  const turn = r.sessions.state(id).turns[0];
+  assert.equal(turn.shieldFastMode, true, "the turn names the fast scan");
+  assert.equal(turn.scanSkippedByOperator, undefined, "a fast scan is not a skip");
+  assert.match(turn.detail, /fast mode/, "the detail says the scan ran fast");
+  assert.match(turn.detail, /deterministic/, "and what fast means");
+  assert.equal(turn.latency?.shieldFastMode, true, "the latency carries the mode beside the measured scan time");
+  assert.equal(turn.latency?.shieldSkipped, undefined);
+
+  const lines = readFileSync(join(r.dir, "voice-turns.jsonl"), "utf8").trim().split("\n");
+  const rec = JSON.parse(lines[lines.length - 1]) as {
+    shieldFastMode?: boolean;
+    scanSkippedByOperator?: boolean;
+    detail: string;
+    latency?: { shieldFastMode?: boolean };
+  };
+  assert.equal(rec.shieldFastMode, true, "voice-turns.jsonl carries the flag");
+  assert.equal(rec.scanSkippedByOperator, undefined, "and no skip flag beside it");
+  assert.match(rec.detail, /fast mode/, "and the words");
+  assert.equal(rec.latency?.shieldFastMode, true);
+  r.sessions.end(id);
+});

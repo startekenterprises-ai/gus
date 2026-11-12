@@ -768,8 +768,12 @@ const panelBackend: PanelBackend = {
     // v0.9.9: the scan sentence follows the switch — the save
     // confirmation must not claim a scan the operator just
     // turned off, and must say plainly what off means.
+    // v0.9.10: the ON sentence names the fast scan — spoken
+    // turns get the Shield's deterministic fast mode, not the
+    // full semantic review typed messages get, and the note
+    // must not imply otherwise.
     const scanNote = saved.shieldScan
-      ? "Spoken transcripts are Shield-scanned, capped, and receipted like typed messages"
+      ? "Spoken transcripts get the fast Shield scan (deterministic patterns; the full semantic review still guards typed messages), capped and receipted like typed messages"
       : "Voice Shield scan is OFF: spoken turns become jobs WITHOUT the ingress scan (each skip is recorded in voice-turns.jsonl); caps, approvals, and receipts still apply";
     return {
       ok: true,

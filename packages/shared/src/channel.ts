@@ -63,6 +63,13 @@ export interface JobDeliveryStats {
    *  so the skip is named here and lands on the turn record.
    *  Absent for every scanned job and every non-voice job. */
   shieldSkipped?: boolean;
+  /** v0.9.10: the job was a voice turn and its ingress scan ran
+   *  in the Shield's fast mode — deterministic patterns only,
+   *  the semantic LLM stage skipped (the verdict and the signed
+   *  receipt are unchanged; the scan took ~1–2s instead of
+   *  ~7–12s). Set only when a scan actually ran fast. Absent
+   *  for every full-review scan and every non-voice job. */
+  shieldFastMode?: boolean;
 }
 
 export interface OutboundMessage {
