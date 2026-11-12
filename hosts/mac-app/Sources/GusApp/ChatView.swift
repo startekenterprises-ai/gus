@@ -1,17 +1,16 @@
 import SwiftUI
 
-/// THE Call button (v0.9.8) — one view, one source of truth,
-/// carried by BOTH the chat composer and the window's top bar:
-/// the label, the icon, the action, and the (absence of a)
-/// disabled condition live here and nowhere else. Through
-/// 0.9.7 the top bar kept a Desktop-1 placeholder that was
-/// disabled unconditionally ("voice calls arrive with the Call
-/// GUS build") while the composer's button did the real work —
-/// the header's Call read as greyed out forever. In a call the
-/// button is End Call (the hang-up); out of one it is Call (the
-/// preflight + session start, in the model). There is no state
-/// in which it is disabled: a call that can't start says why in
-/// the notice rather than greying the button.
+/// THE Call button — one view, one source of truth, and since
+/// v0.9.9 the ONLY Call button in the app: it lives in the chat
+/// composer, and the duplicate the window's top bar carried
+/// through 0.9.8 is gone (two working Call buttons confused
+/// more than they helped — Glenn's field call). The label, the
+/// icon, the action, and the (absence of a) disabled condition
+/// live here and nowhere else. In a call the button is End Call
+/// (the hang-up); out of one it is Call (the preflight + session
+/// start, in the model). There is no state in which it is
+/// disabled: a call that can't start says why in the notice
+/// rather than greying the button.
 struct VoiceCallButton: View {
     @ObservedObject var model: DesktopModel
 
@@ -215,25 +214,24 @@ struct ChatView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(model.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .help("Send — the message goes through the same scan, caps, and receipts as any channel")
-            // v0.9.8: the Mute button lives in the in-call bar,
-            // immediately before End Call — one click, mid-call.
-            if model.voiceInCall {
-                muteButton
-            }
             VoiceCallButton(model: model)
         }
         .padding(12)
     }
 
-    /// Mute (v0.9.8): the dog-barking control. While the call is
-    /// open, one click stops the microphone feed dead — nothing
-    /// is transcribed, nothing is posted to the session, room
-    /// noise can't trigger barge-in, and any half-finished
-    /// sentence is discarded (the model's toggleVoiceMute owns
-    /// all of that; this is only its face). GUS can still speak
-    /// while muted; unmuting resumes listening. Muted wears the
-    /// prominent red, like End Call: the mic being OFF is the
-    /// state the operator must be able to see at a glance.
+    /// Mute (v0.9.8; made PROMINENT in v0.9.9): the dog-barking
+    /// control. While the call is open, one click stops the
+    /// microphone feed dead — nothing is transcribed, nothing is
+    /// posted to the session, room noise can't trigger barge-in,
+    /// and any half-finished sentence is discarded (the model's
+    /// toggleVoiceMute owns all of that; this is only its face).
+    /// GUS can still speak while muted; unmuting resumes
+    /// listening. In 0.9.8 this sat in the composer at text
+    /// size and Glenn couldn't spot it mid-call, dogs barking —
+    /// so now it lives in the in-call strip, large, labeled in
+    /// words ("Mute" / "Unmute", never icon-only), and red
+    /// while muted: the mic being OFF is the state the operator
+    /// must be able to see at a glance, from across the room.
     private var muteButton: some View {
         Group {
             if model.voiceMuted {
@@ -241,8 +239,10 @@ struct ChatView: View {
                     model.toggleVoiceMute()
                 } label: {
                     Label("Unmute", systemImage: "mic.slash.fill")
+                        .font(.headline)
                 }
                 .buttonStyle(.borderedProminent)
+                .controlSize(.large)
                 .tint(.red)
                 .help("Unmute — start listening again")
             } else {
@@ -250,8 +250,10 @@ struct ChatView: View {
                     model.toggleVoiceMute()
                 } label: {
                     Label("Mute", systemImage: "mic.fill")
+                        .font(.headline)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
                 .help("Mute — GUS hears nothing until you unmute. For the dog barking, the doorbell, the side conversation.")
             }
         }
@@ -279,6 +281,10 @@ struct ChatView: View {
                         .lineLimit(1)
                 }
                 Spacer()
+                // v0.9.9: the prominent Mute lives here, in the
+                // strip that only exists while a call is open —
+                // big, labeled, and impossible to miss mid-call.
+                muteButton
             }
             if let hearing = model.voiceHearingLine {
                 Text(hearing)

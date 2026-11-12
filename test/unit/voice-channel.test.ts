@@ -122,6 +122,7 @@ async function rig(opts?: {
         ttsModel: "kokoro",
         ttsVoice: "af_heart",
         bargeIn: true,
+        shieldScan: true,
       },
       "test",
     );
@@ -205,6 +206,7 @@ test("voice config: defensive parse — bad URLs fall back, enable needs a liter
     ttsModel: "kokoro",
     ttsVoice: "af_heart",
     bargeIn: true,
+    shieldScan: true,
   }, "test");
   const cfg = loadVoiceConfig(dir);
   assert.equal(cfg.enabled, true);

@@ -55,6 +55,14 @@ export interface JobDeliveryStats {
   shieldMs: number;
   modelMs: number;
   hops: number;
+  /** v0.9.9: the job was a voice turn and the operator's
+   *  Settings → Voice Shield-scan switch was OFF, so the
+   *  ChannelHost skipped the ingress Shield scan for this job
+   *  (scan-skipped-by-operator). shieldMs is 0 in that case —
+   *  but 0 alone would be indistinguishable from a fast scan,
+   *  so the skip is named here and lands on the turn record.
+   *  Absent for every scanned job and every non-voice job. */
+  shieldSkipped?: boolean;
 }
 
 export interface OutboundMessage {

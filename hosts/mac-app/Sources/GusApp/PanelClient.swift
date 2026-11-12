@@ -144,6 +144,39 @@ struct PanelVoiceSettings: Decodable {
     /// treats nil as the shipped default, "local".
     var sttEngine: String?
     var ttsEngine: String?
+    /// v0.9.9: the voice Shield-scan switch. Optional here: an
+    /// older control plane doesn't send it, and Settings treats
+    /// nil as the shipped default, ON.
+    var shieldScan: Bool?
+}
+
+/// v0.9.9: one Test Connection answer (POST
+/// /api/voice/test-connection) — the detailed probe of the
+/// endpoint the Settings form is showing, unsaved: reachable,
+/// the round-trip time, the models it lists, and whether the
+/// configured model is among them (nil = the endpoint answered
+/// without a readable list, so presence is unverifiable —
+/// never rounded up). `detail` is the same answer in one
+/// plain sentence, composed by the control plane.
+struct PanelVoiceEndpointTest: Decodable {
+    var ok: Bool
+    var reachable: Bool
+    var latencyMs: Double
+    var models: [String]
+    var modelPresent: Bool?
+    var detail: String
+}
+
+/// v0.9.9: the endpoint half of Test mic and speaker (POST
+/// /api/voice/test-speech) — one test sentence synthesized by
+/// the form's current TTS values, returned as playable audio.
+/// On failure ok is false and the detail names the reason; the
+/// audio fields are simply absent.
+struct PanelVoiceTestSpeech: Decodable {
+    var ok: Bool
+    var detail: String
+    var audioBase64: String?
+    var audioContentType: String?
 }
 
 /// One push-to-talk exchange (POST /api/voice/call, v0.9). On a
@@ -502,6 +535,26 @@ final class PanelClient {
     func postVoiceSessionTranscript(sessionId: String, text: String, completion: @escaping (Result<PanelActionResult, Error>) -> Void) {
         perform(request(path: "/api/voice/session/transcript", method: "POST", jsonBody: ["sessionId": sessionId, "text": text]),
                 as: PanelActionResult.self, completion: completion)
+    }
+
+    // MARK: Voice tests (v0.9.9)
+
+    /// Test Connection: probe the endpoint the Settings form
+    /// is showing (kind "stt" | "tts", base URL + model — the
+    /// form's CURRENT values, unsaved; the route stores
+    /// nothing). The answer is data either way: unreachable is
+    /// a result with ok false, not a transport failure.
+    func testVoiceConnection(kind: String, baseUrl: String, model: String, completion: @escaping (Result<PanelVoiceEndpointTest, Error>) -> Void) {
+        perform(request(path: "/api/voice/test-connection", method: "POST", jsonBody: ["kind": kind, "baseUrl": baseUrl, "model": model]),
+                as: PanelVoiceEndpointTest.self, completion: completion)
+    }
+
+    /// Test mic and speaker, endpoint half: synthesize one
+    /// test sentence with the form's current TTS values and
+    /// return the audio for playback.
+    func testVoiceSpeech(baseUrl: String, model: String, voice: String, completion: @escaping (Result<PanelVoiceTestSpeech, Error>) -> Void) {
+        perform(request(path: "/api/voice/test-speech", method: "POST", jsonBody: ["baseUrl": baseUrl, "model": model, "voice": voice]),
+                as: PanelVoiceTestSpeech.self, completion: completion)
     }
 
     /// Barge-in: cut the current reply's speech. Speech only —

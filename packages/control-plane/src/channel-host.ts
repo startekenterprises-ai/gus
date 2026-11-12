@@ -117,6 +117,17 @@ export class ChannelHost {
     /** Phase 4: the Shield gate — inbound messages cross it before
      *  they can become runtime work (spec §1.7, choke point 1). */
     private shieldGate?: ShieldGate,
+    /** v0.9.9: the operator's voice Shield-scan switch, read live
+     *  (wired in main.ts to voice.json's shieldScan field, which
+     *  parses defensively and defaults ON). When it reports true,
+     *  a message that arrived on the VOICE adapter skips the
+     *  ingress Shield scan below — and only that: the adapter
+     *  name is checked here, in the host, so no other channel can
+     *  ride the flag, and the secret-guard above, the classifier,
+     *  the Governor's caps, and every action-side rule are
+     *  untouched. Every skip is logged and stamped onto the job's
+     *  delivery stats, so the turn record names it. */
+    private voiceShieldScanOff?: () => boolean,
   ) {}
 
   attachComm(comm: CommServer): void {
@@ -498,7 +509,30 @@ export class ChannelHost {
     // they are control-plane directives, not agent input, and are
     // handled above. A blocked message settles its job failed-loudly
     // WITH the Shield receipt; the runtime never sees the text.
-    if (this.shieldGate) {
+    // v0.9.9: the operator's voice-only scan skip. Checked HERE,
+    // against the adapter this message actually arrived on, so
+    // the flag in voice.json can only ever affect voice turns —
+    // a Telegram or panel message takes the scan below regardless
+    // of what the voice setting says.
+    const scanSkippedByOperator =
+      adapterName === "voice" && this.voiceShieldScanOff?.() === true;
+    if (this.shieldGate && scanSkippedByOperator) {
+      // No scan ran: shieldMs stays the 0 the ledger opened with,
+      // and the skip itself is stamped on the stats (so the voice
+      // turn record can name it) and in events.jsonl (so the
+      // operator's record has no silent gap where a scan would
+      // have been). The job proceeds — that is the point of the
+      // switch — under every other rule, caps included.
+      const stats = this.stageStats.get(job.id);
+      if (stats) stats.shieldSkipped = true;
+      this.logEvent("events.jsonl", {
+        ts: Date.now(),
+        kind: "shield_scan_skipped_voice",
+        jobId: job.id,
+        detail:
+          "scan-skipped-by-operator: the Settings → Voice Shield scan switch is off; this spoken turn became a job without the ingress Shield scan.",
+      });
+    } else if (this.shieldGate) {
       // v0.9.8: the scan is TIMED, never changed — the ingress
       // scan stays exactly as mandatory as it is for typed text;
       // only its duration joins the job's stage record.

@@ -49,14 +49,65 @@ export async function probeEndpoint(
   baseUrl: string,
   timeoutMs: number = 2_500,
 ): Promise<boolean> {
+  const detailed = await probeEndpointDetailed(fetchFn, baseUrl, undefined, timeoutMs);
+  return detailed.reachable;
+}
+
+/** v0.9.9: the probe's full answer, for Settings → Voice's Test
+ *  Connection buttons — the same GET {base}/models the call-start
+ *  probe makes, but reported instead of collapsed to a boolean:
+ *  whether the endpoint answered, how long the round trip took,
+ *  which models it lists (the OpenAI shape: { data: [{ id }] }),
+ *  and whether the operator's configured model is among them.
+ *  Never throws, for the same reason the boolean probe doesn't:
+ *  "unreachable" is an answer, not an exception. modelPresent is
+ *  null when no model was asked about, or when the endpoint
+ *  answered without a readable model list — reachable but
+ *  unverifiable is stated as exactly that, never rounded up to
+ *  "model found". The clock is injectable so tests can pin the
+ *  latency arithmetic instead of sleeping. */
+export interface EndpointProbeResult {
+  reachable: boolean;
+  latencyMs: number;
+  models: string[];
+  modelPresent: boolean | null;
+}
+
+export async function probeEndpointDetailed(
+  fetchFn: FetchFn,
+  baseUrl: string,
+  model?: string,
+  timeoutMs: number = 5_000,
+  now: () => number = Date.now,
+): Promise<EndpointProbeResult> {
+  const startedAt = now();
   try {
     const res = await fetchFn(`${baseUrl}/models`, {
       method: "GET",
       signal: AbortSignal.timeout(timeoutMs),
     });
-    return res.ok;
+    const latencyMs = Math.max(0, now() - startedAt);
+    if (!res.ok) return { reachable: false, latencyMs, models: [], modelPresent: null };
+    let models: string[] = [];
+    let listReadable = false;
+    try {
+      const body = (await res.json()) as { data?: unknown };
+      if (Array.isArray(body?.data)) {
+        listReadable = true;
+        models = body.data
+          .map((m) => (m as { id?: unknown })?.id)
+          .filter((id): id is string => typeof id === "string");
+      }
+    } catch { /* answered, but not in the OpenAI shape — listReadable stays false */ }
+    return {
+      reachable: true,
+      latencyMs,
+      models,
+      modelPresent:
+        model === undefined || !listReadable ? null : models.includes(model),
+    };
   } catch {
-    return false;
+    return { reachable: false, latencyMs: Math.max(0, now() - startedAt), models: [], modelPresent: null };
   }
 }
 

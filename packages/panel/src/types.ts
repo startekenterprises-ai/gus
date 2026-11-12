@@ -199,6 +199,41 @@ export interface PanelVoiceSettingsData {
    *  the control plane preserves the stored value on a save
    *  that doesn't mention it. */
   bargeIn?: boolean;
+  /** v0.9.9: the voice Shield-scan switch. ON (default): spoken
+   *  turns cross the Agent-Shield ingress scan before becoming
+   *  jobs. OFF: the voice channel's ingress scan is skipped
+   *  (scan-skipped-by-operator, recorded per turn); every other
+   *  channel and rule is unaffected. Optional on the wire, same
+   *  preserve-on-omit rule as bargeIn. */
+  shieldScan?: boolean;
+}
+
+/** v0.9.9: the answer to a Settings → Voice Test Connection
+ *  press — the detailed endpoint probe (GET {base}/models on
+ *  the CURRENT form values, unsaved), reported in full: whether
+ *  the endpoint answered, the round-trip time, the models it
+ *  lists, and whether the configured model is among them (null
+ *  when the endpoint answered without a readable list — stated
+ *  as unverifiable, never rounded up). `detail` is the same
+ *  answer in one plain sentence for the pane to show. */
+export interface PanelVoiceEndpointTestData {
+  ok: boolean;
+  reachable: boolean;
+  latencyMs: number;
+  models: string[];
+  modelPresent: boolean | null;
+  detail: string;
+}
+
+/** v0.9.9: the endpoint half of Test mic and speaker — one short
+ *  test sentence synthesized by the CURRENT form's TTS endpoint
+ *  values (unsaved), returned as playable audio. On failure ok
+ *  is false and the detail names the service and the reason. */
+export interface PanelVoiceTestSpeechData {
+  ok: boolean;
+  detail: string;
+  audioBase64?: string;
+  audioContentType?: string;
 }
 
 /** v0.9: one push-to-talk exchange. Audio crosses as base64 inside
@@ -232,6 +267,10 @@ export interface PanelVoiceTurnLatencyData {
   queueMs?: number;
   jobMs: number;
   shieldMs?: number;
+  /** v0.9.9: the ingress Shield scan was skipped for this turn
+   *  at the operator's switch (scan-skipped-by-operator);
+   *  shieldMs is 0 and this flag is what says why. */
+  shieldSkipped?: boolean;
   modelMs?: number;
   hops?: number;
   ttsFirstMs?: number;
@@ -449,6 +488,19 @@ export interface PanelBackend {
    *  default, and only a literal true enables the channel). Live
    *  on the next call; no restart. */
   setVoiceSettings(settings: PanelVoiceSettingsData): Promise<PanelActionResult>;
+  /** v0.9.9: Test Connection (Settings → Voice) — probe an
+   *  endpoint described by the CURRENT form values (base URL +
+   *  model), unsaved and unstored: GET {base}/models, reported
+   *  with latency + model presence. Optional on the backend
+   *  (the stageUpdate pattern): a backend that doesn't wire it
+   *  gets the server's plain "not wired" answer, never a fake
+   *  success. */
+  voiceTestConnection?(kind: "stt" | "tts", baseUrl: string, model: string): Promise<PanelVoiceEndpointTestData>;
+  /** v0.9.9: the endpoint half of Test mic and speaker —
+   *  synthesize ONE short test sentence with the current form's
+   *  TTS values (unsaved) and return the audio for playback.
+   *  Optional on the backend, same rule as above. */
+  voiceTestSpeech?(baseUrl: string, model: string, voice: string): Promise<PanelVoiceTestSpeechData>;
   /** v0.9: one push-to-talk exchange. The audio becomes a
    *  transcript, the transcript becomes a NORMAL job through the
    *  channel pipeline (the voice channel adapter — secret-guard,

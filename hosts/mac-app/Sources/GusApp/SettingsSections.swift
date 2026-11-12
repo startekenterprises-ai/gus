@@ -336,12 +336,18 @@ struct SettingsVoiceView: View {
                                 : "Off",
                             help: model.help("voice-call"))
             }
-            Text("Talk to GUS from the chat window's Call button — a live call, not a recording: the microphone is open only while the call is, a pause ends your turn, and the reply is spoken sentence by sentence as it's made. Your words are transcribed on your own machine — by the app's built-in speech, or by a speech service you run — then treated exactly like a typed message — same secret-guard, Shield scan, caps, and receipts. If endpoint speech fails, you get the reply as text with the reason stated.")
+            Text("Talk to GUS from the chat window's Call button — a live call, not a recording: the microphone is open only while the call is, a pause ends your turn, and the reply is spoken sentence by sentence as it's made. Your words are transcribed on your own machine — by the app's built-in speech, or by a speech service you run — then treated exactly like a typed message — same secret-guard, caps, and receipts, and the same Shield scan unless you switch it off for voice below. If endpoint speech fails, you get the reply as text with the reason stated.")
                 .font(.callout)
                 .foregroundColor(.secondary)
             Toggle("Enable voice calls", isOn: $model.voiceEnabled)
             Toggle("Interrupt GUS when I talk over it (barge-in)", isOn: $model.voiceBargeIn)
             Text("Barge-in cuts the spoken reply off when you start talking over it. It stops the talking only — never a running job, never an approval.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Toggle("Shield-scan my spoken requests (Agent-Shield)", isOn: $model.voiceShieldScan)
+            Text(model.voiceShieldScan
+                 ? "On: what you say is scanned by Agent-Shield before it becomes a job — safer, and it adds seconds to each turn. Typed messages are always scanned either way."
+                 : "Off: spoken turns become jobs WITHOUT the injection scan — faster, and meant for testing and troubleshooting. Nothing checks your spoken words before they reach the agent. Typed messages are still scanned, and caps, approvals, and receipts still apply. Every skipped turn is recorded as scan-skipped-by-operator.")
                 .font(.caption)
                 .foregroundColor(.secondary)
             Picker("Transcription (STT)", selection: $model.voiceSttEngine) {
@@ -374,6 +380,16 @@ struct SettingsVoiceView: View {
                         .textFieldStyle(.roundedBorder)
                         .frame(maxWidth: 240)
                 }
+                HStack {
+                    Button("Test connection") {
+                        model.testVoiceConnection(kind: "stt")
+                    }
+                    if let r = model.voiceSttTestResult {
+                        Text(r)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
                 Text("Speech — synthesis (TTS)")
                     .font(.headline)
                 HStack {
@@ -397,6 +413,52 @@ struct SettingsVoiceView: View {
                         .textFieldStyle(.roundedBorder)
                         .frame(maxWidth: 240)
                 }
+                HStack {
+                    Button("Test connection") {
+                        model.testVoiceConnection(kind: "tts")
+                    }
+                    if let r = model.voiceTtsTestResult {
+                        Text(r)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            Text("Test connection checks the values in the form right now — no need to save first, and nothing is saved or changed by testing.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Divider()
+            Text("Test mic and speaker")
+                .font(.headline)
+            Text("One short check: the microphone level moves while you talk, a test sentence plays through the speech engine selected above, and — when transcription is Built-in — you say a short phrase and see what the recognizer heard, with a speed verdict for this Mac. Nothing is recorded and nothing is sent to GUS.")
+                .font(.callout)
+                .foregroundColor(.secondary)
+            HStack {
+                Button(model.voiceTestRunning ? "Stop the test" : "Test mic and speaker") {
+                    model.toggleVoiceTest()
+                }
+                .buttonStyle(.borderedProminent)
+                if model.voiceTestRunning {
+                    ProgressView(value: model.voiceTestMicLevel)
+                        .frame(maxWidth: 220)
+                    Text("mic level")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            if let r = model.voiceTestSpeakerResult {
+                Text(r)
+                    .font(.callout)
+                    .foregroundColor(.secondary)
+            }
+            if let heard = model.voiceTestHeard {
+                Text("Heard: “\(heard)”")
+                    .font(.callout)
+            }
+            if let verdict = model.voiceTestVerdict {
+                Text(verdict)
+                    .font(.callout)
+                    .foregroundColor(.secondary)
             }
             Button("Save voice settings") {
                 model.saveVoice()

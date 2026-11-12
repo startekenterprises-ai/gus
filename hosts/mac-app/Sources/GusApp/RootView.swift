@@ -44,15 +44,14 @@ struct RootView: View {
     }
 }
 
-/// The window's top bar: the conversation title, plus the Call and
-/// Invite buttons the layout target has. Invite is still a DISABLED
-/// placeholder with its explanation. Call is the real thing — the
-/// SAME VoiceCallButton the chat composer carries (v0.9.8: through
-/// 0.9.7 this bar kept its Desktop-1 placeholder, disabled with
-/// "voice calls arrive with the Call GUS build" long after that
-/// build shipped, so the header's Call looked permanently greyed
-/// out next to the working one below — one button, one source of
-/// truth, both places).
+/// The window's top bar: the conversation title, plus the Invite
+/// button the layout target has — still a DISABLED placeholder
+/// with its explanation. There is NO Call button here anymore
+/// (v0.9.9): v0.9.8 wired this bar's Call to the same
+/// VoiceCallButton the chat composer carries, and Glenn's field
+/// verdict was that two working Call buttons are more confusing
+/// than the one-dead-one-live pair they replaced. One Call
+/// button, in the composer, is the whole surface.
 struct TopBarView: View {
     @ObservedObject var model: DesktopModel
 
@@ -61,7 +60,6 @@ struct TopBarView: View {
             Text("Chats")
                 .font(.headline)
             Spacer()
-            VoiceCallButton(model: model)
             Button {
             } label: {
                 Label("Invite", systemImage: "person.badge.plus")

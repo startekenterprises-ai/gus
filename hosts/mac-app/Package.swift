@@ -42,7 +42,15 @@
 //     placeholder), and an in-call Mute button stops the
 //     microphone feed whole — no recognizer appends, no chunks
 //     posted, the partial discarded, the strip reading Muted —
-//     until Unmute restarts listening).
+//     until Unmute restarts listening); v0.9.9: voice you can
+//     test — ONE Call button (the top bar's duplicate is gone),
+//     Mute made large and labeled in the in-call strip,
+//     Settings → Voice gains Test Connection buttons (the form's
+//     unsaved values, probed via the control plane), a Test mic
+//     and speaker check (live mic level, a test sentence through
+//     the selected engine, and a built-in dictation trial with
+//     a measured speed verdict for this Mac), and the
+//     Shield-scan switch for spoken turns.
 //     It launches GusMacHost from inside the bundle (so
 //     Accessibility / Screen Recording grants attach to
 //     GUS.app), shows status, starts/stops the launchd agents, and

@@ -218,7 +218,49 @@ export class PanelServer {
         ttsModel: typeof body.ttsModel === "string" ? body.ttsModel : "",
         ttsVoice: typeof body.ttsVoice === "string" ? body.ttsVoice : "",
         bargeIn: typeof body.bargeIn === "boolean" ? body.bargeIn : undefined,
+        shieldScan: typeof body.shieldScan === "boolean" ? body.shieldScan : undefined,
       });
+      return json(result.ok ? 200 : 400, result);
+    }
+    // v0.9.9: Test Connection — probe the endpoint the form is
+    // showing RIGHT NOW (unsaved values in the body; nothing is
+    // read from or written to voice.json). The probe's answer
+    // (reachable, latency, model presence) is the result; ok
+    // mirrors reachable so the pane can color it honestly.
+    if (method === "POST" && path === "/api/voice/test-connection") {
+      const body = await this.readJson(req);
+      if (!this.backend.voiceTestConnection) {
+        return json(501, {
+          ok: false,
+          reachable: false,
+          latencyMs: 0,
+          models: [],
+          modelPresent: null,
+          detail: "Connection testing isn't wired in this deployment. Nothing was tested.",
+        });
+      }
+      const result = await this.backend.voiceTestConnection(
+        body.kind === "tts" ? "tts" : "stt",
+        typeof body.baseUrl === "string" ? body.baseUrl : "",
+        typeof body.model === "string" ? body.model : "",
+      );
+      return json(200, result);
+    }
+    // v0.9.9: Test mic and speaker, endpoint half — synthesize
+    // one test sentence with the form's current TTS values.
+    if (method === "POST" && path === "/api/voice/test-speech") {
+      const body = await this.readJson(req);
+      if (!this.backend.voiceTestSpeech) {
+        return json(501, {
+          ok: false,
+          detail: "Speaker testing isn't wired in this deployment. Nothing was synthesized.",
+        });
+      }
+      const result = await this.backend.voiceTestSpeech(
+        typeof body.baseUrl === "string" ? body.baseUrl : "",
+        typeof body.model === "string" ? body.model : "",
+        typeof body.voice === "string" ? body.voice : "",
+      );
       return json(result.ok ? 200 : 400, result);
     }
     if (method === "POST" && path === "/api/voice/call") {

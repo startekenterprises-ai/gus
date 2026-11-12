@@ -70,6 +70,9 @@ import {
   VoiceCallService,
   VoiceSessionService,
   loadVoiceConfig,
+  probeEndpointDetailed,
+  synthesize,
+  SpeechServiceError,
   voiceConfigured,
   writeVoiceConfig,
   type VoiceSessionStateData,
@@ -253,7 +256,20 @@ const voiceService = new VoiceCallService(stateDir, voiceAdapter, voiceApprovals
 // latency — all inside the voice package; this file only wires.
 const voiceSessions = new VoiceSessionService(stateDir, voiceAdapter, voiceApprovals);
 const watchFrames = new WatchFrameSource(macHost);
-const host = new ChannelHost(stateDir, governor, jobs, [adapter, bridge, panelChat, voiceAdapter], approvals, shieldGate);
+// v0.9.9: the host also gets the voice Shield-scan switch,
+// read live from voice.json on every voice job — off means the
+// host skips the ingress scan for voice turns only
+// (scan-skipped-by-operator, stamped on the turn record); the
+// config's defensive parse defaults it ON.
+const host = new ChannelHost(
+  stateDir,
+  governor,
+  jobs,
+  [adapter, bridge, panelChat, voiceAdapter],
+  approvals,
+  shieldGate,
+  () => loadVoiceConfig(stateDir).shieldScan === false,
+);
 approvals.onExpire = (req) => host.handleApprovalExpired(req);
 const comm = new CommServer(socketPath, governor, jobs, {
   onRuntimeHello: () => host.onRuntimeHello(),
@@ -733,6 +749,10 @@ const panelBackend: PanelBackend = {
         // v0.9.1: a save that doesn't mention barge-in keeps the
         // value on file rather than resetting it to the default.
         bargeIn: typeof s.bargeIn === "boolean" ? s.bargeIn : loadVoiceConfig(stateDir).bargeIn,
+        // v0.9.9: same preserve-on-omit rule for the Shield-scan
+        // switch — a surface that doesn't send it must not
+        // silently re-enable (or disable) the scan.
+        shieldScan: typeof s.shieldScan === "boolean" ? s.shieldScan : loadVoiceConfig(stateDir).shieldScan,
       },
       "panel",
     );
@@ -745,12 +765,105 @@ const panelBackend: PanelBackend = {
       saved.ttsEngine === "local"
         ? "speech: built into the app"
         : `speech: ${saved.ttsModel} (${saved.ttsVoice}) at ${saved.ttsBaseUrl}`;
+    // v0.9.9: the scan sentence follows the switch — the save
+    // confirmation must not claim a scan the operator just
+    // turned off, and must say plainly what off means.
+    const scanNote = saved.shieldScan
+      ? "Spoken transcripts are Shield-scanned, capped, and receipted like typed messages"
+      : "Voice Shield scan is OFF: spoken turns become jobs WITHOUT the ingress scan (each skip is recorded in voice-turns.jsonl); caps, approvals, and receipts still apply";
     return {
       ok: true,
       detail: saved.enabled
-        ? `Voice is ON — ${ears}; ${mouth}. Live on the next call. Transcripts are scanned, capped, and receipted like typed messages; approvals by voice need an exact "confirm" or "yes, do it".`
+        ? `Voice is ON — ${ears}; ${mouth}. Live on the next call. ${scanNote}; approvals by voice need an exact "confirm" or "yes, do it".`
         : "Voice is OFF — the call endpoint will refuse until you enable it here. Settings saved.",
     };
+  },
+  // v0.9.9: Test Connection — the detailed probe against the
+  // values the Settings form is showing, unsaved. Nothing is
+  // read from voice.json and nothing is written: the form's
+  // URL + model in, the probe's full answer out, with the
+  // one-sentence version composed here in plain language.
+  voiceTestConnection: async (kind, baseUrl, model) => {
+    const url = baseUrl.trim().replace(/\/+$/, "");
+    if (!/^https?:\/\/\S+$/.test(url)) {
+      return {
+        ok: false,
+        reachable: false,
+        latencyMs: 0,
+        models: [],
+        modelPresent: null,
+        detail: `That doesn't look like an endpoint URL — nothing was tested. Endpoints look like http://127.0.0.1:8000/v1.`,
+      };
+    }
+    const probe = await probeEndpointDetailed(fetch, url, model.trim() || undefined, 5_000);
+    const what = kind === "tts" ? "speech (TTS)" : "transcription (STT)";
+    if (!probe.reachable) {
+      return {
+        ok: false,
+        reachable: false,
+        latencyMs: probe.latencyMs,
+        models: [],
+        modelPresent: null,
+        detail: `Not reachable — the ${what} endpoint at ${url} didn't answer within 5 seconds. Check the service is running and the URL is right; nothing was saved or changed.`,
+      };
+    }
+    if (probe.modelPresent === true) {
+      return {
+        ok: true,
+        reachable: true,
+        latencyMs: probe.latencyMs,
+        models: probe.models,
+        modelPresent: true,
+        detail: `Reachable in ${probe.latencyMs} ms — and "${model.trim()}" is in its model list. This ${what} endpoint should work.`,
+      };
+    }
+    if (probe.modelPresent === false) {
+      const listed = probe.models.length > 0 ? probe.models.slice(0, 8).join(", ") : "(none)";
+      return {
+        ok: true,
+        reachable: true,
+        latencyMs: probe.latencyMs,
+        models: probe.models,
+        modelPresent: false,
+        detail: `Reachable in ${probe.latencyMs} ms, but "${model.trim()}" is NOT in its model list — it offers: ${listed}. Fix the model name before you save.`,
+      };
+    }
+    return {
+      ok: true,
+      reachable: true,
+      latencyMs: probe.latencyMs,
+      models: probe.models,
+      modelPresent: null,
+      detail: `Reachable in ${probe.latencyMs} ms. It answered, but not with a readable model list, so the model name couldn't be checked — the endpoint is up; the model is unverified.`,
+    };
+  },
+  // v0.9.9: Test mic and speaker, endpoint half — synthesize
+  // the test sentence with the form's current (unsaved) TTS
+  // values and hand the audio back for playback. A failure is
+  // the service's own error text, never a silent no-op.
+  voiceTestSpeech: async (baseUrl, model, voice) => {
+    const url = baseUrl.trim().replace(/\/+$/, "");
+    if (!/^https?:\/\/\S+$/.test(url)) {
+      return { ok: false, detail: "That doesn't look like an endpoint URL — nothing was synthesized." };
+    }
+    try {
+      const { audio, contentType } = await synthesize(
+        fetch,
+        { baseUrl: url, model: model.trim() || "kokoro", voice: voice.trim() || "af_heart" },
+        "This is the GUS speaker test. If you can hear me, your speech endpoint works.",
+      );
+      return {
+        ok: true,
+        detail: "Synthesized by the endpoint — playing it now.",
+        audioBase64: Buffer.from(audio).toString("base64"),
+        audioContentType: contentType,
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        detail: e instanceof SpeechServiceError ? e.message : `Speech synthesis failed: ${String(e)}`,
+      };
+    }
   },
   voiceCall: async (audio, contentType) => {
     const result = await voiceService.handleAudio(audio, contentType);

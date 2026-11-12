@@ -64,6 +64,20 @@ export interface VoiceConfig {
    *  failure for a mis-typed value is the shipped behavior, not
    *  a silently different call. */
   bargeIn: boolean;
+  /** v0.9.9: the operator's Shield-scan switch for SPOKEN turns
+   *  only. ON (the default, and the failure direction for any
+   *  malformed value): a voice transcript crosses the Agent-Shield
+   *  ingress scan before it can become a job, exactly like typed
+   *  text. OFF: the ChannelHost skips ONLY the voice channel's
+   *  ingress scan — the words become a job unscanned, which is
+   *  faster and is the troubleshooting position Glenn asked for.
+   *  Nothing else moves: the ingress secret-guard still screens
+   *  the words, Telegram/panel messages are still scanned, and
+   *  the Governor's caps, approvals, and vault rules for ACTIONS
+   *  are untouched. Every skipped turn is recorded as
+   *  scan-skipped-by-operator in voice-turns.jsonl — the record
+   *  never has a silent gap where a scan should be. */
+  shieldScan: boolean;
 }
 
 export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
@@ -76,6 +90,7 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
   ttsModel: "kokoro",
   ttsVoice: "af_heart",
   bargeIn: true,
+  shieldScan: true,
 };
 
 const CONFIG_FILE = "voice.json";
@@ -109,6 +124,10 @@ export function parseVoiceConfig(raw: unknown): VoiceConfig {
     ttsModel: textOr(r.ttsModel, DEFAULT_VOICE_CONFIG.ttsModel),
     ttsVoice: textOr(r.ttsVoice, DEFAULT_VOICE_CONFIG.ttsVoice),
     bargeIn: r.bargeIn === false ? false : true,
+    // v0.9.9: only a literal `false` turns the voice Shield scan
+    // off — the same defensive shape as bargeIn, because the safe
+    // failure for a mis-typed value is the scanned behavior.
+    shieldScan: r.shieldScan === false ? false : true,
   };
 }
 

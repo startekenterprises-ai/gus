@@ -99,6 +99,18 @@
  * filler is a segment, never a turn: no transcript, no record,
  * barge-in drops it like any unfetched speech.
  *
+ * Voice you can test (v0.9.9): the 0.9.8 field call's staging
+ * named the Shield scan as the biggest single chunk of a voice
+ * turn's wait (6–10 s of a 10–19 s reply), and the operator
+ * asked for a switch. Config now carries shieldScan (default
+ * ON, only a literal false turns it off): when off, the
+ * ChannelHost skips the ingress scan for VOICE turns only, and
+ * the skip rides the job's delivery stats back here, where the
+ * turn records it three ways — the scanSkippedByOperator flag
+ * on the turn record, shieldMs 0 with shieldSkipped on the
+ * latency, and the words in the detail. Nothing else about the
+ * turn changes: same secret-guard, same caps, same receipts.
+ *
  * The microphone's liveness is the app's side of the contract:
  * this service only ever sees audio the app chose to stream, and
  * only while a session the operator started is active. There is
@@ -161,6 +173,12 @@ export interface VoiceTurnLatency {
   /** v0.9.8: how many model calls the job made (issued or
    *  provider-refused), counted by the control plane. */
   hops?: number;
+  /** v0.9.9: the operator's Shield-scan switch was OFF for this
+   *  turn, so the ChannelHost skipped the ingress scan on
+   *  purpose (scan-skipped-by-operator). shieldMs is 0 then —
+   *  this flag is what keeps that 0 from reading as "scanned,
+   *  fast". Absent on every scanned turn. */
+  shieldSkipped?: boolean;
   /** Reply in hand → first sentence's audio ready to play. */
   ttsFirstMs?: number;
   /** Utterance end → first audio (or → turn settled, if the
@@ -186,6 +204,12 @@ export interface VoiceSessionTurn {
   /** The operator talked over this reply and its speech was
    *  cut — the job behind it was NOT cancelled. */
   interrupted: boolean;
+  /** v0.9.9: this turn's job ran with the ingress Shield scan
+   *  skipped at the operator's Settings → Voice switch
+   *  (scan-skipped-by-operator). Recorded on the turn and in
+   *  voice-turns.jsonl — a skipped scan is a stated fact about
+   *  the turn, never a silent gap in its record. */
+  scanSkippedByOperator?: boolean;
   latency?: VoiceTurnLatency;
 }
 
@@ -946,10 +970,16 @@ export class VoiceSessionService {
     }
     const jobMs = this.now() - jobStart;
     turn.kind = result.kind;
+    // v0.9.9: a scan the operator switched off is stated on the
+    // turn, in words — the stock detail ("Heard, scanned, and
+    // answered…") must not claim a scan that never ran.
+    const scanSkipped = result.stats?.shieldSkipped === true;
+    if (scanSkipped) turn.scanSkippedByOperator = true;
     turn.detail =
-      turn.via === "local"
-        ? `${result.detail} (Built-in transcription on this Mac.)`
-        : result.detail;
+      (scanSkipped
+        ? `${result.detail} Shield scan skipped for this turn — scan-skipped-by-operator (the Settings → Voice switch is off).`
+        : result.detail) +
+      (turn.via === "local" ? " (Built-in transcription on this Mac.)" : "");
     turn.replyText = result.replyText;
     const latency: VoiceTurnLatency = {
       utteranceEndAt,
@@ -960,7 +990,12 @@ export class VoiceSessionService {
       queueMs: Math.max(0, turn.startedAt - utteranceEndAt),
       jobMs,
       ...(result.stats
-        ? { shieldMs: result.stats.shieldMs, modelMs: result.stats.modelMs, hops: result.stats.hops }
+        ? {
+            shieldMs: result.stats.shieldMs,
+            modelMs: result.stats.modelMs,
+            hops: result.stats.hops,
+            ...(result.stats.shieldSkipped ? { shieldSkipped: true } : {}),
+          }
         : {}),
       totalMs: this.now() - utteranceEndAt,
     };
@@ -1082,6 +1117,9 @@ export class VoiceSessionService {
         stt?: VoiceEngine;
         kind: string;
         detail: string;
+        /** v0.9.9: present (and true) only when the operator's
+         *  switch skipped this turn's ingress Shield scan. */
+        scanSkippedByOperator?: boolean;
         latency?: VoiceTurnLatency;
       } = {
         ts: this.now(),
@@ -1090,6 +1128,7 @@ export class VoiceSessionService {
         ...(turn.via !== undefined ? { stt: turn.via } : {}),
         kind: turn.kind,
         detail: turn.detail,
+        ...(turn.scanSkippedByOperator ? { scanSkippedByOperator: true } : {}),
         ...(turn.latency !== undefined ? { latency: turn.latency } : {}),
       };
       appendFileSync(join(this.stateDir, "voice-turns.jsonl"), JSON.stringify(rec) + "\n");

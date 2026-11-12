@@ -44,6 +44,7 @@ import {
   VOICE_FILLER_TEXT,
   VOICE_GREETING_TEXT,
   chunkRms,
+  loadVoiceConfig,
   normalizePcm16Gain,
   splitSentences,
   writeVoiceConfig,
@@ -389,6 +390,7 @@ async function sessionRig(opts?: {
   ttsEngine?: "local" | "endpoint";
   enableVoice?: boolean;
   bargeIn?: boolean;
+  shieldScan?: boolean;
   idleTimeoutMs?: number;
   maxSessionMs?: number;
   fillerDelayMs?: number;
@@ -410,6 +412,7 @@ async function sessionRig(opts?: {
         ttsModel: "kokoro",
         ttsVoice: "af_heart",
         bargeIn: opts?.bargeIn !== false,
+        shieldScan: opts?.shieldScan !== false,
       },
       "test",
     );
@@ -419,7 +422,17 @@ async function sessionRig(opts?: {
   const approvals = new ApprovalEngine(dir, () => 120_000);
   const telegram = new RecordingAdapter();
   const voice = new VoiceAdapter();
-  const host = new ChannelHost(dir, governor, jobs, [telegram, voice], approvals, opts?.shieldGate as never);
+  const host = new ChannelHost(
+    dir,
+    governor,
+    jobs,
+    [telegram, voice],
+    approvals,
+    opts?.shieldGate as never,
+    // v0.9.9: the same live read main.ts wires — voice.json's
+    // shieldScan field, parsed defensively (default on).
+    () => loadVoiceConfig(dir).shieldScan === false,
+  );
   const pushed: { jobId: string; text: string }[] = [];
   const executed: string[] = [];
   host.attachComm({
@@ -1460,5 +1473,76 @@ test("filler (v0.9.8): barge-in drops an unfetched filler like any other speech"
     "After the bark.",
     "the dropped filler is never fetched — the reply is the next speech",
   );
+  r.sessions.end(id);
+});
+
+// ---------------------------------------------------------------- v0.9.9: the voice Shield-scan switch
+
+/** A gate that counts its ingress scans and lets everything
+ *  through — the scan-skip tests' witness: with the switch on
+ *  it must be called; with it off it must NOT be, and the turn
+ *  must still land, recorded as skipped. */
+function countingGate(calls: { n: number }): unknown {
+  return {
+    scanSurface: async () => {
+      calls.n++;
+      return { action: "allow", scanned: true, detail: "test verdict: clean" };
+    },
+  };
+}
+
+test("scan skip (v0.9.9): shieldScan OFF — a spoken turn is not scanned, and the skip is on the record", async () => {
+  const calls = { n: 0 };
+  const r = await sessionRig({
+    shieldGate: countingGate(calls),
+    shieldScan: false,
+    transcripts: ["hello gus"],
+  });
+  const id = await startCall(r);
+  say(r, id);
+  await driveJob(r, "Heard you, unscanned.");
+  await r.sessions.drain();
+
+  assert.equal(calls.n, 0, "the gate was never called for the voice turn");
+  assert.equal(r.pushed.length, 1, "the turn still became a job — off skips the scan, not the pipeline");
+  const turn = r.sessions.state(id).turns[0];
+  assert.equal(turn.scanSkippedByOperator, true, "the turn names the skip");
+  assert.match(turn.detail, /scan-skipped-by-operator/);
+  assert.equal(turn.latency?.shieldMs, 0, "shieldMs is 0 — no scan ran");
+  assert.equal(turn.latency?.shieldSkipped, true, "and the latency says why the 0 is honest");
+
+  const lines = readFileSync(join(r.dir, "voice-turns.jsonl"), "utf8").trim().split("\n");
+  const rec = JSON.parse(lines[lines.length - 1]) as {
+    scanSkippedByOperator?: boolean;
+    detail: string;
+    latency?: { shieldMs?: number; shieldSkipped?: boolean };
+  };
+  assert.equal(rec.scanSkippedByOperator, true, "voice-turns.jsonl carries the flag");
+  assert.match(rec.detail, /scan-skipped-by-operator/, "and the words");
+  assert.equal(rec.latency?.shieldMs, 0);
+  assert.equal(rec.latency?.shieldSkipped, true);
+
+  const events = readFileSync(join(r.dir, "events.jsonl"), "utf8");
+  assert.match(events, /shield_scan_skipped_voice/, "the host logged the skip — no silent gap");
+  r.sessions.end(id);
+});
+
+test("scan skip (v0.9.9): shieldScan ON (the default) — the same turn IS scanned", async () => {
+  const calls = { n: 0 };
+  const r = await sessionRig({
+    shieldGate: countingGate(calls),
+    transcripts: ["hello gus"],
+  });
+  const id = await startCall(r);
+  say(r, id);
+  await driveJob(r, "Heard you, scanned.");
+  await r.sessions.drain();
+
+  assert.ok(calls.n >= 1, "the gate scanned the voice turn");
+  const turn = r.sessions.state(id).turns[0];
+  assert.equal(turn.scanSkippedByOperator, undefined, "a scanned turn carries no skip flag");
+  const lines = readFileSync(join(r.dir, "voice-turns.jsonl"), "utf8").trim().split("\n");
+  const rec = JSON.parse(lines[lines.length - 1]) as { scanSkippedByOperator?: boolean };
+  assert.equal(rec.scanSkippedByOperator, undefined, "and neither does its durable record");
   r.sessions.end(id);
 });
