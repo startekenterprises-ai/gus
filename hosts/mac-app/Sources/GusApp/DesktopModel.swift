@@ -55,6 +55,17 @@ final class DesktopModel: ObservableObject {
     /// The last turn's measured stages, for the in-call strip:
     /// the local-vs-cloud speech evidence, in the open.
     @Published var voiceLatencyLine: String?
+    /// v0.9.2: the in-call strip's hearing line — the server's
+    /// ledger (what the session's VAD is receiving) next to the
+    /// app's own latest mic level. The gap between the two IS
+    /// the diagnosis when a call won't take a turn: mic moving
+    /// + heard flat means the audio dies between here and the
+    /// segmenter; both flat means the microphone itself.
+    @Published var voiceHearingLine: String?
+    /// The app's own latest shipped chunk's energy (the same
+    /// PCM the tick posts), on the int16 scale like the
+    /// server's numbers, so the two compare directly.
+    private var voiceMicLevel = 0
     private var voiceSessionId: String?
     private var voiceBargeIn = true
     private var voiceLastSeq = 0
@@ -69,6 +80,20 @@ final class DesktopModel: ObservableObject {
     private var voiceChunkTimer: Timer?
     private var voicePollTimer: Timer?
     private var voiceLoudStreak = 0
+    // Capture health (v0.9.2): frames the converter actually
+    // produced vs buffers it dropped (error / zero frames),
+    // counted on the audio thread under the stash lock and read
+    // by the health check on the main thread. The 0.9.1 capture
+    // dropped silently by design, so a converter that produced
+    // nothing presented as a call that listened forever; now a
+    // call whose capture yields no frames within 2 s restarts
+    // once without voice processing, and a call that STILL
+    // yields nothing ends with the reason on the notice instead
+    // of listening forever.
+    private var voiceConvertedFrames = 0
+    private var voiceDroppedBuffers = 0
+    private var voiceCaptureRestarted = false
+    private var voiceHealthTimer: Timer?
     // Playback: a queue of sentence segments through one player,
     // advanced by the chunk timer (no delegate — the timer asks
     // isPlaying, which is all the chaining needs).
@@ -177,6 +202,9 @@ final class DesktopModel: ObservableObject {
                             self.voiceLastSeq = 0
                             self.voicePlayQueue = []
                             self.voiceLatencyLine = nil
+                            self.voiceHearingLine = nil
+                            self.voiceMicLevel = 0
+                            self.voiceCaptureRestarted = false
                             self.voiceInCall = true
                             self.notice = session.detail
                             self.beginVoiceCapture()
@@ -205,15 +233,19 @@ final class DesktopModel: ObservableObject {
         notice = "Call ended."
     }
 
-    private func beginVoiceCapture() {
+    private func beginVoiceCapture(voiceProcessing: Bool = true) {
         let engine = AVAudioEngine()
         let input = engine.inputNode
         // Voice processing (echo cancellation + gain control)
         // where the hardware offers it: GUS's own spoken reply
         // stays out of the microphone, which is what keeps the
         // barge-in energy check honest. If it's refused, the
-        // plain input still carries the call.
-        try? input.setVoiceProcessingEnabled(true)
+        // plain input still carries the call. (v0.9.2: the
+        // capture health check below restarts WITHOUT it when
+        // it yields no convertible audio on this microphone.)
+        if voiceProcessing {
+            try? input.setVoiceProcessingEnabled(true)
+        }
         let format = input.outputFormat(forBus: 0)
         guard let converter = AVAudioConverter(from: format, to: voiceTargetFormat) else {
             notice = "This Mac's microphone format can't be converted for the call — nothing is being recorded."
@@ -228,10 +260,61 @@ final class DesktopModel: ObservableObject {
         do {
             try engine.start()
             voiceEngine = engine
+            // A fresh capture starts with a clean health slate,
+            // and the check runs 2 s in: frames by then, or the
+            // self-heal (once) / honest ending (after that).
+            voiceStashLock.lock()
+            voiceConvertedFrames = 0
+            voiceDroppedBuffers = 0
+            voiceStashLock.unlock()
+            scheduleVoiceHealthCheck()
         } catch {
             notice = "The microphone wouldn't start: \(error.localizedDescription)"
             teardownVoice(sendEnd: true)
         }
+    }
+
+    /// The capture health check (v0.9.2), ~2 s after a capture
+    /// (re)starts: if the converter has produced ZERO frames by
+    /// now, the audio path is dead however healthy the engine
+    /// looks. The first death restarts capture once without
+    /// voice processing (the notice says so); a second death
+    /// ends the call with the reason stated — never a call that
+    /// listens forever in silence.
+    private func scheduleVoiceHealthCheck() {
+        voiceHealthTimer?.invalidate()
+        voiceHealthTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
+            guard let self, self.voiceInCall else { return }
+            self.voiceStashLock.lock()
+            let frames = self.voiceConvertedFrames
+            self.voiceStashLock.unlock()
+            guard frames == 0 else { return }
+            if !self.voiceCaptureRestarted {
+                self.voiceCaptureRestarted = true
+                self.notice = "Voice processing didn't agree with this microphone — restarted the call audio without it."
+                self.stopVoiceCapture()
+                self.beginVoiceCapture(voiceProcessing: false)
+            } else {
+                self.notice = "The microphone produced no usable audio — the call is closed. Check the microphone and try the call again."
+                self.teardownVoice(sendEnd: true)
+            }
+        }
+    }
+
+    /// Stop just the capture (tap, engine, converter, stash) —
+    /// the session stays open. The health restart uses this;
+    /// teardownVoice uses it too, on its way to ending the
+    /// session as well.
+    private func stopVoiceCapture() {
+        voiceHealthTimer?.invalidate()
+        voiceHealthTimer = nil
+        voiceEngine?.inputNode.removeTap(onBus: 0)
+        voiceEngine?.stop()
+        voiceEngine = nil
+        voiceConverter = nil
+        voiceStashLock.lock()
+        voiceStash = Data()
+        voiceStashLock.unlock()
     }
 
     /// Audio-thread work: convert one input buffer to the call's
@@ -254,9 +337,22 @@ final class DesktopModel: ObservableObject {
             outStatus.pointee = .haveData
             return buffer
         }
-        guard status != .error, out.frameLength > 0, let channel = out.int16ChannelData?[0] else { return }
+        guard status != .error, out.frameLength > 0, let channel = out.int16ChannelData?[0] else {
+            // v0.9.2: a buffer arrived and produced nothing —
+            // counted, under the lock, for the health check.
+            // (Before, this guard returned silently, which is
+            // why a dead converter looked exactly like a quiet
+            // room.) A converter that isn't there at all — the
+            // guard at the top — is teardown's business, not a
+            // drop.
+            voiceStashLock.lock()
+            voiceDroppedBuffers += 1
+            voiceStashLock.unlock()
+            return
+        }
         let data = Data(bytes: channel, count: Int(out.frameLength) * 2)
         voiceStashLock.lock()
+        voiceConvertedFrames += Int(out.frameLength)
         voiceStash.append(data)
         voiceStashLock.unlock()
     }
@@ -273,6 +369,11 @@ final class DesktopModel: ObservableObject {
         voiceStashLock.unlock()
 
         if !chunk.isEmpty {
+            // The app's own level for this chunk — the same
+            // number the barge-in check uses — kept for the
+            // in-call strip's hearing line, where it sits next
+            // to the server's heard level (v0.9.2).
+            voiceMicLevel = Int(Self.pcmRms(chunk).rounded())
             // Barge-in, the app's half: sustained speech energy
             // while GUS is audibly talking means the operator is
             // talking over it — stop the player here, and tell
@@ -363,6 +464,11 @@ final class DesktopModel: ObservableObject {
                     if let tts = l.ttsFirstMs { line += " · speaking after \(Self.seconds(tts))" }
                     self.voiceLatencyLine = line
                 }
+                if let h = s.hearing {
+                    self.voiceHearingLine = "hearing — mic \(self.voiceMicLevel) · level \(Int(h.lastRms.rounded())) · peak \(Int(h.maxRms.rounded())) · in a sentence \(Self.seconds(h.inUtteranceMs)) · heard \(h.utterancesCompleted)"
+                } else {
+                    self.voiceHearingLine = nil
+                }
             }
         }
     }
@@ -378,14 +484,8 @@ final class DesktopModel: ObservableObject {
         voiceChunkTimer = nil
         voicePollTimer?.invalidate()
         voicePollTimer = nil
-        voiceEngine?.inputNode.removeTap(onBus: 0)
-        voiceEngine?.stop()
-        voiceEngine = nil
-        voiceConverter = nil
+        stopVoiceCapture()
         cutVoicePlayback()
-        voiceStashLock.lock()
-        voiceStash = Data()
-        voiceStashLock.unlock()
         voiceSessionId = nil
         voiceInCall = false
         voicePhase = "listening"

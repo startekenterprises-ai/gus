@@ -407,8 +407,9 @@ function toPanelJob(j: JobRecord, urls: Map<string, string>): PanelJobData {
 }
 
 /** v0.9.1: the voice session state, mapped onto the panel
- *  contract field for field (turns and latency included) — the
- *  one place the voice package's shape becomes the panel's. */
+ *  contract field for field (turns, latency, and the hearing
+ *  ledger included) — the one place the voice package's shape
+ *  becomes the panel's. */
 function toPanelVoiceSession(s: VoiceSessionStateData) {
   return {
     ok: s.ok,
@@ -431,6 +432,15 @@ function toPanelVoiceSession(s: VoiceSessionStateData) {
       latency: t.latency,
     })),
     lastLatency: s.lastLatency,
+    hearing: s.hearing
+      ? {
+          chunksReceived: s.hearing.chunksReceived,
+          lastRms: s.hearing.lastRms,
+          maxRms: s.hearing.maxRms,
+          inUtteranceMs: s.hearing.inUtteranceMs,
+          utterancesCompleted: s.hearing.utterancesCompleted,
+        }
+      : undefined,
   };
 }
 

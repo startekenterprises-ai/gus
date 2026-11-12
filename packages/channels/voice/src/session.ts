@@ -34,6 +34,12 @@
  * measured here, where the stages actually happen — and reported
  * nowhere else.
  *
+ * Hearing (v0.9.2): the session also keeps a ledger of what the
+ * ears receive — chunks in, per-chunk energy (the VAD's own
+ * numbers), the open utterance's age, utterances completed —
+ * exposed in the state. A call that never takes a turn is
+ * diagnosed from the app's in-call strip, not guessed at.
+ *
  * The microphone's liveness is the app's side of the contract:
  * this service only ever sees audio the app chose to stream, and
  * only while a session the operator started is active. There is
@@ -58,6 +64,8 @@ import {
 import {
   UtteranceSegmenter,
   wrapPcm16AsWav,
+  chunkMs,
+  chunkRms,
 } from "./vad.js";
 import { splitSentences } from "./sentences.js";
 
@@ -100,6 +108,25 @@ export type VoiceSessionEndReason =
 
 export type VoiceSessionPhase = "listening" | "thinking" | "speaking" | "ended";
 
+/** v0.9.2: the session's hearing ledger — what the ears are
+ *  actually receiving, exposed in the state so a call that
+ *  "just listens" can be diagnosed from the app's in-call
+ *  strip instead of guessed at. Levels are the VAD's own
+ *  AC-energy numbers (chunkRms), so the strip shows exactly
+ *  what the segmenter decided with. */
+export interface VoiceSessionHearingData {
+  /** Audio chunks the app has streamed into this session. */
+  chunksReceived: number;
+  /** The most recent chunk's energy, and the loudest so far. */
+  lastRms: number;
+  maxRms: number;
+  /** Audio ms accumulated in the utterance currently open;
+   *  0 when none is open. */
+  inUtteranceMs: number;
+  /** Utterances the VAD has closed and queued as turns. */
+  utterancesCompleted: number;
+}
+
 export interface VoiceSessionStateData {
   ok: boolean;
   detail: string;
@@ -112,6 +139,7 @@ export interface VoiceSessionStateData {
   bargeIn?: boolean;
   turns: VoiceSessionTurn[];
   lastLatency?: VoiceTurnLatency;
+  hearing?: VoiceSessionHearingData;
 }
 
 export interface VoiceAudioSegmentData {
@@ -151,6 +179,17 @@ interface ActiveSession {
   chain: Promise<void>;
   timer?: ReturnType<typeof setInterval>;
   lastLatency?: VoiceTurnLatency;
+  /** v0.9.2: the hearing ledger (see VoiceSessionHearingData).
+   *  openMs is the live accumulator behind inUtteranceMs —
+   *  audio ms pushed while an utterance is open; it resets
+   *  when the utterance completes or the stream goes quiet. */
+  hearing: {
+    chunksReceived: number;
+    lastRms: number;
+    maxRms: number;
+    openMs: number;
+    utterancesCompleted: number;
+  };
 }
 
 const DEFAULT_IDLE_TIMEOUT_MS = 180_000;
@@ -246,6 +285,13 @@ export class VoiceSessionService {
       streaming: false,
       processing: false,
       chain: Promise.resolve(),
+      hearing: {
+        chunksReceived: 0,
+        lastRms: 0,
+        maxRms: 0,
+        openMs: 0,
+        utterancesCompleted: 0,
+      },
     };
     this.session = session;
     this.endedSnapshot = undefined;
@@ -296,8 +342,25 @@ export class VoiceSessionService {
       return { ok: false, detail: "The call ended (timeout) as that audio arrived — it was dropped." };
     }
     if (chunk.length === 0) return { ok: true, detail: "Empty chunk ignored." };
+    // The hearing ledger first (v0.9.2): every accepted chunk is
+    // counted and measured with the VAD's own energy function,
+    // so the state the app polls shows exactly what the
+    // segmenter is hearing — level, peak, and whether an
+    // utterance is open and how long it has been open.
+    const rms = Math.round(chunkRms(chunk));
+    session.hearing.chunksReceived++;
+    session.hearing.lastRms = rms;
+    if (rms > session.hearing.maxRms) session.hearing.maxRms = rms;
     const pushed = session.segmenter.push(chunk, this.now());
     if (pushed.speech) session.lastSpeechAt = this.now();
+    if (pushed.utterance) {
+      session.hearing.utterancesCompleted++;
+      session.hearing.openMs = 0;
+    } else if (session.segmenter.inUtterance) {
+      session.hearing.openMs += chunkMs(chunk);
+    } else {
+      session.hearing.openMs = 0;
+    }
     if (pushed.utterance) {
       const utterance = pushed.utterance;
       const endMs = pushed.utteranceEndMs ?? this.now();
@@ -375,6 +438,7 @@ export class VoiceSessionService {
         bargeIn: loadVoiceConfig(this.stateDir).bargeIn,
         turns: session.turns,
         lastLatency: session.lastLatency,
+        hearing: this.hearingData(session),
       };
     }
     if (this.endedSnapshot && this.endedSnapshot.sessionId === sessionId) {
@@ -623,8 +687,22 @@ export class VoiceSessionService {
       endedReason: reason,
       turns: session.turns,
       lastLatency: session.lastLatency,
+      hearing: this.hearingData(session),
     };
     this.endedSnapshot = snapshot;
     return snapshot;
+  }
+
+  /** The public shape of the session's hearing ledger: the
+   *  internal open-utterance accumulator becomes the exposed
+   *  inUtteranceMs (0 whenever no utterance is open). */
+  private hearingData(session: ActiveSession): VoiceSessionHearingData {
+    return {
+      chunksReceived: session.hearing.chunksReceived,
+      lastRms: session.hearing.lastRms,
+      maxRms: session.hearing.maxRms,
+      inUtteranceMs: session.segmenter.inUtterance ? session.hearing.openMs : 0,
+      utterancesCompleted: session.hearing.utterancesCompleted,
+    };
   }
 }

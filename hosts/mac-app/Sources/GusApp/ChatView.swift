@@ -182,23 +182,33 @@ struct ChatView: View {
 
     /// The in-call strip: phase, elapsed time, and the last
     /// turn's measured latency — small, factual, and read from
-    /// the session state, never estimated here.
+    /// the session state, never estimated here. v0.9.2 adds the
+    /// hearing line under it: the server's levels for what the
+    /// call is receiving, next to this app's own mic level.
     private var callStatusStrip: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "waveform")
-                .foregroundColor(.red)
-            Text(model.voicePhase == "thinking" ? "Thinking…" : model.voicePhase == "speaking" ? "Speaking…" : "Listening…")
-                .font(.callout)
-            Text(Self.callClock(model.voiceElapsedMs))
-                .font(.callout)
-                .foregroundColor(.secondary)
-            if let latency = model.voiceLatencyLine {
-                Text(latency)
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 10) {
+                Image(systemName: "waveform")
+                    .foregroundColor(.red)
+                Text(model.voicePhase == "thinking" ? "Thinking…" : model.voicePhase == "speaking" ? "Speaking…" : "Listening…")
+                    .font(.callout)
+                Text(Self.callClock(model.voiceElapsedMs))
+                    .font(.callout)
+                    .foregroundColor(.secondary)
+                if let latency = model.voiceLatencyLine {
+                    Text(latency)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+            }
+            if let hearing = model.voiceHearingLine {
+                Text(hearing)
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .lineLimit(1)
             }
-            Spacer()
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)

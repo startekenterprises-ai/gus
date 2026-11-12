@@ -41,6 +41,7 @@ import {
   VoiceAdapter,
   VoiceSessionService,
   VOICE_CONVERSATION,
+  chunkRms,
   splitSentences,
   writeVoiceConfig,
 } from "../../packages/channels/voice/src/index.js";
@@ -51,14 +52,41 @@ const SAMPLE_RATE = 16_000;
 const CHUNK_MS = 250;
 const CHUNK_BYTES = (SAMPLE_RATE * CHUNK_MS) / 1000 * 2;
 
-/** One constant-amplitude PCM16 chunk: amplitude 8000 reads as
- *  speech (RMS 8000), 0 as silence, 100 as room noise — all
- *  against the segmenter's 600 threshold. */
+/** One chunk of a square wave at the given amplitude: the
+ *  samples alternate +A/−A, so the AC energy (RMS around the
+ *  mean) IS the amplitude — 8000 reads as speech, 0 as silence,
+ *  100 as room noise, all against the segmenter's 600
+ *  threshold. (Before v0.9.2 this fixture filled every sample
+ *  with the same value; that is pure DC, and DC now — correctly
+ *  — reads as silence.) */
 function pcm(amplitude: number, ms: number = CHUNK_MS): Uint8Array {
   const samples = Math.round((SAMPLE_RATE * ms) / 1000);
   const buf = new Uint8Array(samples * 2);
   const view = new DataView(buf.buffer);
-  for (let i = 0; i < samples; i++) view.setInt16(i * 2, amplitude, true);
+  for (let i = 0; i < samples; i++) view.setInt16(i * 2, i % 2 === 0 ? amplitude : -amplitude, true);
+  return buf;
+}
+
+/** A constant-value chunk: pure DC at the offset. However hot
+ *  the offset, it carries no sound. */
+function dcPcm(offset: number, ms: number = CHUNK_MS): Uint8Array {
+  const samples = Math.round((SAMPLE_RATE * ms) / 1000);
+  const buf = new Uint8Array(samples * 2);
+  const view = new DataView(buf.buffer);
+  for (let i = 0; i < samples; i++) view.setInt16(i * 2, offset, true);
+  return buf;
+}
+
+/** A real alternating signal riding on a DC offset — what a
+ *  converter with a bias problem actually hands the VAD. Its
+ *  energy must read as the amplitude alone. */
+function offsetPcm(offset: number, amplitude: number, ms: number = CHUNK_MS): Uint8Array {
+  const samples = Math.round((SAMPLE_RATE * ms) / 1000);
+  const buf = new Uint8Array(samples * 2);
+  const view = new DataView(buf.buffer);
+  for (let i = 0; i < samples; i++) {
+    view.setInt16(i * 2, offset + (i % 2 === 0 ? amplitude : -amplitude), true);
+  }
   return buf;
 }
 const LOUD = () => pcm(8000);
@@ -128,6 +156,49 @@ test("vad: two utterances segment independently; flush returns a partial", () =>
   const partial = seg.flush();
   assert.ok(partial, "a half-finished utterance flushes rather than vanishing");
   assert.equal(seg.flush(), undefined);
+});
+
+test("vad (v0.9.2): pure DC reads as silence — a hot offset never opens an utterance", () => {
+  // The field failure this pins: a converter hands the VAD a
+  // constant non-zero stream; raw RMS around zero reads it as
+  // loud forever, so the call "listens" without ever taking a
+  // turn. Energy around the mean reads DC as what it is: none.
+  assert.equal(chunkRms(dcPcm(5000)), 0, "a constant chunk has no AC energy");
+  assert.equal(chunkRms(dcPcm(-12000)), 0);
+  assert.ok(chunkRms(dcPcm(5000)) < 600, "below the speech threshold");
+  const seg = new UtteranceSegmenter({ silenceMs: 700 });
+  let t = 0;
+  for (let i = 0; i < 8; i++) {
+    const r = seg.push(dcPcm(5000), t);
+    t += CHUNK_MS;
+    assert.equal(r.speech, false, "DC is never speech");
+    assert.equal(r.utterance, undefined);
+    assert.equal(seg.inUtterance, false, "no utterance ever opens");
+  }
+});
+
+test("vad (v0.9.2): speech riding a DC offset still segments — the offset is ignored, not the voice", () => {
+  assert.equal(chunkRms(offsetPcm(3000, 5000)), 5000, "energy is the signal's, not the offset's");
+  assert.equal(chunkRms(offsetPcm(-9000, 8000)), 8000);
+  const seg = new UtteranceSegmenter({ silenceMs: 700 });
+  let t = 0;
+  const push = (chunk: Uint8Array) => {
+    const r = seg.push(chunk, t);
+    t += CHUNK_MS;
+    return r;
+  };
+  assert.equal(push(offsetPcm(3000, 5000)).speech, true);
+  assert.equal(push(offsetPcm(3000, 5000)).speech, true);
+  assert.equal(seg.inUtterance, true);
+  // The tail: the voice stops but the offset remains — pure DC
+  // chunks are the silence that must close the utterance.
+  assert.equal(push(dcPcm(3000)).utterance, undefined);
+  assert.equal(push(dcPcm(3000)).utterance, undefined);
+  const closed = push(dcPcm(3000)); // 750 ms of DC ≥ the 700 window
+  assert.ok(closed.utterance, "the DC tail closed the utterance");
+  assert.equal(closed.utteranceEndMs, 500, "speech ended when the signal did, offset or not");
+  assert.equal(closed.utterance!.byteLength, 5 * CHUNK_BYTES, "2 signal + 3 trailing chunks, whole");
+  assert.equal(seg.inUtterance, false);
 });
 
 test("sentences: boundaries, decimals, ellipses, newlines", () => {
@@ -366,6 +437,66 @@ test("session: a full turn — streamed in, settled through the pipeline, stream
   const ended = r.sessions.end(id);
   assert.equal(ended.active, false);
   assert.equal(ended.endedReason, "operator");
+});
+
+test("session hearing (v0.9.2): the state exposes what the ears receive — chunks, levels, the open utterance, completions", async () => {
+  const r = await sessionRig({ transcripts: ["hello gus"] });
+  const id = startCall(r);
+
+  // A fresh call hears nothing yet — but the ledger is present.
+  const fresh = r.sessions.state(id);
+  assert.deepEqual(fresh.hearing, {
+    chunksReceived: 0,
+    lastRms: 0,
+    maxRms: 0,
+    inUtteranceMs: 0,
+    utterancesCompleted: 0,
+  });
+
+  // Room noise: counted and measured, opens nothing.
+  r.sessions.pushAudio(id, pcm(100));
+  r.clock.now += CHUNK_MS;
+  let hearing = r.sessions.state(id).hearing!;
+  assert.equal(hearing.chunksReceived, 1);
+  assert.equal(hearing.lastRms, 100);
+  assert.equal(hearing.maxRms, 100);
+  assert.equal(hearing.inUtteranceMs, 0);
+  assert.equal(hearing.utterancesCompleted, 0);
+
+  // Speech opens an utterance; its age accrues in audio ms
+  // while the completion count stays at zero.
+  r.sessions.pushAudio(id, LOUD());
+  r.clock.now += CHUNK_MS;
+  r.sessions.pushAudio(id, LOUD());
+  r.clock.now += CHUNK_MS;
+  hearing = r.sessions.state(id).hearing!;
+  assert.equal(hearing.chunksReceived, 3);
+  assert.equal(hearing.lastRms, 8000);
+  assert.equal(hearing.maxRms, 8000, "the peak survives later quiet chunks");
+  assert.equal(hearing.inUtteranceMs, 2 * CHUNK_MS, "two loud chunks of open utterance");
+  assert.equal(hearing.utterancesCompleted, 0);
+
+  // The trailing silence closes it: the completion lands in
+  // the ledger and the open age resets — before the turn has
+  // even settled.
+  for (let i = 0; i < 3; i++) {
+    r.sessions.pushAudio(id, QUIET());
+    r.clock.now += CHUNK_MS;
+  }
+  hearing = r.sessions.state(id).hearing!;
+  assert.equal(hearing.chunksReceived, 6);
+  assert.equal(hearing.lastRms, 0);
+  assert.equal(hearing.maxRms, 8000);
+  assert.equal(hearing.inUtteranceMs, 0);
+  assert.equal(hearing.utterancesCompleted, 1);
+
+  // The turn settles through the pipeline as usual, and the
+  // ended snapshot keeps the final ledger on the record.
+  await driveJob(r, "Heard you.");
+  await r.sessions.drain();
+  const ended = r.sessions.end(id);
+  assert.equal(ended.hearing?.utterancesCompleted, 1);
+  assert.equal(ended.hearing?.chunksReceived, 6);
 });
 
 test("session: the Shield gate blocks a spoken injection at session level, receipt and all", async () => {

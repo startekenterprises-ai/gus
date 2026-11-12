@@ -237,6 +237,19 @@ export interface PanelVoiceSessionTurnData {
   latency?: PanelVoiceTurnLatencyData;
 }
 
+/** v0.9.2: the live call's hearing ledger — what the session's
+ *  ears are receiving, in the VAD's own energy numbers: chunks
+ *  in, last/peak level, the open utterance's age in ms (0 when
+ *  none is open), and utterances completed. The diagnosis
+ *  surface for a call that never takes a turn. */
+export interface PanelVoiceSessionHearingData {
+  chunksReceived: number;
+  lastRms: number;
+  maxRms: number;
+  inUtteranceMs: number;
+  utterancesCompleted: number;
+}
+
 /** v0.9.1: the live call's state — what the app polls while a
  *  call runs. Phase is listening | thinking | speaking | ended;
  *  an inactive state carries endedReason (operator |
@@ -254,6 +267,7 @@ export interface PanelVoiceSessionData {
   bargeIn?: boolean;
   turns: PanelVoiceSessionTurnData[];
   lastLatency?: PanelVoiceTurnLatencyData;
+  hearing?: PanelVoiceSessionHearingData;
 }
 
 /** v0.9.1: one spoken segment of a live call's reply — a single

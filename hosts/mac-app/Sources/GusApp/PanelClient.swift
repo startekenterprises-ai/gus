@@ -179,6 +179,20 @@ struct PanelVoiceSessionTurn: Decodable, Identifiable {
     var id: Int { index }
 }
 
+/// The live call's hearing ledger (v0.9.2): what the session's
+/// ears are receiving, in the VAD's own energy numbers — chunks
+/// in, last/peak level, the open utterance's age (0 when none
+/// is open), utterances completed. Optional on the session: an
+/// older control plane doesn't send it, and the in-call strip
+/// hides the hearing line rather than inventing numbers.
+struct PanelVoiceSessionHearing: Decodable {
+    var chunksReceived: Int
+    var lastRms: Double
+    var maxRms: Double
+    var inUtteranceMs: Double
+    var utterancesCompleted: Int
+}
+
 /// The live call's state (v0.9.1) — what the app polls while a
 /// call runs: phase (listening | thinking | speaking | ended),
 /// the transcript so far, the last turn's latency, and after an
@@ -196,6 +210,7 @@ struct PanelVoiceSession: Decodable {
     var bargeIn: Bool?
     var turns: [PanelVoiceSessionTurn]
     var lastLatency: PanelVoiceTurnLatency?
+    var hearing: PanelVoiceSessionHearing?
 }
 
 /// One spoken segment of a live call's reply (v0.9.1): a single

@@ -19,17 +19,26 @@
 
 export const SESSION_SAMPLE_RATE = 16_000;
 
-/** RMS energy of one PCM16 chunk, on the int16 scale (0..32767).
- *  Ordinary speech at a sane mic gain reads in the low thousands;
- *  a quiet room reads in the low hundreds. */
+/** AC energy of one PCM16 chunk, on the int16 scale (0..32767):
+ *  the RMS of the samples around their own mean, NOT around
+ *  zero. A constant DC offset — a hot converter, a misbehaving
+ *  gain stage — carries no sound, and since v0.9.2 it reads as
+ *  the silence it is instead of pinning the energy check high
+ *  (before the fix, a chunk of pure DC at 5000 read as "speech"
+ *  forever and an utterance could only end at the hard cap).
+ *  Ordinary speech at a sane mic gain reads in the low
+ *  thousands; a quiet room reads in the low hundreds. */
 export function chunkRms(pcm: Uint8Array): number {
   const usable = pcm.byteLength - (pcm.byteLength % 2);
   if (usable <= 0) return 0;
   const view = new DataView(pcm.buffer, pcm.byteOffset, usable);
   const n = usable / 2;
+  let mean = 0;
+  for (let i = 0; i < n; i++) mean += view.getInt16(i * 2, true);
+  mean /= n;
   let sum = 0;
   for (let i = 0; i < n; i++) {
-    const s = view.getInt16(i * 2, true);
+    const s = view.getInt16(i * 2, true) - mean;
     sum += s * s;
   }
   return Math.sqrt(sum / n);
