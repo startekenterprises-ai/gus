@@ -31,8 +31,7 @@
  * transcript → reply → first spoken sentence) in its turn record
  * and in the session's lastLatency. This is the data the
  * local-vs-cloud speech decision gets made from, so it is
- * measured here, where the stages actually happen — and reported
- * nowhere else.
+ * measured here, where the stages actually happen.
  *
  * Hearing (v0.9.2): the session also keeps a ledger of what the
  * ears receive — chunks in, per-chunk energy (the VAD's own
@@ -40,11 +39,23 @@
  * exposed in the state. A call that never takes a turn is
  * diagnosed from the app's in-call strip, not guessed at.
  *
+ * On the record (v0.9.4): the first 0.9.3 call's turns died
+ * silently — quiet audio (loudest chunk RMS 1356) transcribed
+ * empty, and the in-memory turn records evaporated when the
+ * session finished, leaving nothing to diagnose from. Three
+ * answers: utterances are gain-normalized before transcription
+ * (vad.ts), every settled turn is appended to
+ * <stateDir>/voice-turns.jsonl as it reaches its terminal
+ * state, and the finished session's snapshot rides later state
+ * polls as lastSession instead of vanishing.
+ *
  * The microphone's liveness is the app's side of the contract:
  * this service only ever sees audio the app chose to stream, and
  * only while a session the operator started is active. There is
  * no listen-outside-a-call path in this package.
  */
+import { appendFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   loadVoiceConfig,
   voiceConfigured,
@@ -63,6 +74,7 @@ import {
 } from "./voice-channel.js";
 import {
   UtteranceSegmenter,
+  normalizePcm16Gain,
   wrapPcm16AsWav,
   chunkMs,
   chunkRms,
@@ -140,6 +152,12 @@ export interface VoiceSessionStateData {
   turns: VoiceSessionTurn[];
   lastLatency?: VoiceTurnLatency;
   hearing?: VoiceSessionHearingData;
+  /** v0.9.4: the most recently finished call's snapshot, riding
+   *  on state polls that aren't about it — a poller that lost
+   *  the session id still sees how the last call went instead
+   *  of an empty record. Cleared when a new session starts;
+   *  a finished snapshot never nests one of its own. */
+  lastSession?: VoiceSessionStateData;
 }
 
 export interface VoiceAudioSegmentData {
@@ -439,12 +457,19 @@ export class VoiceSessionService {
         turns: session.turns,
         lastLatency: session.lastLatency,
         hearing: this.hearingData(session),
+        lastSession: this.endedSnapshot,
       };
     }
     if (this.endedSnapshot && this.endedSnapshot.sessionId === sessionId) {
       return this.endedSnapshot;
     }
-    return { ok: false, active: false, turns: [], detail: "No call by that id." };
+    return {
+      ok: false,
+      active: false,
+      turns: [],
+      detail: "No call by that id.",
+      lastSession: this.endedSnapshot,
+    };
   }
 
   /** Test + lifecycle helper: resolves when every queued turn
@@ -500,13 +525,16 @@ export class VoiceSessionService {
       }
 
       // --- ears ------------------------------------------------
+      // v0.9.4: the payload is gain-normalized first — a quiet
+      // voice at a sane peak, so the transcription service gets
+      // audio it can actually hear (see normalizePcm16Gain).
       const sttStart = this.now();
       let transcript: string;
       try {
         transcript = await transcribe(
           this.fetchFn,
           { baseUrl: config.sttBaseUrl, model: config.sttModel },
-          wrapPcm16AsWav(pcm),
+          wrapPcm16AsWav(normalizePcm16Gain(pcm)),
           "audio/wav",
         );
       } catch (e) {
@@ -549,7 +577,45 @@ export class VoiceSessionService {
         this.finish(session, "kill-phrase");
       }
     } finally {
+      // Every path that created the turn settles here exactly
+      // once — transcription failure, mid-call disable, normal
+      // completion, kill-phrase stop — so the durable record is
+      // written here, where no outcome can slip past it.
+      this.appendTurnRecord(turn);
       session.processing = false;
+    }
+  }
+
+  /**
+   * v0.9.4: the durable turn log — one JSON line per settled
+   * turn in <stateDir>/voice-turns.jsonl, in the same append
+   * shape as jobs.jsonl and receipts.jsonl. The in-memory turn
+   * records evaporate with the session (the first 0.9.3 call's
+   * failed turns left nothing behind to diagnose); this is the
+   * copy that survives. Best-effort on purpose: a failed append
+   * is swallowed — the log is evidence, never machinery, and
+   * must not break the call it describes.
+   */
+  private appendTurnRecord(turn: VoiceSessionTurn): void {
+    try {
+      const rec: {
+        ts: number;
+        index: number;
+        transcript?: string;
+        kind: string;
+        detail: string;
+        latency?: VoiceTurnLatency;
+      } = {
+        ts: this.now(),
+        index: turn.index,
+        ...(turn.transcript !== undefined ? { transcript: turn.transcript } : {}),
+        kind: turn.kind,
+        detail: turn.detail,
+        ...(turn.latency !== undefined ? { latency: turn.latency } : {}),
+      };
+      appendFileSync(join(this.stateDir, "voice-turns.jsonl"), JSON.stringify(rec) + "\n");
+    } catch {
+      /* a lost line loses a clue, never a call */
     }
   }
 

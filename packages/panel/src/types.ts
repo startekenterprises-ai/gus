@@ -268,6 +268,9 @@ export interface PanelVoiceSessionData {
   turns: PanelVoiceSessionTurnData[];
   lastLatency?: PanelVoiceTurnLatencyData;
   hearing?: PanelVoiceSessionHearingData;
+  /** v0.9.4: the most recently finished call's snapshot, when
+   *  this state isn't about it (see the voice session service). */
+  lastSession?: PanelVoiceSessionData;
 }
 
 /** v0.9.1: one spoken segment of a live call's reply — a single

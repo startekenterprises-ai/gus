@@ -23,7 +23,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -42,6 +42,7 @@ import {
   VoiceSessionService,
   VOICE_CONVERSATION,
   chunkRms,
+  normalizePcm16Gain,
   splitSentences,
   writeVoiceConfig,
 } from "../../packages/channels/voice/src/index.js";
@@ -55,7 +56,7 @@ const CHUNK_BYTES = (SAMPLE_RATE * CHUNK_MS) / 1000 * 2;
 /** One chunk of a square wave at the given amplitude: the
  *  samples alternate +A/−A, so the AC energy (RMS around the
  *  mean) IS the amplitude — 8000 reads as speech, 0 as silence,
- *  100 as room noise, all against the segmenter's 600
+ *  100 as room noise, all against the segmenter's 350
  *  threshold. (Before v0.9.2 this fixture filled every sample
  *  with the same value; that is pure DC, and DC now — correctly
  *  — reads as silence.) */
@@ -91,6 +92,18 @@ function offsetPcm(offset: number, amplitude: number, ms: number = CHUNK_MS): Ui
 }
 const LOUD = () => pcm(8000);
 const QUIET = () => pcm(0);
+
+/** The largest absolute sample in a PCM16 buffer (raw, around
+ *  zero — the fixtures are mean-zero unless built otherwise). */
+function peakOf(bytes: Uint8Array): number {
+  const usable = bytes.byteLength - (bytes.byteLength % 2);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, usable);
+  let peak = 0;
+  for (let i = 0; i < usable / 2; i++) {
+    peak = Math.max(peak, Math.abs(view.getInt16(i * 2, true)));
+  }
+  return peak;
+}
 
 // ---------------------------------------------------------------- segmenter + sentences
 
@@ -165,7 +178,7 @@ test("vad (v0.9.2): pure DC reads as silence — a hot offset never opens an utt
   // turn. Energy around the mean reads DC as what it is: none.
   assert.equal(chunkRms(dcPcm(5000)), 0, "a constant chunk has no AC energy");
   assert.equal(chunkRms(dcPcm(-12000)), 0);
-  assert.ok(chunkRms(dcPcm(5000)) < 600, "below the speech threshold");
+  assert.ok(chunkRms(dcPcm(5000)) < 350, "below the speech threshold");
   const seg = new UtteranceSegmenter({ silenceMs: 700 });
   let t = 0;
   for (let i = 0; i < 8; i++) {
@@ -199,6 +212,54 @@ test("vad (v0.9.2): speech riding a DC offset still segments — the offset is i
   assert.equal(closed.utteranceEndMs, 500, "speech ended when the signal did, offset or not");
   assert.equal(closed.utterance!.byteLength, 5 * CHUNK_BYTES, "2 signal + 3 trailing chunks, whole");
   assert.equal(seg.inUtterance, false);
+});
+
+test("vad (v0.9.4): the default threshold is 350 — an RMS-400 chunk is speech, 300 is not", () => {
+  // The 0.9.3 field call's loudest chunk was RMS 1356 against a
+  // 600 default; quieter talkers sat close enough to the line
+  // that the default drops to 350, nearer the room-noise floor
+  // (the hearing ledger reads a quiet room in the low hundreds)
+  // without reaching it.
+  const soft = new UtteranceSegmenter();
+  assert.equal(soft.push(pcm(300), 0).speech, false, "RMS 300 stays room noise");
+  const quiet = new UtteranceSegmenter();
+  assert.equal(quiet.push(pcm(400), 0).speech, true, "RMS 400 now opens an utterance");
+});
+
+test("vad (v0.9.4): gain normalization lifts a quiet utterance to the target peak", () => {
+  // The field shape: real speech peaking around 1200 int16 —
+  // audible to a person, beneath the transcription service.
+  const out = normalizePcm16Gain(pcm(1200));
+  assert.equal(peakOf(out), 24_000, "peak lifted to the 24000 target (gain 20, under the cap)");
+  assert.equal(chunkRms(out), 24_000, "the square wave's energy scales with its peak");
+  const capped = normalizePcm16Gain(pcm(500));
+  assert.equal(peakOf(capped), 12_000, "gain capped at 24x — 500 reaches 12000, not 24000");
+});
+
+test("vad (v0.9.4): loud, silent, and pure-DC buffers pass through byte-identical", () => {
+  const loud = pcm(28_000);
+  assert.equal(normalizePcm16Gain(loud), loud, "already at/above target: the input itself back");
+  const silence = pcm(0);
+  assert.equal(normalizePcm16Gain(silence), silence, "silence has no peak to lift");
+  const dc = dcPcm(5000);
+  assert.equal(normalizePcm16Gain(dc), dc, "pure DC is not loudness — nothing to normalize");
+});
+
+test("vad (v0.9.4): normalization clamps at the int16 rail instead of wrapping", () => {
+  // A hot DC offset (+20000) carrying a quiet signal (±1000):
+  // the AC peak earns the full 24x, and the positive swing
+  // (20000 + 24000) would overflow int16 without the clamp.
+  const out = normalizePcm16Gain(offsetPcm(20_000, 1000));
+  const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
+  let max = -Infinity;
+  let min = Infinity;
+  for (let i = 0; i < out.byteLength / 2; i++) {
+    const s = view.getInt16(i * 2, true);
+    if (s > max) max = s;
+    if (s < min) min = s;
+  }
+  assert.equal(max, 32767, "the top pins at the rail — a wrap would have read negative");
+  assert.equal(min, -4000, "the unclamped side scales around the mean: 20000 − 24000");
 });
 
 test("sentences: boundaries, decimals, ellipses, newlines", () => {
@@ -247,6 +308,12 @@ interface FetchScript {
   transcripts: string[];
   calls: string[];
   ttsInputs: string[];
+  /** The PCM peak of each transcription payload, in order —
+   *  how the gain-normalization tests see what STT was sent. */
+  sttPeaks: number[];
+  /** Answer transcription requests with an HTTP 500 — the
+   *  durable-turn tests' broken service. */
+  sttFails?: boolean;
   /** Runs (and may block) inside the Nth TTS call, 1-based. */
   ttsGate?: (callIndex: number, input: string) => Promise<void> | void;
 }
@@ -257,6 +324,15 @@ function sessionFetch(script: FetchScript): typeof fetch {
     const url = String(input);
     script.calls.push(url);
     if (url.includes("/audio/transcriptions")) {
+      const body = (init as { body?: unknown } | undefined)?.body;
+      if (body instanceof FormData) {
+        const file = body.get("file");
+        if (file instanceof Blob) {
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          script.sttPeaks.push(peakOf(bytes.subarray(44))); // past the WAV header
+        }
+      }
+      if (script.sttFails) return new Response("test STT outage", { status: 500 });
       const next = script.transcripts.shift();
       if (next !== undefined) lastTranscript = next;
       return Response.json({ text: lastTranscript });
@@ -295,6 +371,7 @@ async function sessionRig(opts?: {
   shieldGate?: unknown;
   transcripts?: string[];
   ttsGate?: FetchScript["ttsGate"];
+  sttFails?: boolean;
   enableVoice?: boolean;
   bargeIn?: boolean;
   idleTimeoutMs?: number;
@@ -337,6 +414,8 @@ async function sessionRig(opts?: {
     transcripts: [...(opts?.transcripts ?? ["hello gus"])],
     calls: [],
     ttsInputs: [],
+    sttPeaks: [],
+    sttFails: opts?.sttFails ?? false,
     ttsGate: opts?.ttsGate,
   };
   const clock = { now: 5_000_000 };
@@ -674,6 +753,92 @@ test("session: voice off refuses the call before any audio is accepted", async (
   const dropped = r.sessions.pushAudio("call-nope", LOUD());
   assert.equal(dropped.ok, false);
   assert.equal(r.script.calls.length, 0, "no speech service was ever called");
+});
+
+// ---------------------------------------------------------------- v0.9.4: louder, and on the record
+
+test("session (v0.9.4): a quiet utterance is gain-normalized before transcription", async () => {
+  const r = await sessionRig({ transcripts: ["hello gus"] });
+  const id = startCall(r);
+  // The field call's shape: real speech peaking near 1200 —
+  // it opens an utterance at the 350 threshold, and the STT
+  // payload must arrive lifted, not as-recorded.
+  for (let i = 0; i < 2; i++) {
+    r.sessions.pushAudio(id, pcm(1200));
+    r.clock.now += CHUNK_MS;
+  }
+  for (let i = 0; i < 3; i++) {
+    r.sessions.pushAudio(id, QUIET());
+    r.clock.now += CHUNK_MS;
+  }
+  await driveJob(r, "Heard you, loud and clear.");
+  await r.sessions.drain();
+  assert.deepEqual(r.script.sttPeaks, [24_000], "the payload's peak was lifted from 1200 to the target");
+  assert.equal(r.sessions.state(id).turns[0].kind, "reply", "the lifted utterance took a normal turn");
+  r.sessions.end(id);
+});
+
+test("session (v0.9.4): settled turns land in voice-turns.jsonl — success and transcription failure alike", async () => {
+  const ok = await sessionRig({ transcripts: ["hello gus"] });
+  const okId = startCall(ok);
+  say(ok, okId);
+  await driveJob(ok, "On the record.");
+  await ok.sessions.drain();
+  ok.sessions.end(okId);
+  const okLines = readFileSync(join(ok.dir, "voice-turns.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l) as Record<string, unknown>);
+  assert.equal(okLines.length, 1, "one settled turn, one line");
+  assert.equal(okLines[0].index, 0);
+  assert.equal(okLines[0].transcript, "hello gus");
+  assert.equal(okLines[0].kind, "reply");
+  assert.equal(typeof okLines[0].ts, "number");
+  const okLatency = okLines[0].latency as Record<string, unknown>;
+  assert.equal(typeof okLatency.sttMs, "number");
+  assert.equal(typeof okLatency.jobMs, "number");
+  assert.equal(typeof okLatency.totalMs, "number");
+
+  const bad = await sessionRig({ sttFails: true });
+  const badId = startCall(bad);
+  say(bad, badId);
+  await bad.sessions.drain();
+  const turn = bad.sessions.state(badId).turns[0];
+  assert.equal(turn.kind, "unavailable");
+  assert.match(turn.detail, /Transcription failed/);
+  const badLines = readFileSync(join(bad.dir, "voice-turns.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l) as Record<string, unknown>);
+  assert.equal(badLines.length, 1, "the failed turn is on the record too — it used to evaporate");
+  assert.equal(badLines[0].index, 0);
+  assert.equal(badLines[0].kind, "unavailable");
+  assert.match(String(badLines[0].detail), /Transcription failed/);
+  assert.equal("transcript" in badLines[0], false, "no transcript was ever known");
+  assert.equal("latency" in badLines[0], false, "the turn died before its latency record");
+  bad.sessions.end(badId);
+});
+
+test("session (v0.9.4): the last finished call rides state polls as lastSession until a new call starts", async () => {
+  const r = await sessionRig({ transcripts: ["hello gus"] });
+  const id = startCall(r);
+  assert.equal(r.sessions.state(id).lastSession, undefined, "no finished call yet");
+  say(r, id);
+  await driveJob(r, "See you next time.");
+  await r.sessions.drain();
+  r.sessions.end(id);
+
+  const ghost = r.sessions.state("call-that-never-was");
+  assert.equal(ghost.active, false);
+  assert.equal(ghost.lastSession?.sessionId, id, "a poll without the id still finds the last call");
+  assert.equal(ghost.lastSession?.endedReason, "operator");
+  assert.equal(ghost.lastSession?.turns.length, 1);
+  assert.equal(ghost.lastSession?.turns[0].transcript, "hello gus");
+
+  const next = startCall(r);
+  assert.equal(r.sessions.state(next).lastSession, undefined, "a new call clears the retained snapshot");
+  assert.equal(r.sessions.state("call-that-never-was").lastSession, undefined);
+  r.sessions.end(next);
 });
 
 // ---------------------------------------------------------------- panel routes

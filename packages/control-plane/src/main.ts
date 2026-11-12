@@ -45,6 +45,7 @@ import {
   PanelServer,
   type PanelBackend,
   type PanelJobData,
+  type PanelVoiceSessionData,
 } from "@gus/panel";
 import type { JobRecord } from "@gus/shared";
 import { Governor } from "./governor.js";
@@ -410,7 +411,7 @@ function toPanelJob(j: JobRecord, urls: Map<string, string>): PanelJobData {
  *  contract field for field (turns, latency, and the hearing
  *  ledger included) — the one place the voice package's shape
  *  becomes the panel's. */
-function toPanelVoiceSession(s: VoiceSessionStateData) {
+function toPanelVoiceSession(s: VoiceSessionStateData): PanelVoiceSessionData {
   return {
     ok: s.ok,
     detail: s.detail,
@@ -441,6 +442,7 @@ function toPanelVoiceSession(s: VoiceSessionStateData) {
           utterancesCompleted: s.hearing.utterancesCompleted,
         }
       : undefined,
+    lastSession: s.lastSession ? toPanelVoiceSession(s.lastSession) : undefined,
   };
 }
 

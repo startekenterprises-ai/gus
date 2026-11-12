@@ -44,6 +44,52 @@ export function chunkRms(pcm: Uint8Array): number {
   return Math.sqrt(sum / n);
 }
 
+/**
+ * Peak-normalize an utterance's gain for the transcription
+ * service (v0.9.4). Field diagnosis: a quiet-but-real voice —
+ * loudest chunk RMS 1356 in the first 0.9.3 call — came back
+ * from the transcription service EMPTY, three utterances in a
+ * row; the service wasn't broken, the audio was simply too
+ * quiet for it. So before an utterance is wrapped for STT, its
+ * AC peak (mean-centered, measured exactly as chunkRms
+ * measures — a DC offset is not loudness) is lifted toward
+ * `targetPeak` int16, with the gain capped at `maxGain` so a
+ * near-silent buffer is never amplified into pure noise.
+ * Audio already at or above the target, and true silence (AC
+ * peak 0), pass through byte-identical — the same buffer back.
+ * Samples scale around the chunk's own mean and clamp to the
+ * int16 range: a hot DC offset can pin a sample at the rail,
+ * never wrap it around to the opposite sign.
+ */
+export function normalizePcm16Gain(
+  pcm: Uint8Array,
+  targetPeak = 24_000,
+  maxGain = 24,
+): Uint8Array {
+  const usable = pcm.byteLength - (pcm.byteLength % 2);
+  if (usable <= 0) return pcm;
+  const view = new DataView(pcm.buffer, pcm.byteOffset, usable);
+  const n = usable / 2;
+  let mean = 0;
+  for (let i = 0; i < n; i++) mean += view.getInt16(i * 2, true);
+  mean /= n;
+  let peak = 0;
+  for (let i = 0; i < n; i++) {
+    const dev = Math.abs(view.getInt16(i * 2, true) - mean);
+    if (dev > peak) peak = dev;
+  }
+  if (peak === 0 || peak >= targetPeak) return pcm;
+  const gain = Math.min(targetPeak / peak, maxGain);
+  const out = new Uint8Array(pcm.byteLength);
+  const outView = new DataView(out.buffer);
+  for (let i = 0; i < n; i++) {
+    const scaled = mean + (view.getInt16(i * 2, true) - mean) * gain;
+    outView.setInt16(i * 2, Math.max(-32768, Math.min(32767, Math.round(scaled))), true);
+  }
+  if (out.byteLength > usable) out[out.byteLength - 1] = pcm[pcm.byteLength - 1];
+  return out;
+}
+
 /** Milliseconds of audio in a PCM16 chunk at the session rate. */
 export function chunkMs(pcm: Uint8Array, sampleRate: number = SESSION_SAMPLE_RATE): number {
   return (pcm.byteLength / 2 / sampleRate) * 1000;
@@ -105,7 +151,7 @@ export interface SegmenterPush {
   utteranceEndMs?: number;
 }
 
-const DEFAULT_THRESHOLD = 600;
+const DEFAULT_THRESHOLD = 350;
 const DEFAULT_SILENCE_MS = 700;
 const DEFAULT_MAX_UTTERANCE_MS = 120_000;
 
