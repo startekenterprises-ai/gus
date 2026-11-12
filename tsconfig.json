@@ -1,1 +1,30 @@
-{"extends":"./tsconfig.base.json","files":[],"references":[{"path":"packages/shared"},{"path":"packages/gate"},{"path":"packages/vault"},{"path":"packages/egress"},{"path":"packages/channels/telegram"},{"path":"packages/control-plane"},{"path":"packages/runtime"}]}
+{
+  "extends": "./tsconfig.base.json",
+  "files": [],
+  "references": [
+    {
+      "path": "packages/shared"
+    },
+    {
+      "path": "packages/gate"
+    },
+    {
+      "path": "packages/vault"
+    },
+    {
+      "path": "packages/egress"
+    },
+    {
+      "path": "packages/channels/telegram"
+    },
+    {
+      "path": "packages/channels/voice"
+    },
+    {
+      "path": "packages/control-plane"
+    },
+    {
+      "path": "packages/runtime"
+    }
+  ]
+}

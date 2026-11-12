@@ -7,8 +7,11 @@
 #   1. Verifies the toolchain (Xcode Command Line Tools: swift,
 #      codesign, hdiutil) and Node >= 22 — failing loudly, by name,
 #      when something is missing. Nothing is half-built silently.
-#   2. Builds the GUS control plane + runtime (npm run build) and
-#      the Swift app + helper (swift build -c release).
+#   2. Installs workspace deps (npm install — a release that adds a
+#      workspace package needs its node_modules/@gus/* symlink created
+#      before tsc can resolve it), builds the GUS control plane +
+#      runtime (npm run build) and the Swift app + helper
+#      (swift build -c release).
 #   3. Assembles GUS.app (bundle id com.startekenterprises.gus):
 #        Contents/MacOS/GUS              the menu-bar app
 #        Contents/Helpers/GusMacHost     the native host helper
@@ -49,6 +52,9 @@ BUILD=$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || date +%Y%m%d)
 echo "build-dmg: GUS $VERSION (build $BUILD)"
 
 # --- 2. builds ------------------------------------------------------
+echo "build-dmg: installing workspace dependencies (npm install)…"
+(cd "$REPO_DIR" && npm install)
+
 echo "build-dmg: building the control plane + runtime (npm run build)…"
 (cd "$REPO_DIR" && npm run build)
 
@@ -92,6 +98,9 @@ done
 mkdir -p "$PAYLOAD/packages/channels/telegram"
 cp -R "$REPO_DIR/packages/channels/telegram/dist" "$PAYLOAD/packages/channels/telegram/dist"
 cp "$REPO_DIR/packages/channels/telegram/package.json" "$PAYLOAD/packages/channels/telegram/package.json"
+mkdir -p "$PAYLOAD/packages/channels/voice"
+cp -R "$REPO_DIR/packages/channels/voice/dist" "$PAYLOAD/packages/channels/voice/dist"
+cp "$REPO_DIR/packages/channels/voice/package.json" "$PAYLOAD/packages/channels/voice/package.json"
 
 # Workspace-internal module resolution inside the bundle: Node finds
 # @gus/* through these relative symlinks, exactly like the repo's
@@ -101,6 +110,7 @@ for pkg in shared gate vault egress panel control-plane runtime; do
   ln -s "../../packages/$pkg" "$PAYLOAD/node_modules/@gus/$pkg"
 done
 ln -s "../../packages/channels/telegram" "$PAYLOAD/node_modules/@gus/telegram"
+ln -s "../../packages/channels/voice" "$PAYLOAD/node_modules/@gus/voice"
 
 mkdir -p "$PAYLOAD/docs" "$PAYLOAD/hosts/mac-resident"
 cp "$REPO_DIR/docs/mac-policy-template.json" "$PAYLOAD/docs/mac-policy-template.json"
