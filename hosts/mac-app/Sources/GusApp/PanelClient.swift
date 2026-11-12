@@ -138,6 +138,12 @@ struct PanelVoiceSettings: Decodable {
     var ttsModel: String
     var ttsVoice: String
     var bargeIn: Bool?
+    /// v0.9.6: the speech engines — "local" (built into this
+    /// app) or "endpoint" (the URLs above). Optional here: an
+    /// older control plane doesn't send them, and Settings
+    /// treats nil as the shipped default, "local".
+    var sttEngine: String?
+    var ttsEngine: String?
 }
 
 /// One push-to-talk exchange (POST /api/voice/call, v0.9). On a
@@ -211,6 +217,19 @@ struct PanelVoiceSession: Decodable {
     var turns: [PanelVoiceSessionTurn]
     var lastLatency: PanelVoiceTurnLatency?
     var hearing: PanelVoiceSessionHearing?
+    /// v0.9.6: the call's resolved speech modes — the control
+    /// plane probed any chosen endpoint at call start, so these
+    /// are what the call is actually using. The model runs its
+    /// Speech-framework recognizer when sttMode is "local" and
+    /// speaks text segments itself when ttsMode is "local".
+    /// speechNotice carries the fallback notice ("Speech service
+    /// unreachable — using built-in voice for this call.") when
+    /// a mode fell back. Optional: an older control plane sends
+    /// none of these, and the call then behaves exactly as
+    /// before — endpoint ears, endpoint mouth.
+    var sttMode: String?
+    var ttsMode: String?
+    var speechNotice: String?
 }
 
 /// One spoken segment of a live call's reply (v0.9.1): a single
@@ -224,6 +243,10 @@ struct PanelVoiceAudioSegment: Decodable {
     var sentenceIndex: Int?
     var audioBase64: String?
     var audioContentType: String?
+    /// v0.9.6: a speak-text segment (built-in TTS) — present
+    /// instead of audioBase64; the app speaks it with
+    /// AVSpeechSynthesizer. A segment carries one or the other.
+    var text: String?
 }
 
 /// The onboarding read model (GET /api/onboarding) — the wizard's
@@ -470,6 +493,15 @@ final class PanelClient {
         req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         req.httpBody = pcm
         perform(req, as: PanelActionResult.self, completion: completion)
+    }
+
+    /// v0.9.6: one final transcript from this app's built-in
+    /// recognizer, for a call whose resolved STT mode is local.
+    /// The words become a normal session turn in the control
+    /// plane — the same pipeline a transcribed utterance takes.
+    func postVoiceSessionTranscript(sessionId: String, text: String, completion: @escaping (Result<PanelActionResult, Error>) -> Void) {
+        perform(request(path: "/api/voice/session/transcript", method: "POST", jsonBody: ["sessionId": sessionId, "text": text]),
+                as: PanelActionResult.self, completion: completion)
     }
 
     /// Barge-in: cut the current reply's speech. Speech only —

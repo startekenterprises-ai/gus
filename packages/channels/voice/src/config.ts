@@ -16,19 +16,44 @@
  * The defaults below are the conventional local ports of the two
  * reference servers; they are starting points the operator edits,
  * not hosts the code depends on.
+ *
+ * v0.9.6 ("Voice, built in"): each service ALSO has an engine —
+ * "local" (the speech lives in the app on the operator's Mac:
+ * the Speech framework transcribes, AVSpeechSynthesizer speaks)
+ * or "endpoint" (the HTTP services above). Built-in is the
+ * default and the migration: a voice.json written before engines
+ * existed has no engine fields, and it upgrades to built-in —
+ * the 0.9.5 field failure (an unreachable LAN endpoint silently
+ * eating every turn of a call) is exactly what the default now
+ * routes around. Endpoints stay as optional extras; session.ts
+ * probes a chosen endpoint at call start and falls back to
+ * built-in for that call when it doesn't answer.
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+/** v0.9.6: where one half of the call's speech lives — in the
+ *  app on the operator's Mac ("local") or at the configured
+ *  OpenAI-compatible endpoint ("endpoint"). */
+export type VoiceEngine = "local" | "endpoint";
+
 export interface VoiceConfig {
   /** The master switch. Off = the call endpoint refuses, loudly. */
   enabled: boolean;
+  /** v0.9.6: the transcription engine. Anything in the file that
+   *  isn't literally "endpoint" resolves to "local" — built-in
+   *  is the default, the same defensive shape as bargeIn. */
+  sttEngine: VoiceEngine;
   /** OpenAI-compatible base URL of the transcription service,
-   *  e.g. "http://127.0.0.1:8000/v1" — POST {base}/audio/transcriptions. */
+   *  e.g. "http://127.0.0.1:8000/v1" — POST {base}/audio/transcriptions.
+   *  Used only when sttEngine is "endpoint". */
   sttBaseUrl: string;
   sttModel: string;
+  /** v0.9.6: the speech engine — same rule as sttEngine. */
+  ttsEngine: VoiceEngine;
   /** OpenAI-compatible base URL of the speech service,
-   *  e.g. "http://127.0.0.1:8880/v1" — POST {base}/audio/speech. */
+   *  e.g. "http://127.0.0.1:8880/v1" — POST {base}/audio/speech.
+   *  Used only when ttsEngine is "endpoint". */
   ttsBaseUrl: string;
   ttsModel: string;
   ttsVoice: string;
@@ -43,8 +68,10 @@ export interface VoiceConfig {
 
 export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
   enabled: false,
+  sttEngine: "local",
   sttBaseUrl: "http://127.0.0.1:8000/v1",
   sttModel: "whisper-1",
+  ttsEngine: "local",
   ttsBaseUrl: "http://127.0.0.1:8880/v1",
   ttsModel: "kokoro",
   ttsVoice: "af_heart",
@@ -74,8 +101,10 @@ export function parseVoiceConfig(raw: unknown): VoiceConfig {
   const r = raw as Partial<VoiceConfig>;
   return {
     enabled: r.enabled === true,
+    sttEngine: r.sttEngine === "endpoint" ? "endpoint" : "local",
     sttBaseUrl: urlOr(r.sttBaseUrl, DEFAULT_VOICE_CONFIG.sttBaseUrl),
     sttModel: textOr(r.sttModel, DEFAULT_VOICE_CONFIG.sttModel),
+    ttsEngine: r.ttsEngine === "endpoint" ? "endpoint" : "local",
     ttsBaseUrl: urlOr(r.ttsBaseUrl, DEFAULT_VOICE_CONFIG.ttsBaseUrl),
     ttsModel: textOr(r.ttsModel, DEFAULT_VOICE_CONFIG.ttsModel),
     ttsVoice: textOr(r.ttsVoice, DEFAULT_VOICE_CONFIG.ttsVoice),
@@ -99,8 +128,12 @@ export function writeVoiceConfig(stateDir: string, config: VoiceConfig, setBy: s
 }
 
 /** "Configured" for the settings readout: the channel is enabled
- *  and both endpoints name a service. Presence only — the readout
- *  never carries the URLs themselves into the status summary. */
+ *  and each half either runs built-in or names an endpoint
+ *  service. Presence only — the readout never carries the URLs
+ *  themselves into the status summary. */
 export function voiceConfigured(config: VoiceConfig): boolean {
-  return config.enabled && config.sttBaseUrl.length > 0 && config.ttsBaseUrl.length > 0;
+  if (!config.enabled) return false;
+  const sttOk = config.sttEngine === "local" || config.sttBaseUrl.length > 0;
+  const ttsOk = config.ttsEngine === "local" || config.ttsBaseUrl.length > 0;
+  return sttOk && ttsOk;
 }

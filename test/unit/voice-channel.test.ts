@@ -43,6 +43,8 @@ import {
   VOICE_CONVERSATION,
   classifyTranscript,
   loadVoiceConfig,
+  parseVoiceConfig,
+  voiceConfigured,
   writeVoiceConfig,
   DEFAULT_VOICE_CONFIG,
 } from "../../packages/channels/voice/src/index.js";
@@ -112,8 +114,10 @@ async function rig(opts?: {
       dir,
       {
         enabled: true,
+        sttEngine: "endpoint",
         sttBaseUrl: "http://stt.test/v1",
         sttModel: "whisper-1",
+        ttsEngine: "endpoint",
         ttsBaseUrl: "http://tts.test/v1",
         ttsModel: "kokoro",
         ttsVoice: "af_heart",
@@ -193,8 +197,10 @@ test("voice config: defensive parse — bad URLs fall back, enable needs a liter
   const dir = mkdtempSync(join(tmpdir(), "gus-voice-cfg-"));
   writeVoiceConfig(dir, {
     enabled: true,
+    sttEngine: "endpoint",
     sttBaseUrl: "http://stt.local:8000/v1/",
     sttModel: "whisper-1",
+    ttsEngine: "endpoint",
     ttsBaseUrl: "not a url",
     ttsModel: "kokoro",
     ttsVoice: "af_heart",
@@ -204,6 +210,54 @@ test("voice config: defensive parse — bad URLs fall back, enable needs a liter
   assert.equal(cfg.enabled, true);
   assert.equal(cfg.sttBaseUrl, "http://stt.local:8000/v1", "trailing slash trimmed");
   assert.equal(cfg.ttsBaseUrl, DEFAULT_VOICE_CONFIG.ttsBaseUrl, "an unusable URL falls back, never half-applies");
+});
+
+test("voice config (v0.9.6): engines default to built-in; only a literal 'endpoint' opts out", () => {
+  // The migration shape: a voice.json written before engines
+  // existed (URLs on file, no engine fields) parses to built-in
+  // for both halves — the URLs stay on file as the endpoint
+  // option, unused until the operator picks Endpoint again.
+  const legacy = parseVoiceConfig({
+    enabled: true,
+    sttBaseUrl: "http://192.168.2.42:8000/v1",
+    sttModel: "Systran/faster-whisper-base",
+    ttsBaseUrl: "http://192.168.2.42:8880/v1",
+    ttsModel: "kokoro",
+    ttsVoice: "af_heart",
+    bargeIn: true,
+  });
+  assert.equal(legacy.sttEngine, "local", "no engine field → built-in");
+  assert.equal(legacy.ttsEngine, "local");
+  assert.equal(legacy.sttBaseUrl, "http://192.168.2.42:8000/v1", "the endpoint stays on file");
+  assert.equal(DEFAULT_VOICE_CONFIG.sttEngine, "local");
+  assert.equal(DEFAULT_VOICE_CONFIG.ttsEngine, "local");
+
+  const chosen = parseVoiceConfig({ sttEngine: "endpoint", ttsEngine: "endpoint" });
+  assert.equal(chosen.sttEngine, "endpoint", "a literal 'endpoint' is honored");
+  assert.equal(chosen.ttsEngine, "endpoint");
+  const garbage = parseVoiceConfig({ sttEngine: "cloud", ttsEngine: 42 });
+  assert.equal(garbage.sttEngine, "local", "anything else fails toward built-in, never a half-mode");
+  assert.equal(garbage.ttsEngine, "local");
+});
+
+test("voice config (v0.9.6): voiceConfigured — built-in needs no URL; an endpoint engine does", () => {
+  const base = { ...DEFAULT_VOICE_CONFIG, enabled: true };
+  assert.equal(
+    voiceConfigured({ ...base, sttBaseUrl: "", ttsBaseUrl: "" }),
+    true,
+    "both halves built-in: configured with no URLs at all",
+  );
+  assert.equal(
+    voiceConfigured({ ...base, sttEngine: "endpoint", sttBaseUrl: "", ttsBaseUrl: "" }),
+    false,
+    "an endpoint STT with no URL is unconfigured",
+  );
+  assert.equal(
+    voiceConfigured({ ...base, ttsEngine: "endpoint", ttsBaseUrl: "" }),
+    false,
+    "an endpoint TTS with no URL is unconfigured",
+  );
+  assert.equal(voiceConfigured({ ...base, enabled: false }), false, "off is never configured");
 });
 
 // ---------------------------------------------------------------- the job path
@@ -472,6 +526,7 @@ test("voice panel routes: settings GET/POST and the raw-audio call, token-gated"
     },
     voiceSessionStart: () => ({ ok: false, active: false, detail: "voice sessions are not wired in this stub", turns: [] }),
     voiceSessionAudio: () => ({ ok: false, detail: "voice sessions are not wired in this stub" }),
+    voiceSessionTranscript: () => ({ ok: false, detail: "voice sessions are not wired in this stub" }),
     voiceSessionState: () => ({ ok: false, active: false, detail: "voice sessions are not wired in this stub", turns: [] }),
     voiceSessionNextAudio: () => ({ ok: false, detail: "voice sessions are not wired in this stub" }),
     voiceSessionInterrupt: () => ({ ok: false, detail: "voice sessions are not wired in this stub" }),

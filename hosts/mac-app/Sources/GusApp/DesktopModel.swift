@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import Speech
 
 /// Cross-window requests, posted by views and observed by the app
 /// delegate (windows) or this model (the setup sheet).
@@ -121,6 +122,32 @@ final class DesktopModel: ObservableObject {
     // isPlaying, which is all the chaining needs).
     private var voicePlayer: AVAudioPlayer?
     private var voicePlayQueue: [Data] = []
+    /// v0.9.6 (Voice, built in): the call's RESOLVED speech modes,
+    /// from the session the control plane opened — "local" means
+    /// this app is the ears and/or the mouth for the call. An
+    /// older control plane resolves nothing, and the defaults
+    /// here ("endpoint" both) keep its calls behaving exactly as
+    /// they did before built-in existed.
+    private var voiceSttMode = "endpoint"
+    private var voiceTtsMode = "endpoint"
+    // Built-in mouth: speak-text segments queue here and the
+    // chunk timer feeds them to the synthesizer (the same
+    // no-delegate chaining as the player above — the timer asks
+    // isSpeaking). Barge-in stops the synthesizer and clears
+    // this queue, exactly as it clears the player's.
+    private var voiceSynthesizer = AVSpeechSynthesizer()
+    private var voiceSpeakQueue: [String] = []
+    // Built-in ears: the Speech-framework recognizer. The tap
+    // appends the SAME native-format buffers it already receives
+    // (read under the stash lock in the tap handler); each final
+    // result is POSTed as a transcript and the task restarts —
+    // a recognition task lives about a minute, a call can live
+    // sixty. The generation counter keeps a cancelled task's
+    // trailing callbacks from acting on a call that has moved on.
+    private var voiceRecognizer: SFSpeechRecognizer?
+    private var voiceRecognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+    private var voiceRecognitionTask: SFSpeechRecognitionTask?
+    private var voiceRecognitionGen = 0
     /// The last action's outcome, in the panel's own words (or the
     /// transport error). Shown under the composer / sidebar so a
     /// refusal is never silent.
@@ -256,9 +283,16 @@ final class DesktopModel: ObservableObject {
                 case .success(let session) where session.ok && session.active:
                     self.voiceSessionId = session.sessionId
                     self.voiceBargeIn = session.bargeIn ?? true
+                    // v0.9.6: what this call actually uses — the
+                    // control plane resolved (and probed) the
+                    // modes at session start. The start detail
+                    // already carries any fallback notice.
+                    self.voiceSttMode = session.sttMode ?? "endpoint"
+                    self.voiceTtsMode = session.ttsMode ?? "endpoint"
                     self.voiceTurns = session.turns
                     self.voiceLastSeq = 0
                     self.voicePlayQueue = []
+                    self.voiceSpeakQueue = []
                     self.voiceLatencyLine = nil
                     self.voiceHearingLine = nil
                     self.voiceMicLevel = 0
@@ -274,6 +308,13 @@ final class DesktopModel: ObservableObject {
                         self?.pollVoiceSession()
                     }
                     self.scheduleVoiceConvertGuard()
+                    // v0.9.6: built-in ears start once the call
+                    // exists (the recognizer needs the session to
+                    // post transcripts to). Endpoint calls never
+                    // start it — one set of ears per call.
+                    if self.voiceSttMode == "local" {
+                        self.startVoiceRecognition()
+                    }
                 case .success(let session):
                     self.stopVoiceCapture()
                     self.notice = session.detail
@@ -419,6 +460,18 @@ final class DesktopModel: ObservableObject {
         if raw > Self.voiceAudibleFloor { voiceRawSpeechBuffers += 1 }
         voiceStashLock.unlock()
 
+        // v0.9.6: the built-in recognizer eats the SAME buffer,
+        // in the format the microphone delivered it — the Speech
+        // framework takes the hardware's native format, so this
+        // feed owes nothing to the converter below (a converter
+        // failure can no longer starve the ears). The request
+        // reference is read under the stash lock; append itself
+        // is the framework's documented tap pattern.
+        voiceStashLock.lock()
+        let recognitionRequest = voiceRecognitionRequest
+        voiceStashLock.unlock()
+        recognitionRequest?.append(buffer)
+
         // The converter is built LAZILY from the first buffer's
         // actual format (and rebuilt whenever a buffer arrives
         // in a different one) — never from a format queried
@@ -492,7 +545,7 @@ final class DesktopModel: ObservableObject {
             // while GUS is audibly talking means the operator is
             // talking over it — stop the player here, and tell
             // the control plane to drop the rest of the reply.
-            if voiceBargeIn, voicePlayer?.isPlaying == true {
+            if voiceBargeIn, voicePlayer?.isPlaying == true || voiceSynthesizer.isSpeaking {
                 if chunkLevel > 900 {
                     voiceLoudStreak += 1
                 } else {
@@ -520,17 +573,22 @@ final class DesktopModel: ObservableObject {
         client.voiceSessionNextAudio(sessionId: id, afterSeq: voiceLastSeq) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self, self.voiceInCall else { return }
-                if case .success(let seg) = result,
-                   let seq = seg.seq,
-                   let b64 = seg.audioBase64,
-                   let data = Data(base64Encoded: b64) {
+                if case .success(let seg) = result, let seq = seg.seq {
                     self.voiceLastSeq = seq
-                    self.voicePlayQueue.append(data)
+                    if let text = seg.text, !text.isEmpty {
+                        // v0.9.6: a speak-text segment — for this
+                        // call, this app is the mouth.
+                        self.voiceSpeakQueue.append(text)
+                    } else if let b64 = seg.audioBase64, let data = Data(base64Encoded: b64) {
+                        self.voicePlayQueue.append(data)
+                    }
                 }
                 self.advanceVoicePlayback()
+                self.advanceVoiceSpeech()
             }
         }
         advanceVoicePlayback()
+        advanceVoiceSpeech()
     }
 
     private func advanceVoicePlayback() {
@@ -548,6 +606,119 @@ final class DesktopModel: ObservableObject {
         voicePlayer?.stop()
         voicePlayer = nil
         voicePlayQueue = []
+        // v0.9.6: built-in speech cuts with the same stroke —
+        // the synthesizer stops mid-word and its queue drops,
+        // so a barge-in (or a hang-up) never leaves a sentence
+        // talking over the operator.
+        voiceSynthesizer.stopSpeaking(at: .immediate)
+        voiceSpeakQueue = []
+    }
+
+    /// v0.9.6: built-in speech chaining — if the synthesizer is
+    /// idle and a sentence is queued, speak it. Called from the
+    /// chunk timer, the player's own no-delegate pattern.
+    private func advanceVoiceSpeech() {
+        if voiceSynthesizer.isSpeaking { return }
+        guard !voiceSpeakQueue.isEmpty else { return }
+        let text = voiceSpeakQueue.removeFirst()
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+        voiceSynthesizer.speak(utterance)
+    }
+
+    // MARK: Built-in ears (v0.9.6)
+
+    /// Ask for speech-recognition authorization, then start the
+    /// recognizer. A denial ends the call with the reason
+    /// stated: this call's ears were resolved as built-in, and a
+    /// call must not sit in a fake "listening" state when the OS
+    /// won't provide them — the silent-mic preflight's honesty
+    /// rule, applied to the recognizer.
+    private func startVoiceRecognition() {
+        SFSpeechRecognizer.requestAuthorization { [weak self] status in
+            DispatchQueue.main.async {
+                guard let self, self.voiceInCall else { return }
+                guard status == .authorized else {
+                    self.notice = "Speech recognition is off for GUS — grant it in System Settings → Privacy & Security → Speech Recognition, then try the call again. The call is closed."
+                    self.teardownVoice(sendEnd: true)
+                    return
+                }
+                self.beginVoiceRecognitionTask()
+            }
+        }
+    }
+
+    /// One recognition task: on-device when the recognizer
+    /// supports it (the words then never leave this Mac — the
+    /// local-first posture in the framework's own terms), final
+    /// results only. A final result is POSTed as the call's next
+    /// transcript and the task restarts — Apple's per-task limit
+    /// is about a minute, a call's limit is sixty.
+    private func beginVoiceRecognitionTask() {
+        guard voiceInCall, voiceSttMode == "local" else { return }
+        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")),
+              recognizer.isAvailable else {
+            notice = "Built-in speech recognition isn't available on this Mac right now — the call is closed. In Settings → Voice you can point transcription at an endpoint instead."
+            teardownVoice(sendEnd: true)
+            return
+        }
+        voiceRecognizer = recognizer
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = false
+        if recognizer.supportsOnDeviceRecognition {
+            request.requiresOnDeviceRecognition = true
+        }
+        voiceStashLock.lock()
+        voiceRecognitionRequest = request
+        voiceStashLock.unlock()
+        voiceRecognitionGen += 1
+        let gen = voiceRecognitionGen
+        voiceRecognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
+            if let result, result.isFinal {
+                let text = result.bestTranscription.formattedString
+                DispatchQueue.main.async {
+                    guard let self, self.voiceInCall, gen == self.voiceRecognitionGen else { return }
+                    if let id = self.voiceSessionId {
+                        self.client.postVoiceSessionTranscript(sessionId: id, text: text) { _ in }
+                    }
+                    // Restart for the next sentence: cancel drops
+                    // this task (its trailing error, if any, sees
+                    // a stale generation and is ignored), and a
+                    // fresh task takes over the ears.
+                    self.voiceRecognitionTask?.cancel()
+                    self.voiceRecognitionTask = nil
+                    self.voiceStashLock.lock()
+                    self.voiceRecognitionRequest = nil
+                    self.voiceStashLock.unlock()
+                    self.beginVoiceRecognitionTask()
+                }
+                return
+            }
+            if let error {
+                DispatchQueue.main.async {
+                    guard let self, self.voiceInCall, gen == self.voiceRecognitionGen else { return }
+                    self.notice = "Built-in speech recognition stopped: \(error.localizedDescription) — the call is closed rather than left listening to nothing."
+                    self.teardownVoice(sendEnd: true)
+                }
+            }
+        }
+    }
+
+    /// Stop the recognizer: generation bump first (every pending
+    /// callback from the old task becomes a no-op), then cancel.
+    /// Called by teardownVoice — End Call, a server-side ending,
+    /// and the kill phrase's ending all pass through there, so
+    /// no path leaves the recognizer running past its call.
+    private func stopVoiceRecognition() {
+        voiceRecognitionGen += 1
+        voiceRecognitionTask?.cancel()
+        voiceRecognitionTask = nil
+        voiceStashLock.lock()
+        voiceRecognitionRequest?.endAudio()
+        voiceRecognitionRequest = nil
+        voiceStashLock.unlock()
+        voiceRecognizer = nil
     }
 
     /// The state poll (~0.8 s): transcript, phase, elapsed,
@@ -598,6 +769,7 @@ final class DesktopModel: ObservableObject {
         voiceChunkTimer = nil
         voicePollTimer?.invalidate()
         voicePollTimer = nil
+        stopVoiceRecognition()
         stopVoiceCapture()
         cutVoicePlayback()
         voiceSessionId = nil

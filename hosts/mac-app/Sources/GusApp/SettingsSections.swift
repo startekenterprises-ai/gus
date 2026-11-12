@@ -320,6 +320,9 @@ struct SettingsTelegramView: View {
 /// the call service re-reads the file per call, so a save is live
 /// on the next call with no restart. No secrets live here: the
 /// reference services are unauthenticated on the local machine.
+/// v0.9.6: each half also picks its engine — Built-in (speech in
+/// the app itself; the default, and the only choice that needs
+/// nothing running anywhere else) or Endpoint (the fields below).
 struct SettingsVoiceView: View {
     @ObservedObject var model: SettingsModel
 
@@ -329,16 +332,29 @@ struct SettingsVoiceView: View {
             if let s = model.status {
                 SettingsRow(title: "Voice channel",
                             value: s.settings.voice.enabled
-                                ? (s.settings.voice.configured ? "On — endpoints on file" : "On — an endpoint is missing")
+                                ? (s.settings.voice.configured ? "On — configured" : "On — an endpoint is missing")
                                 : "Off",
                             help: model.help("voice-call"))
             }
-            Text("Talk to GUS from the chat window's Call button — a live call, not a recording: the microphone is open only while the call is, a pause ends your turn, and the reply is spoken sentence by sentence as it's made. Your words are transcribed by a speech service on your own machine, then treated exactly like a typed message — same secret-guard, Shield scan, caps, and receipts. If a speech service fails, you get the reply as text with the reason stated.")
+            Text("Talk to GUS from the chat window's Call button — a live call, not a recording: the microphone is open only while the call is, a pause ends your turn, and the reply is spoken sentence by sentence as it's made. Your words are transcribed on your own machine — by the app's built-in speech, or by a speech service you run — then treated exactly like a typed message — same secret-guard, Shield scan, caps, and receipts. If endpoint speech fails, you get the reply as text with the reason stated.")
                 .font(.callout)
                 .foregroundColor(.secondary)
             Toggle("Enable voice calls", isOn: $model.voiceEnabled)
             Toggle("Interrupt GUS when I talk over it (barge-in)", isOn: $model.voiceBargeIn)
             Text("Barge-in cuts the spoken reply off when you start talking over it. It stops the talking only — never a running job, never an approval.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Picker("Transcription (STT)", selection: $model.voiceSttEngine) {
+                Text("Built-in").tag("local")
+                Text("Endpoint").tag("endpoint")
+            }
+            .pickerStyle(.segmented)
+            Picker("Speech (TTS)", selection: $model.voiceTtsEngine) {
+                Text("Built-in").tag("local")
+                Text("Endpoint").tag("endpoint")
+            }
+            .pickerStyle(.segmented)
+            Text("Built-in speech lives in the app on this Mac — nothing to install, run, or keep reachable. Endpoint speech uses the services below; if one doesn't answer when a call starts, that call uses built-in voice instead and says so — the setting itself is never changed for you.")
                 .font(.caption)
                 .foregroundColor(.secondary)
             Group {

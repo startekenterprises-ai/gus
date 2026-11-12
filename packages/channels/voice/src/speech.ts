@@ -10,7 +10,9 @@
  *     call surface shows that text to the operator verbatim. The
  *     channel never substitutes a different service, never guesses
  *     a transcript, and never ships the reply as text-only while
- *     pretending it spoke.
+ *     pretending it spoke. (v0.9.6's built-in fallback is a
+ *     different thing: a mode resolved at call start by probe,
+ *     announced in the session state — never a mid-turn swap.)
  *   - No credentials: the reference local servers (faster-whisper,
  *     Kokoro-FastAPI) are unauthenticated on loopback, and adding a
  *     key here would put a secret in a settings file. If an
@@ -35,6 +37,28 @@ export class SpeechServiceError extends Error {
 export type FetchFn = typeof fetch;
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+
+/** v0.9.6: the call-start reachability probe for an endpoint the
+ *  operator chose — GET {base}/models (the route both reference
+ *  servers answer) with a short timeout. Boolean, never throws:
+ *  the answer decides the call's resolved mode (endpoint, or
+ *  built-in for this call), it is not itself a failure surface —
+ *  the session state carries the fallback notice in words. */
+export async function probeEndpoint(
+  fetchFn: FetchFn,
+  baseUrl: string,
+  timeoutMs: number = 2_500,
+): Promise<boolean> {
+  try {
+    const res = await fetchFn(`${baseUrl}/models`, {
+      method: "GET",
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
 
 async function errorDetail(res: Response): Promise<string> {
   let body = "";

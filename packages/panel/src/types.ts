@@ -178,9 +178,17 @@ export interface PanelSettingsDetailData {
  *  loopback, and a credential has no business in a settings file. */
 export interface PanelVoiceSettingsData {
   enabled: boolean;
+  /** v0.9.6: the transcription engine — "local" (built into the
+   *  app) or "endpoint" (the URL below). Optional on the wire so
+   *  older surfaces that omit it keep working; the config
+   *  default is "local" and the control plane preserves the
+   *  stored value on a save that doesn't mention it. */
+  sttEngine?: string;
   /** OpenAI-compatible transcription base URL (faster-whisper). */
   sttBaseUrl: string;
   sttModel: string;
+  /** v0.9.6: the speech engine — same rule as sttEngine. */
+  ttsEngine?: string;
   /** OpenAI-compatible speech base URL (Kokoro-FastAPI). */
   ttsBaseUrl: string;
   ttsModel: string;
@@ -265,6 +273,14 @@ export interface PanelVoiceSessionData {
   elapsedMs?: number;
   endedReason?: string;
   bargeIn?: boolean;
+  /** v0.9.6: the call's resolved speech modes ("local" |
+   *  "endpoint") after the call-start probe — the app runs its
+   *  recognizer when sttMode is "local" and its synthesizer for
+   *  text segments when ttsMode is "local". speechNotice carries
+   *  the fallback notice when a mode fell back. */
+  sttMode?: string;
+  ttsMode?: string;
+  speechNotice?: string;
   turns: PanelVoiceSessionTurnData[];
   lastLatency?: PanelVoiceTurnLatencyData;
   hearing?: PanelVoiceSessionHearingData;
@@ -284,6 +300,9 @@ export interface PanelVoiceAudioSegmentData {
   sentenceIndex?: number;
   audioBase64?: string;
   audioContentType?: string;
+  /** v0.9.6: a speak-text segment (built-in TTS) — present
+   *  instead of audioBase64; the app speaks it itself. */
+  text?: string;
 }
 
 export interface PanelOnboardingStep {
@@ -440,8 +459,13 @@ export interface PanelBackend {
    *  barge-in (speech only — never a job, never an approval);
    *  end hangs up. All delegate to the voice session service —
    *  the backend adds no path of its own. */
-  voiceSessionStart(): PanelVoiceSessionData;
+  voiceSessionStart(): PanelVoiceSessionData | Promise<PanelVoiceSessionData>;
   voiceSessionAudio(sessionId: string, audio: Uint8Array): PanelActionResult;
+  /** v0.9.6: a final transcript from the app's built-in
+   *  recognizer, for a call whose resolved STT mode is local.
+   *  The transcript takes the identical session turn a
+   *  transcribed utterance takes — the panel adds no path. */
+  voiceSessionTranscript(sessionId: string, text: string): PanelActionResult;
   voiceSessionState(sessionId: string): PanelVoiceSessionData;
   voiceSessionNextAudio(sessionId: string, afterSeq: number): PanelVoiceAudioSegmentData;
   voiceSessionInterrupt(sessionId: string): PanelActionResult;

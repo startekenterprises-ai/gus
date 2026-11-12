@@ -24,7 +24,12 @@
 //     and a preflight refuses to open a call on a silent
 //     microphone instead of listening forever; v0.9.5 is a
 //     control-plane-only release (the GitHub publish pack) — no
-//     app changes).
+//     app changes; v0.9.6: voice, built in — when the call's
+//     resolved STT mode is local the app transcribes with the
+//     Speech framework (on-device where supported) and posts
+//     transcripts to the session; when TTS resolves local it
+//     speaks the session's text segments with
+//     AVSpeechSynthesizer; endpoint calls behave as before).
 //     It launches GusMacHost from inside the bundle (so
 //     Accessibility / Screen Recording grants attach to
 //     GUS.app), shows status, starts/stops the launchd agents, and

@@ -13,6 +13,8 @@
 <dict>
   <key>NSMicrophoneUsageDescription</key>
   <string>GUS uses the microphone only while you hold a voice call: the recording goes to the speech service on your own machine, and the transcript is treated exactly like a typed message.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>GUS transcribes your voice calls on this Mac.</string>
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleDisplayName</key>

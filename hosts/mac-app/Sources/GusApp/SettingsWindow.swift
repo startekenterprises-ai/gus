@@ -111,6 +111,12 @@ final class SettingsModel: ObservableObject {
     // file and is NOT part of the status payload.
     @Published var voiceEnabled = false
     @Published var voiceBargeIn = true
+    /// v0.9.6: the speech engines — "local" (built into the app)
+    /// or "endpoint" (the URL fields). Seeded from the settings
+    /// read; a panel that doesn't send them seeds the shipped
+    /// default, "local".
+    @Published var voiceSttEngine = "local"
+    @Published var voiceTtsEngine = "local"
     @Published var voiceSttUrl = ""
     @Published var voiceSttModel = ""
     @Published var voiceTtsUrl = ""
@@ -163,6 +169,8 @@ final class SettingsModel: ObservableObject {
                 self.voiceSeeded = true
                 self.voiceEnabled = v.enabled
                 self.voiceBargeIn = v.bargeIn ?? true
+                self.voiceSttEngine = v.sttEngine ?? "local"
+                self.voiceTtsEngine = v.ttsEngine ?? "local"
                 self.voiceSttUrl = v.sttBaseUrl
                 self.voiceSttModel = v.sttModel
                 self.voiceTtsUrl = v.ttsBaseUrl
@@ -266,6 +274,8 @@ final class SettingsModel: ObservableObject {
         act("/api/voice/settings", body: [
             "enabled": voiceEnabled,
             "bargeIn": voiceBargeIn,
+            "sttEngine": voiceSttEngine,
+            "ttsEngine": voiceTtsEngine,
             "sttBaseUrl": voiceSttUrl.trimmingCharacters(in: .whitespacesAndNewlines),
             "sttModel": voiceSttModel.trimmingCharacters(in: .whitespacesAndNewlines),
             "ttsBaseUrl": voiceTtsUrl.trimmingCharacters(in: .whitespacesAndNewlines),

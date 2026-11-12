@@ -9,4 +9,4 @@
  * bundle's VERSION file, which scripts/pack.mjs derives from here) —
  * never by editing a running install.
  */
-export const GUS_VERSION = "0.9.5";
+export const GUS_VERSION = "0.9.6";

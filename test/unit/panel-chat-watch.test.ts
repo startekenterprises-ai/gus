@@ -231,6 +231,7 @@ async function rig(opts?: { shieldGate?: unknown; macHost?: MacHostAdapter }): P
     voiceCall: async () => ({ ok: false, kind: "unavailable", detail: "voice is not wired in this stub" }),
     voiceSessionStart: () => ({ ok: false, active: false, detail: "voice sessions are not wired in this stub", turns: [] }),
     voiceSessionAudio: () => ({ ok: false, detail: "voice sessions are not wired in this stub" }),
+    voiceSessionTranscript: () => ({ ok: false, detail: "voice sessions are not wired in this stub" }),
     voiceSessionState: () => ({ ok: false, active: false, detail: "voice sessions are not wired in this stub", turns: [] }),
     voiceSessionNextAudio: () => ({ ok: false, detail: "voice sessions are not wired in this stub" }),
     voiceSessionInterrupt: () => ({ ok: false, detail: "voice sessions are not wired in this stub" }),

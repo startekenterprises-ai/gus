@@ -49,6 +49,25 @@
  * state, and the finished session's snapshot rides later state
  * polls as lastSession instead of vanishing.
  *
+ * Built in (v0.9.6): the 0.9.5 field call heard Glenn fine and
+ * still never spoke — every turn died at an unreachable LAN
+ * endpoint (the Speaches container on another machine), so the
+ * transcript never existed and there was nothing to answer. A
+ * call no longer depends on Docker or the LAN: each speech half
+ * has an engine in config (built-in by default), and the app's
+ * own Speech framework / AVSpeechSynthesizer are the built-in
+ * engines. At call start the session resolves its modes —
+ * built-in stays built-in; a chosen endpoint is probed
+ * (speech.ts) and an unreachable one resolves to built-in FOR
+ * THIS CALL, with the notice on the session state, never a
+ * silent swap. In built-in STT mode the PCM stream still feeds
+ * the hearing ledger, but utterances are not transcribed here:
+ * the app POSTs each final transcript to submitTranscript(),
+ * which takes the IDENTICAL turn below (processTranscript) —
+ * the ears changed, the pipeline didn't. In built-in TTS mode
+ * reply sentences are queued as speak-text segments for the
+ * app's synthesizer instead of synthesized audio.
+ *
  * The microphone's liveness is the app's side of the contract:
  * this service only ever sees audio the app chose to stream, and
  * only while a session the operator started is active. There is
@@ -60,8 +79,10 @@ import {
   loadVoiceConfig,
   voiceConfigured,
   type VoiceConfig,
+  type VoiceEngine,
 } from "./config.js";
 import {
+  probeEndpoint,
   synthesize,
   transcribe,
   SpeechServiceError,
@@ -99,6 +120,11 @@ export interface VoiceSessionTurn {
   index: number;
   startedAt: number;
   transcript?: string;
+  /** v0.9.6: which ears produced the transcript — the built-in
+   *  recognizer in the app ("local") or the endpoint service
+   *  ("endpoint"). Rides the durable turn record, so a call's
+   *  post-mortem says which path its words took. */
+  via?: VoiceEngine;
   /** The VoiceCallResult kind, verbatim (reply | pending |
    *  stopped | approval-resolved | awaiting-confirmation |
    *  unavailable). */
@@ -149,6 +175,19 @@ export interface VoiceSessionStateData {
   elapsedMs?: number;
   endedReason?: VoiceSessionEndReason;
   bargeIn?: boolean;
+  /** v0.9.6: the call's RESOLVED speech modes — what this call
+   *  is actually using after the call-start probe, which may
+   *  differ from the configured engines (an unreachable endpoint
+   *  resolves to "local" for the call). The app reads these at
+   *  call start to decide whether to run its recognizer and its
+   *  synthesizer. */
+  sttMode?: VoiceEngine;
+  ttsMode?: VoiceEngine;
+  /** v0.9.6: the fallback notice, when a resolved mode differs
+   *  from the configured engine — plain words on the state, e.g.
+   *  "Speech service unreachable — using built-in voice for
+   *  this call." */
+  speechNotice?: string;
   turns: VoiceSessionTurn[];
   lastLatency?: VoiceTurnLatency;
   hearing?: VoiceSessionHearingData;
@@ -168,6 +207,10 @@ export interface VoiceAudioSegmentData {
   sentenceIndex?: number;
   audioBase64?: string;
   audioContentType?: string;
+  /** v0.9.6: a speak-text segment (built-in TTS mode) — the app
+   *  speaks this text with its own synthesizer. Present instead
+   *  of audioBase64; a segment carries one or the other. */
+  text?: string;
 }
 
 interface AudioSegment {
@@ -176,6 +219,8 @@ interface AudioSegment {
   sentenceIndex: number;
   audioBase64: string;
   audioContentType: string;
+  /** v0.9.6: speak-text for built-in TTS (see the data shape). */
+  text?: string;
   fetched: boolean;
 }
 
@@ -183,6 +228,14 @@ interface ActiveSession {
   id: string;
   startedAt: number;
   lastSpeechAt: number;
+  /** v0.9.6: the resolved speech modes for THIS call (see
+   *  VoiceSessionStateData) — fixed at call start; a mid-call
+   *  settings edit lands on the next call, like every other
+   *  voice setting. */
+  sttMode: VoiceEngine;
+  ttsMode: VoiceEngine;
+  /** v0.9.6: the fallback notice, when resolution fell back. */
+  speechNotice?: string;
   segmenter: UtteranceSegmenter;
   turns: VoiceSessionTurn[];
   segments: AudioSegment[];
@@ -220,6 +273,7 @@ export class VoiceSessionService {
   private maxSessionMs: number;
   private silenceMs?: number;
   private vadThreshold?: number;
+  private probeTimeoutMs: number;
   private calls: VoiceCallService;
   private session?: ActiveSession;
   /** The last ended session's state, kept so the app's poll can
@@ -240,6 +294,7 @@ export class VoiceSessionService {
       maxSessionMs?: number;
       silenceMs?: number;
       vadThreshold?: number;
+      probeTimeoutMs?: number;
     },
   ) {
     this.fetchFn = opts?.fetchFn ?? fetch;
@@ -248,6 +303,7 @@ export class VoiceSessionService {
     this.maxSessionMs = opts?.maxSessionMs ?? DEFAULT_MAX_SESSION_MS;
     this.silenceMs = opts?.silenceMs;
     this.vadThreshold = opts?.vadThreshold;
+    this.probeTimeoutMs = opts?.probeTimeoutMs ?? 2_500;
     this.calls = new VoiceCallService(stateDir, adapter, approvals, {
       fetchFn: this.fetchFn,
       replyTimeoutMs: opts?.replyTimeoutMs,
@@ -259,8 +315,16 @@ export class VoiceSessionService {
   /** Open a call. The guards are the 0.9.0 call's guards, word
    *  for word: voice off or unconfigured refuses loudly, before
    *  any audio is accepted. One call at a time — a second start
-   *  while one is live answers with the live session's state. */
-  start(): VoiceSessionStateData {
+   *  while one is live answers with the live session's state.
+   *
+   *  v0.9.6: async because opening a call now RESOLVES its speech
+   *  modes: a built-in engine resolves to itself; an endpoint
+   *  engine is probed (short timeout, both probes in parallel)
+   *  and resolves to the endpoint only if it answers — otherwise
+   *  to built-in for this call, with the notice on the state.
+   *  The config on file is never rewritten by a fallback: fix
+   *  the endpoint and the next call uses it again. */
+  async start(): Promise<VoiceSessionStateData> {
     if (this.session) {
       return {
         ...this.state(this.session.id),
@@ -275,7 +339,7 @@ export class VoiceSessionService {
         active: false,
         turns: [],
         detail:
-          "Voice is off. Enable it in Settings → Voice and point it at your transcription and speech services, then try again. Nothing was sent to GUS.",
+          "Voice is off. Enable it in Settings → Voice, then try again. Nothing was sent to GUS.",
       };
     }
     if (!voiceConfigured(config)) {
@@ -284,14 +348,18 @@ export class VoiceSessionService {
         active: false,
         turns: [],
         detail:
-          "Voice is enabled but an endpoint is missing from its settings. Nothing was sent to GUS — check Settings → Voice.",
+          "Voice is enabled but an endpoint it needs is missing from its settings. Nothing was sent to GUS — check Settings → Voice.",
       };
     }
+    const { sttMode, ttsMode, speechNotice } = await this.resolveModes(config);
     const now = this.now();
     const session: ActiveSession = {
       id: `call-${now.toString(36)}-${this.counter++}`,
       startedAt: now,
       lastSpeechAt: now,
+      sttMode,
+      ttsMode,
+      speechNotice,
       segmenter: new UtteranceSegmenter({
         silenceMs: this.silenceMs,
         threshold: this.vadThreshold,
@@ -322,7 +390,42 @@ export class VoiceSessionService {
     return {
       ...this.state(session.id),
       detail:
-        "Call started. Speak naturally — a pause ends your turn. Talking over a reply cuts it off; \"GUS stop\" ends the call and trips the kill switch.",
+        "Call started. Speak naturally — a pause ends your turn. Talking over a reply cuts it off; \"GUS stop\" ends the call and trips the kill switch." +
+        (speechNotice ? ` ${speechNotice}` : ""),
+    };
+  }
+
+  /** v0.9.6: resolve one call's speech modes from the configured
+   *  engines. Built-in resolves to itself without any network;
+   *  an endpoint resolves to itself only when the probe answers.
+   *  One notice covers the call even if both halves fell back —
+   *  the operator needs the fact and the consequence, not a
+   *  per-service post-mortem at call start. */
+  private async resolveModes(config: VoiceConfig): Promise<{
+    sttMode: VoiceEngine;
+    ttsMode: VoiceEngine;
+    speechNotice?: string;
+  }> {
+    const [sttOk, ttsOk] = await Promise.all([
+      config.sttEngine === "endpoint"
+        ? probeEndpoint(this.fetchFn, config.sttBaseUrl, this.probeTimeoutMs)
+        : Promise.resolve(true),
+      config.ttsEngine === "endpoint"
+        ? probeEndpoint(this.fetchFn, config.ttsBaseUrl, this.probeTimeoutMs)
+        : Promise.resolve(true),
+    ]);
+    const sttMode: VoiceEngine =
+      config.sttEngine === "endpoint" && !sttOk ? "local" : config.sttEngine;
+    const ttsMode: VoiceEngine =
+      config.ttsEngine === "endpoint" && !ttsOk ? "local" : config.ttsEngine;
+    const fellBack =
+      sttMode !== config.sttEngine || ttsMode !== config.ttsEngine;
+    return {
+      sttMode,
+      ttsMode,
+      speechNotice: fellBack
+        ? "Speech service unreachable — using built-in voice for this call."
+        : undefined,
     };
   }
 
@@ -379,11 +482,53 @@ export class VoiceSessionService {
     } else {
       session.hearing.openMs = 0;
     }
-    if (pushed.utterance) {
+    if (pushed.utterance && session.sttMode === "endpoint") {
       const utterance = pushed.utterance;
       const endMs = pushed.utteranceEndMs ?? this.now();
       session.chain = session.chain.then(() => this.runUtterance(session, utterance, endMs));
     }
+    // v0.9.6, built-in STT: the utterance the VAD just closed is
+    // deliberately NOT queued — the audio was never buffered for
+    // transcription (the segmenter still ran, above, so the
+    // hearing ledger is honest). The app's recognizer owns the
+    // words in this mode and POSTs them via submitTranscript.
+    return { ok: true, detail: "Heard." };
+  }
+
+  /**
+   * v0.9.6: one final transcript from the app's built-in
+   * recognizer (built-in STT mode). The words queue onto the
+   * session's serial turn chain and take the identical turn a
+   * transcribed utterance takes — processTranscript, with its
+   * Shield scan, speech acts, caps, and receipts. An empty
+   * transcript is a settled, recorded turn that goes nowhere:
+   * loud in the log, never jobbed. In endpoint STT mode this
+   * route refuses — the ears for the call were resolved at its
+   * start, and a second transcript path mid-call would make
+   * turns the operator never spoke possible.
+   */
+  submitTranscript(sessionId: string, text: string): { ok: boolean; detail: string } {
+    const session = this.session;
+    if (!session || session.id !== sessionId) {
+      return { ok: false, detail: "No live call by that id — the transcript was dropped, nothing was sent to GUS." };
+    }
+    this.tick();
+    if (this.session !== session) {
+      return { ok: false, detail: "The call ended (timeout) as that transcript arrived — it was dropped." };
+    }
+    if (session.sttMode !== "local") {
+      return {
+        ok: false,
+        detail:
+          "This call is transcribing through its speech endpoint — a built-in transcript was refused and nothing was sent to GUS.",
+      };
+    }
+    session.lastSpeechAt = this.now();
+    const postedAt = this.now();
+    const trimmed = text.trim();
+    session.chain = session.chain.then(() =>
+      this.runTranscriptTurn(session, trimmed, postedAt),
+    );
     return { ok: true, detail: "Heard." };
   }
 
@@ -408,8 +553,9 @@ export class VoiceSessionService {
       seq: seg.seq,
       turnIndex: seg.turnIndex,
       sentenceIndex: seg.sentenceIndex,
-      audioBase64: seg.audioBase64,
-      audioContentType: seg.audioContentType,
+      audioBase64: seg.text !== undefined ? undefined : seg.audioBase64,
+      audioContentType: seg.text !== undefined ? undefined : seg.audioContentType,
+      text: seg.text,
     };
   }
 
@@ -454,6 +600,9 @@ export class VoiceSessionService {
         startedAt: session.startedAt,
         elapsedMs: now - session.startedAt,
         bargeIn: loadVoiceConfig(this.stateDir).bargeIn,
+        sttMode: session.sttMode,
+        ttsMode: session.ttsMode,
+        speechNotice: session.speechNotice,
         turns: session.turns,
         lastLatency: session.lastLatency,
         hearing: this.hearingData(session),
@@ -544,38 +693,9 @@ export class VoiceSessionService {
       }
       const sttMs = this.now() - sttStart;
       turn.transcript = transcript;
+      turn.via = "endpoint";
 
-      // --- the turn: the same pipeline every voice surface uses.
-      const jobStart = this.now();
-      const result = await this.calls.processTranscript(transcript);
-      const jobMs = this.now() - jobStart;
-      turn.kind = result.kind;
-      turn.detail = result.detail;
-      turn.replyText = result.replyText;
-      const latency: VoiceTurnLatency = {
-        utteranceEndAt,
-        sttMs,
-        jobMs,
-        totalMs: this.now() - utteranceEndAt,
-      };
-      turn.latency = latency;
-      session.lastLatency = latency;
-
-      // --- mouth: sentence by sentence, first one fast ---------
-      if (result.replyText) {
-        const ttsStart = this.now();
-        await this.streamSpeech(session, turn, config, result.replyText, () => {
-          latency.ttsFirstMs = this.now() - ttsStart;
-          latency.totalMs = this.now() - utteranceEndAt;
-        });
-      }
-
-      if (result.kind === "stopped") {
-        // The kill phrase ran /stop through the normal path in
-        // processTranscript; the call itself ends once the
-        // confirmation has been spoken.
-        this.finish(session, "kill-phrase");
-      }
+      await this.completeTurn(session, turn, config, transcript, utteranceEndAt, sttMs);
     } finally {
       // Every path that created the turn settles here exactly
       // once — transcription failure, mid-call disable, normal
@@ -583,6 +703,107 @@ export class VoiceSessionService {
       // written here, where no outcome can slip past it.
       this.appendTurnRecord(turn);
       session.processing = false;
+    }
+  }
+
+  /**
+   * v0.9.6: a turn whose words arrived as a transcript (the
+   * app's built-in recognizer, via submitTranscript). Everything
+   * after the ears is completeTurn — the same code the endpoint
+   * path runs — so a built-in transcript is scanned, capped,
+   * receipted, and answered identically to a transcribed one.
+   * sttMs records 0: the recognition happened in the app, in
+   * parallel with the talking, and this service does not invent
+   * a number it didn't measure.
+   */
+  private async runTranscriptTurn(
+    session: ActiveSession,
+    transcript: string,
+    postedAt: number,
+  ): Promise<void> {
+    if (this.session !== session) return;
+    session.processing = true;
+    const turn: VoiceSessionTurn = {
+      index: session.turns.length,
+      startedAt: this.now(),
+      kind: "unavailable",
+      detail: "",
+      interrupted: false,
+      via: "local",
+    };
+    session.turns.push(turn);
+    try {
+      const config = loadVoiceConfig(this.stateDir);
+      if (!config.enabled || !voiceConfigured(config)) {
+        turn.detail =
+          "Voice was turned off or unconfigured in Settings mid-call — the call ended and that transcript went nowhere.";
+        this.finish(session, "disabled");
+        return;
+      }
+      if (!transcript) {
+        // Loud, on the record, and nowhere else: an empty final
+        // from the recognizer is a settled turn that never
+        // becomes a job, a scan, or a reply.
+        turn.detail =
+          "The built-in recognizer handed over an empty transcript — nothing was sent to GUS.";
+        return;
+      }
+      turn.transcript = transcript;
+      await this.completeTurn(session, turn, config, transcript, postedAt, 0);
+    } finally {
+      this.appendTurnRecord(turn);
+      session.processing = false;
+    }
+  }
+
+  /**
+   * The turn from transcript-in-hand onward — shared verbatim by
+   * the endpoint path (runUtterance) and the built-in path
+   * (runTranscriptTurn): the job through processTranscript, the
+   * latency record, the spoken reply, the kill-phrase ending.
+   * How the words arrived is the caller's business; what happens
+   * to them is not allowed to differ.
+   */
+  private async completeTurn(
+    session: ActiveSession,
+    turn: VoiceSessionTurn,
+    config: VoiceConfig,
+    transcript: string,
+    utteranceEndAt: number,
+    sttMs: number,
+  ): Promise<void> {
+    const jobStart = this.now();
+    const result = await this.calls.processTranscript(transcript);
+    const jobMs = this.now() - jobStart;
+    turn.kind = result.kind;
+    turn.detail =
+      turn.via === "local"
+        ? `${result.detail} (Built-in transcription on this Mac.)`
+        : result.detail;
+    turn.replyText = result.replyText;
+    const latency: VoiceTurnLatency = {
+      utteranceEndAt,
+      sttMs,
+      jobMs,
+      totalMs: this.now() - utteranceEndAt,
+    };
+    turn.latency = latency;
+    session.lastLatency = latency;
+
+    // --- mouth: sentence by sentence, first one fast -----------
+    if (result.replyText) {
+      const ttsStart = this.now();
+      await this.streamSpeech(session, turn, config, result.replyText, () => {
+        latency.ttsFirstMs = this.now() - ttsStart;
+        latency.totalMs = this.now() - utteranceEndAt;
+      });
+    }
+
+    if (result.kind === "stopped") {
+      // The kill phrase ran /stop through the normal path in
+      // processTranscript; the call itself ends once the
+      // confirmation has been spoken.
+      this.finish(session, "kill-phrase");
     }
   }
 
@@ -602,6 +823,7 @@ export class VoiceSessionService {
         ts: number;
         index: number;
         transcript?: string;
+        stt?: VoiceEngine;
         kind: string;
         detail: string;
         latency?: VoiceTurnLatency;
@@ -609,6 +831,7 @@ export class VoiceSessionService {
         ts: this.now(),
         index: turn.index,
         ...(turn.transcript !== undefined ? { transcript: turn.transcript } : {}),
+        ...(turn.via !== undefined ? { stt: turn.via } : {}),
         kind: turn.kind,
         detail: turn.detail,
         ...(turn.latency !== undefined ? { latency: turn.latency } : {}),
@@ -657,6 +880,27 @@ export class VoiceSessionService {
         if (gen !== session.speechGen || this.session !== session) {
           turn.interrupted = true;
           return;
+        }
+        // v0.9.6, built-in TTS: no service to call — the sentence
+        // itself is the segment, and the app's synthesizer is the
+        // mouth. The generation checks above and below are the
+        // barge-in contract, unchanged: an interrupt that lands
+        // before a segment is fetched drops it unsaid.
+        if (session.ttsMode === "local") {
+          session.segments.push({
+            seq: session.nextSeq++,
+            turnIndex: turn.index,
+            sentenceIndex: i,
+            audioBase64: "",
+            audioContentType: "",
+            text: sentences[i],
+            fetched: false,
+          });
+          if (first) {
+            first = false;
+            onFirstSegment();
+          }
+          continue;
         }
         let out: { audio: Uint8Array; contentType: string };
         try {
@@ -751,6 +995,9 @@ export class VoiceSessionService {
       startedAt: session.startedAt,
       elapsedMs: this.now() - session.startedAt,
       endedReason: reason,
+      sttMode: session.sttMode,
+      ttsMode: session.ttsMode,
+      speechNotice: session.speechNotice,
       turns: session.turns,
       lastLatency: session.lastLatency,
       hearing: this.hearingData(session),

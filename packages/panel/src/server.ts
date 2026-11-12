@@ -210,8 +210,10 @@ export class PanelServer {
       const body = await this.readJson(req);
       const result = await this.backend.setVoiceSettings({
         enabled: body.enabled === true,
+        sttEngine: typeof body.sttEngine === "string" ? body.sttEngine : undefined,
         sttBaseUrl: typeof body.sttBaseUrl === "string" ? body.sttBaseUrl : "",
         sttModel: typeof body.sttModel === "string" ? body.sttModel : "",
+        ttsEngine: typeof body.ttsEngine === "string" ? body.ttsEngine : undefined,
         ttsBaseUrl: typeof body.ttsBaseUrl === "string" ? body.ttsBaseUrl : "",
         ttsModel: typeof body.ttsModel === "string" ? body.ttsModel : "",
         ttsVoice: typeof body.ttsVoice === "string" ? body.ttsVoice : "",
@@ -235,8 +237,22 @@ export class PanelServer {
     // each) by the app's playback queue; state is the poll the
     // in-call UI renders from. Same token gate as every route.
     if (method === "POST" && path === "/api/voice/session/start") {
-      const result = this.backend.voiceSessionStart();
+      // v0.9.6: start resolves the call's speech modes (an
+      // endpoint probe), so the backend's answer is async.
+      const result = await this.backend.voiceSessionStart();
       return json(result.ok ? 200 : 400, result);
+    }
+    // v0.9.6: a final transcript from the app's built-in
+    // recognizer (JSON — the words are the body). Same token
+    // gate; the session service decides whether the call's
+    // resolved mode accepts it.
+    if (method === "POST" && path === "/api/voice/session/transcript") {
+      const body = await this.readJson(req);
+      const result = this.backend.voiceSessionTranscript(
+        typeof body.sessionId === "string" ? body.sessionId : "",
+        typeof body.text === "string" ? body.text : "",
+      );
+      return json(result.ok ? 200 : 409, result);
     }
     if (method === "POST" && path === "/api/voice/session/audio") {
       const audio = await this.readRaw(req, MAX_SESSION_CHUNK_BYTES);

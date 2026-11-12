@@ -432,6 +432,9 @@ function toPanelVoiceSession(s: VoiceSessionStateData): PanelVoiceSessionData {
     elapsedMs: s.elapsedMs,
     endedReason: s.endedReason,
     bargeIn: s.bargeIn,
+    sttMode: s.sttMode,
+    ttsMode: s.ttsMode,
+    speechNotice: s.speechNotice,
     turns: s.turns.map((t) => ({
       index: t.index,
       startedAt: t.startedAt,
@@ -710,8 +713,20 @@ const panelBackend: PanelBackend = {
       stateDir,
       {
         enabled: s.enabled === true,
+        // v0.9.6: a save that doesn't mention an engine keeps the
+        // value on file, the bargeIn rule — the web panel doesn't
+        // send engines, and its saves must not silently flip a
+        // call back to built-in (or to an endpoint).
+        sttEngine:
+          s.sttEngine === "endpoint" || s.sttEngine === "local"
+            ? s.sttEngine
+            : loadVoiceConfig(stateDir).sttEngine,
         sttBaseUrl: s.sttBaseUrl,
         sttModel: s.sttModel,
+        ttsEngine:
+          s.ttsEngine === "endpoint" || s.ttsEngine === "local"
+            ? s.ttsEngine
+            : loadVoiceConfig(stateDir).ttsEngine,
         ttsBaseUrl: s.ttsBaseUrl,
         ttsModel: s.ttsModel,
         ttsVoice: s.ttsVoice,
@@ -722,10 +737,18 @@ const panelBackend: PanelBackend = {
       "panel",
     );
     const saved = loadVoiceConfig(stateDir);
+    const ears =
+      saved.sttEngine === "local"
+        ? "transcription: built into the app"
+        : `transcription: ${saved.sttModel} at ${saved.sttBaseUrl}`;
+    const mouth =
+      saved.ttsEngine === "local"
+        ? "speech: built into the app"
+        : `speech: ${saved.ttsModel} (${saved.ttsVoice}) at ${saved.ttsBaseUrl}`;
     return {
       ok: true,
       detail: saved.enabled
-        ? `Voice is ON — transcription: ${saved.sttModel} at ${saved.sttBaseUrl}; speech: ${saved.ttsModel} (${saved.ttsVoice}) at ${saved.ttsBaseUrl}. Live on the next call. Transcripts are scanned, capped, and receipted like typed messages; approvals by voice need an exact "confirm" or "yes, do it".`
+        ? `Voice is ON — ${ears}; ${mouth}. Live on the next call. Transcripts are scanned, capped, and receipted like typed messages; approvals by voice need an exact "confirm" or "yes, do it".`
         : "Voice is OFF — the call endpoint will refuse until you enable it here. Settings saved.",
     };
   },
@@ -746,8 +769,9 @@ const panelBackend: PanelBackend = {
   // package's state shape IS the panel contract, mapped here so
   // the packages stay decoupled); audio in/out and the
   // interrupt are the service's own results, passed through.
-  voiceSessionStart: () => toPanelVoiceSession(voiceSessions.start()),
+  voiceSessionStart: async () => toPanelVoiceSession(await voiceSessions.start()),
   voiceSessionAudio: (sessionId, audio) => voiceSessions.pushAudio(sessionId, audio),
+  voiceSessionTranscript: (sessionId, text) => voiceSessions.submitTranscript(sessionId, text),
   voiceSessionState: (sessionId) => toPanelVoiceSession(voiceSessions.state(sessionId)),
   voiceSessionNextAudio: (sessionId, afterSeq) => voiceSessions.nextAudio(sessionId, afterSeq),
   voiceSessionInterrupt: (sessionId) => voiceSessions.interrupt(sessionId),
