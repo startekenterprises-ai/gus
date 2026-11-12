@@ -132,6 +132,7 @@ import {
   voiceConfigured,
   type VoiceConfig,
   type VoiceEngine,
+  type VoiceShieldMode,
 } from "./config.js";
 import {
   probeEndpoint,
@@ -284,6 +285,14 @@ export interface VoiceSessionStateData {
    *  "Speech service unreachable — using built-in voice for
    *  this call." */
   speechNotice?: string;
+  /** v0.9.11: the call's Shield mode for spoken turns,
+   *  resolved at call start from the operator's Shield-scan
+   *  switch — "fast" (switch on; the gate's fast mode) or
+   *  "off" (switch off; spoken turns skip the ingress scan).
+   *  The app shows it as a chip in the call strip: the state
+   *  the operator kept having to dig through Settings to
+   *  check, visible mid-call instead. */
+  shieldMode?: VoiceShieldMode;
   turns: VoiceSessionTurn[];
   lastLatency?: VoiceTurnLatency;
   hearing?: VoiceSessionHearingData;
@@ -332,6 +341,10 @@ interface ActiveSession {
   ttsMode: VoiceEngine;
   /** v0.9.6: the fallback notice, when resolution fell back. */
   speechNotice?: string;
+  /** v0.9.11: the call's Shield mode (see VoiceSessionStateData)
+   *  — resolved from the same config read that resolved the
+   *  engines, fixed for the call like they are. */
+  shieldMode: VoiceShieldMode;
   segmenter: UtteranceSegmenter;
   turns: VoiceSessionTurn[];
   segments: AudioSegment[];
@@ -491,6 +504,10 @@ export class VoiceSessionService {
       sttMode,
       ttsMode,
       speechNotice,
+      // v0.9.11: the Shield mode rides the config this call
+      // already resolved — switch on means the gate's fast
+      // mode (v0.9.10), off means spoken turns skip the scan.
+      shieldMode: config.shieldScan ? "fast" : "off",
       segmenter: new UtteranceSegmenter({
         silenceMs: this.silenceMs,
         threshold: this.vadThreshold,
@@ -806,6 +823,7 @@ export class VoiceSessionService {
         sttMode: session.sttMode,
         ttsMode: session.ttsMode,
         speechNotice: session.speechNotice,
+        shieldMode: session.shieldMode,
         turns: session.turns,
         lastLatency: session.lastLatency,
         hearing: this.hearingData(session),
@@ -1325,6 +1343,7 @@ export class VoiceSessionService {
       sttMode: session.sttMode,
       ttsMode: session.ttsMode,
       speechNotice: session.speechNotice,
+      shieldMode: session.shieldMode,
       turns: session.turns,
       lastLatency: session.lastLatency,
       hearing: this.hearingData(session),

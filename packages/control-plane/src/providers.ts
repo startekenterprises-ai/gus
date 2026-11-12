@@ -374,6 +374,11 @@ abstract class RemoteProvider implements Provider {
 export class AnthropicProvider extends RemoteProvider {
   readonly id = "anthropic" as const;
   private base: string;
+  /** v0.9.11: the name failures are reported under — the vendor
+   *  AND the configured model ("Anthropic (claude-sonnet-5)"),
+   *  the same shape the OpenAI-compatible class composes, so an
+   *  error always names the service that actually failed. */
+  private who: string;
 
   constructor(
     vault: VaultBroker,
@@ -382,33 +387,55 @@ export class AnthropicProvider extends RemoteProvider {
   ) {
     super(vault, opts?.transport ?? defaultTransport, opts?.maxTokens);
     this.base = (opts?.baseUrl ?? "https://api.anthropic.com").replace(/\/+$/, "");
+    this.who = `Anthropic (${model})`;
   }
 
   async complete(prompt: string, opts?: { maxTokensOut?: number }): Promise<ProviderCompletion> {
-    const res = await this.callWithKey(
-      "anthropic",
-      true,
-      "x-api-key",
-      `${this.base}/v1/messages`,
-      {
-        model: this.model,
-        max_tokens: opts?.maxTokensOut ?? this.maxTokensOut,
-        messages: [{ role: "user", content: this.promptWithToolProtocol(prompt) }],
-      },
-      { "anthropic-version": "2023-06-01" },
-    );
-    const body = await this.expectOk(res, "Anthropic");
-    const blocks = Array.isArray(body.content) ? (body.content as Array<Record<string, unknown>>) : [];
-    const text = blocks
-      .filter((b) => b.type === "text" && typeof b.text === "string")
-      .map((b) => b.text as string)
-      .join("");
-    const usage = (body.usage ?? {}) as { input_tokens?: number; output_tokens?: number };
-    if (!text) throw new Error("Anthropic returned no text");
+    // v0.9.11: an EMPTY reply is retried ONCE before it may fail
+    // the job — a real backend intermittently answers 200 with no
+    // text at all, and one hiccup shouldn't kill the operator's
+    // turn (the OpenAI-compatible class does the same; token
+    // usage sums across both attempts when the API reports it
+    // per attempt, and falls back to the estimates when it
+    // doesn't, exactly as a single attempt did).
+    let attempts = 0;
+    let inSum = 0;
+    let outSum = 0;
+    let inReported = true;
+    let outReported = true;
+    let text = "";
+    while (attempts < 2) {
+      attempts++;
+      const res = await this.callWithKey(
+        "anthropic",
+        true,
+        "x-api-key",
+        `${this.base}/v1/messages`,
+        {
+          model: this.model,
+          max_tokens: opts?.maxTokensOut ?? this.maxTokensOut,
+          messages: [{ role: "user", content: this.promptWithToolProtocol(prompt) }],
+        },
+        { "anthropic-version": "2023-06-01" },
+      );
+      const body = await this.expectOk(res, this.who);
+      const blocks = Array.isArray(body.content) ? (body.content as Array<Record<string, unknown>>) : [];
+      text = blocks
+        .filter((b) => b.type === "text" && typeof b.text === "string")
+        .map((b) => b.text as string)
+        .join("");
+      const usage = (body.usage ?? {}) as { input_tokens?: number; output_tokens?: number };
+      if (typeof usage.input_tokens === "number") inSum += usage.input_tokens;
+      else inReported = false;
+      if (typeof usage.output_tokens === "number") outSum += usage.output_tokens;
+      else outReported = false;
+      if (text) break;
+    }
+    if (!text) throw new Error(`${this.who} returned no text`);
     return {
       reply: this.parseToolReply(text),
-      tokensIn: usage.input_tokens ?? estimateTokens(prompt),
-      tokensOut: usage.output_tokens ?? estimateTokens(text),
+      tokensIn: inReported ? inSum : estimateTokens(prompt),
+      tokensOut: outReported ? outSum : estimateTokens(text),
     };
   }
 }
@@ -440,25 +467,55 @@ export class OpenAiCompatibleProvider extends RemoteProvider {
     this.base = opts.baseUrl.replace(/\/+$/, "");
     this.keyName = opts.keyName;
     this.keyRequired = opts.keyRequired;
-    this.who = opts.who;
+    // v0.9.11: `who` arrives as the backend's DISPLAY NAME (the
+    // factory derives it from the configured base URL — see
+    // backendDisplayName); the label failures are reported under
+    // is that name plus the configured model, composed here so
+    // every construction site inherits it: "Meta (muse-spark-1.3)
+    // returned no text", never a bare vendor the config isn't
+    // actually pointing at.
+    this.who = `${opts.who} (${opts.model})`;
   }
 
   async complete(prompt: string, opts?: { maxTokensOut?: number }): Promise<ProviderCompletion> {
-    const res = await this.callWithKey(this.keyName, this.keyRequired, "authorization", `${this.base}/chat/completions`, {
-      model: this.model,
-      max_tokens: opts?.maxTokensOut ?? this.maxTokensOut,
-      messages: [{ role: "user", content: this.promptWithToolProtocol(prompt) }],
-    });
-    const body = await this.expectOk(res, this.who);
-    const choices = Array.isArray(body.choices) ? (body.choices as Array<Record<string, unknown>>) : [];
-    const message = (choices[0]?.message ?? {}) as { content?: unknown };
-    const text = typeof message.content === "string" ? message.content : "";
-    const usage = (body.usage ?? {}) as { prompt_tokens?: number; completion_tokens?: number };
+    // v0.9.11: an EMPTY reply is retried ONCE before it may fail
+    // the job — a real backend intermittently answers 200 with no
+    // text at all (field: Meta's API did this mid-call, in both
+    // Shield modes, 2026-11-12), and one hiccup shouldn't kill
+    // the operator's turn. Token usage sums across both attempts
+    // when the API reports it per attempt, and falls back to the
+    // estimates when it doesn't, exactly as a single attempt did.
+    // (Transport-level 429/503 retries live in callWithKey; this
+    // is the 200-but-empty case above them.)
+    let attempts = 0;
+    let inSum = 0;
+    let outSum = 0;
+    let inReported = true;
+    let outReported = true;
+    let text = "";
+    while (attempts < 2) {
+      attempts++;
+      const res = await this.callWithKey(this.keyName, this.keyRequired, "authorization", `${this.base}/chat/completions`, {
+        model: this.model,
+        max_tokens: opts?.maxTokensOut ?? this.maxTokensOut,
+        messages: [{ role: "user", content: this.promptWithToolProtocol(prompt) }],
+      });
+      const body = await this.expectOk(res, this.who);
+      const choices = Array.isArray(body.choices) ? (body.choices as Array<Record<string, unknown>>) : [];
+      const message = (choices[0]?.message ?? {}) as { content?: unknown };
+      text = typeof message.content === "string" ? message.content : "";
+      const usage = (body.usage ?? {}) as { prompt_tokens?: number; completion_tokens?: number };
+      if (typeof usage.prompt_tokens === "number") inSum += usage.prompt_tokens;
+      else inReported = false;
+      if (typeof usage.completion_tokens === "number") outSum += usage.completion_tokens;
+      else outReported = false;
+      if (text) break;
+    }
     if (!text) throw new Error(`${this.who} returned no text`);
     return {
       reply: this.parseToolReply(text),
-      tokensIn: usage.prompt_tokens ?? estimateTokens(prompt),
-      tokensOut: usage.completion_tokens ?? estimateTokens(text),
+      tokensIn: inReported ? inSum : estimateTokens(prompt),
+      tokensOut: outReported ? outSum : estimateTokens(text),
     };
   }
 }
@@ -494,6 +551,45 @@ export class GeminiProvider extends OpenAiCompatibleProvider {
 
 // ---------------------------------------------------------------- factory
 
+/** v0.9.11: the display name of the backend a base URL actually
+ *  points at. An OpenAI-compatible config can point at ANY
+ *  vendor's endpoint — the operator's points at Meta's — while
+ *  the class is named for the API SHAPE ("openai"), so a
+ *  per-class name is only true for the class's canonical host.
+ *  The name failures are reported under is therefore derived
+ *  from the configured host: api.meta.ai is Meta whatever the
+ *  class is called, and api.openai.com is OpenAI. A local
+ *  endpoint (an IP literal, localhost) names no vendor, so the
+ *  class fallback stands. Well-known hosts get their brand
+ *  casing; any other host is named by its own first label,
+ *  capitalized — derived from the config in every case, never
+ *  a vendor hard-coded against a different one's endpoint. */
+const BACKEND_BRAND_NAMES: Record<string, string> = {
+  openai: "OpenAI",
+  meta: "Meta",
+  anthropic: "Anthropic",
+  google: "Google",
+  googleapis: "Google",
+  ollama: "Ollama",
+};
+
+function backendDisplayName(baseUrl: string, fallback: string): string {
+  let host = "";
+  try {
+    host = new URL(baseUrl).hostname.toLowerCase();
+  } catch {
+    return fallback;
+  }
+  if (!host || host === "localhost" || host.includes(":") || /^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+    return fallback;
+  }
+  const labels = host.split(".").filter((l) => l.length > 0);
+  while (labels.length > 1 && (labels[0] === "api" || labels[0] === "www")) labels.shift();
+  const label = labels[0] ?? "";
+  if (!label) return fallback;
+  return BACKEND_BRAND_NAMES[label] ?? label.charAt(0).toUpperCase() + label.slice(1);
+}
+
 /** Resolve the active provider from config (re-read per call). */
 export function resolveProvider(
   stateDir: string,
@@ -515,7 +611,9 @@ export function resolveProvider(
         baseUrl: cfg.baseUrl ?? "https://api.openai.com/v1",
         keyName: "openai",
         keyRequired: true,
-        who: "OpenAI",
+        // v0.9.11: named for the backend the config POINTS at
+        // (Meta, when baseUrl is Meta's) — not for the API shape.
+        who: backendDisplayName(cfg.baseUrl ?? "https://api.openai.com/v1", "OpenAI"),
         maxTokens: cfg.maxTokens,
         transport,
       });
@@ -533,7 +631,9 @@ export function resolveProvider(
         baseUrl: cfg.baseUrl ?? "http://127.0.0.1:11434/v1",
         keyName: "ollama",
         keyRequired: false,
-        who: "Ollama",
+        // v0.9.11: a local base URL keeps the class name (the
+        // derivation's fallback); a remote one names its host.
+        who: backendDisplayName(cfg.baseUrl ?? "http://127.0.0.1:11434/v1", "Ollama"),
         maxTokens: cfg.maxTokens,
         transport,
       });

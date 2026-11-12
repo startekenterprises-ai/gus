@@ -55,7 +55,18 @@
 //     runs in the Shield's fast mode, deterministic patterns
 //     only, so a reply is no longer gated on the full semantic
 //     review's seconds; typed messages keep the full review,
-//     and each turn record names the scan it got.
+//     and each turn record names the scan it got; v0.9.11:
+//     voice, truthfully — provider failures name the backend
+//     the config actually points at ("Meta (muse-spark-1.3)",
+//     never a bare wrong vendor) and an empty reply is retried
+//     once before it may fail a turn; the call strip shows the
+//     Shield state as a chip next to Mute ("Shield: fast scan"
+//     / "Shield: OFF", from the session state); and the
+//     built-in ears are echo-gated — while GUS speaks (plus a
+//     0.6 s tail) the recognizer is fed nothing and any partial
+//     is discarded, so GUS never transcribes himself into a
+//     turn (the price: no talking over GUS in a built-in call;
+//     endpoint calls are untouched).
 //     It launches GusMacHost from inside the bundle (so
 //     Accessibility / Screen Recording grants attach to
 //     GUS.app), shows status, starts/stops the launchd agents, and

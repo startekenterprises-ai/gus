@@ -37,6 +37,15 @@ import { join } from "node:path";
  *  OpenAI-compatible endpoint ("endpoint"). */
 export type VoiceEngine = "local" | "endpoint";
 
+/** v0.9.11: how a call's spoken turns meet the Shield — "fast"
+ *  when the operator's Shield-scan switch is on (voice scans run
+ *  the gate's fast mode, v0.9.10), "off" when the switch is off
+ *  and spoken turns skip the ingress scan (v0.9.9). There is no
+ *  third state: a voice scan is never the full semantic review.
+ *  The session state carries it so the app can SHOW the state
+ *  in the call strip instead of leaving it buried in Settings. */
+export type VoiceShieldMode = "off" | "fast";
+
 export interface VoiceConfig {
   /** The master switch. Off = the call endpoint refuses, loudly. */
   enabled: boolean;

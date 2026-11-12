@@ -1582,3 +1582,30 @@ test("fast scan (v0.9.10): a scanned voice turn records the fast mode — turn, 
   assert.equal(rec.latency?.shieldFastMode, true);
   r.sessions.end(id);
 });
+
+// ---------------------------------------------------------------- v0.9.11: the Shield mode rides the session state
+
+test("session (v0.9.11): state carries shieldMode — fast with the switch on, off with it off, on the start answer, the polls, and the ended snapshot", async () => {
+  // Switch ON (the rig's default): spoken turns meet the gate
+  // in fast mode, and the state says so from the first answer.
+  const on = await sessionRig({});
+  const onStarted = await on.sessions.start();
+  assert.equal(onStarted.ok, true, onStarted.detail);
+  assert.equal(onStarted.shieldMode, "fast", "the start answer names the mode");
+  const onId = onStarted.sessionId!;
+  assert.equal(on.sessions.state(onId).shieldMode, "fast", "state polls carry it");
+  const onEnded = on.sessions.end(onId);
+  assert.equal(onEnded.shieldMode, "fast", "the ended snapshot carries it");
+
+  // Switch OFF: the same surfaces say "off" — the state the
+  // app renders as the red chip, so the operator can SEE the
+  // scan is off mid-call instead of digging through Settings.
+  const off = await sessionRig({ shieldScan: false });
+  const offStarted = await off.sessions.start();
+  assert.equal(offStarted.ok, true, offStarted.detail);
+  assert.equal(offStarted.shieldMode, "off", "the start answer names the mode");
+  const offId = offStarted.sessionId!;
+  assert.equal(off.sessions.state(offId).shieldMode, "off", "state polls carry it");
+  const offEnded = off.sessions.end(offId);
+  assert.equal(offEnded.shieldMode, "off", "the ended snapshot carries it");
+});

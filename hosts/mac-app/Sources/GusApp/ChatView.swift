@@ -259,6 +259,38 @@ struct ChatView: View {
         }
     }
 
+    /// The Shield chip (v0.9.11): the call's Shield mode for
+    /// spoken turns, from the session state — "Shield: fast
+    /// scan" when the switch is on (voice scans run the gate's
+    /// fast mode; typed messages still get the full review),
+    /// "Shield: OFF" when the switch is off and spoken turns
+    /// become jobs without the ingress scan. OFF is red, the
+    /// same glance-language as the muted Mute button beside
+    /// it: the state that changes what guards the call must be
+    /// the state you can see from across the room.
+    private func shieldChip(_ mode: String) -> some View {
+        Group {
+            if mode == "off" {
+                Label("Shield: OFF", systemImage: "shield.slash")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.red)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Color.red.opacity(0.15)))
+                    .help("Shield scan is OFF for voice — spoken turns become jobs without the ingress scan (Settings → Voice). Typed messages are always scanned.")
+            } else {
+                Label("Shield: fast scan", systemImage: "shield.fill")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                    .help("Shield scan is ON for voice, in fast mode — deterministic patterns, in about a second. Typed messages get the full semantic review.")
+            }
+        }
+    }
+
     /// The in-call strip: phase, elapsed time, and the last
     /// turn's measured latency — small, factual, and read from
     /// the session state, never estimated here. v0.9.2 adds the
@@ -281,6 +313,16 @@ struct ChatView: View {
                         .lineLimit(1)
                 }
                 Spacer()
+                // v0.9.11: the Shield state, in the open — the
+                // operator kept having to dig through Settings
+                // mid-call to learn which way the voice
+                // Shield-scan switch sat, so it sits here now,
+                // next to Mute, read from the session state the
+                // strip already polls. Absent from an older
+                // control plane: no chip, exactly as before.
+                if let shieldMode = model.voiceShieldMode {
+                    shieldChip(shieldMode)
+                }
                 // v0.9.9: the prominent Mute lives here, in the
                 // strip that only exists while a call is open —
                 // big, labeled, and impossible to miss mid-call.

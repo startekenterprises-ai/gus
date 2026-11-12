@@ -91,6 +91,13 @@ final class DesktopModel: ObservableObject {
     /// records (the poll below); the jobs behind them are
     /// ordinary jobs with ordinary receipts in the Jobs view.
     @Published var voiceInCall = false
+    /// v0.9.11: the call's Shield mode for spoken turns, from
+    /// the session state ("fast" / "off"; nil when the control
+    /// plane doesn't report one). The in-call strip renders it
+    /// as a chip next to Mute — the operator kept having to dig
+    /// through Settings mid-call to learn which way the
+    /// Shield-scan switch sat.
+    @Published var voiceShieldMode: String?
     /// The server-reported phase: listening | thinking | speaking.
     @Published var voicePhase = "listening"
     @Published var voiceTurns: [PanelVoiceSessionTurn] = []
@@ -224,6 +231,27 @@ final class DesktopModel: ObservableObject {
     /// still speak, the session stays open, the timers run.
     @Published var voiceMuted = false
     private var voiceCaptureMuted = false
+    /// v0.9.11: the echo gate — GUS must never hear HIMSELF.
+    /// Capture has run without voice processing since 0.9.3, so
+    /// in a built-in call the recognizer transcribes whatever
+    /// the speakers play: the greeting, the "Just a second."
+    /// filler, the replies — each becoming a new turn nobody
+    /// spoke (Glenn's logs, 2026-11-12). While the built-in
+    /// synthesizer is speaking (or holding a queue) and for
+    /// 0.6 s after, the tap feeds the recognizer NOTHING and
+    /// any in-progress partial is discarded, exactly as the
+    /// mute path discards it. voiceCaptureEchoGated is the
+    /// lock-guarded flag the audio thread reads (voiceStashLock,
+    /// like voiceCaptureMuted); the engaged/last-seen pair is
+    /// main-thread state, worked by the chunk timer in
+    /// updateVoiceEchoGate(). The accepted price, chosen with
+    /// the fix: in a built-in call you can no longer barge in
+    /// by talking over GUS — Mute and End Call still work, and
+    /// endpoint calls (server speech, energy barge-in) are
+    /// untouched.
+    private var voiceCaptureEchoGated = false
+    private var voiceEchoGateEngaged = false
+    private var voiceEchoSpeechLastSeen = Date.distantPast
     /// The last action's outcome, in the panel's own words (or the
     /// transport error). Shown under the composer / sidebar so a
     /// refusal is never silent.
@@ -462,6 +490,10 @@ final class DesktopModel: ObservableObject {
                     // already carries any fallback notice.
                     self.voiceSttMode = session.sttMode ?? "endpoint"
                     self.voiceTtsMode = session.ttsMode ?? "endpoint"
+                    // v0.9.11: the call's Shield mode, for the
+                    // strip's chip (nil from an older control
+                    // plane — no chip, exactly as before).
+                    self.voiceShieldMode = session.shieldMode
                     self.voiceTurns = session.turns
                     self.voiceLastSeq = 0
                     self.voicePlayQueue = []
@@ -471,8 +503,12 @@ final class DesktopModel: ObservableObject {
                     self.voiceMicLevel = 0
                     // v0.9.8: every call starts unmuted.
                     self.voiceMuted = false
+                    // v0.9.11: and with the echo gate down — it
+                    // engages on its own when GUS first speaks.
+                    self.voiceEchoGateEngaged = false
                     self.voiceStashLock.lock()
                     self.voiceCaptureMuted = false
+                    self.voiceCaptureEchoGated = false
                     self.voiceStash = Data()
                     self.voiceStashLock.unlock()
                     self.voiceInCall = true
@@ -702,10 +738,21 @@ final class DesktopModel: ObservableObject {
         // failure can no longer starve the ears). The request
         // reference is read under the stash lock; append itself
         // is the framework's documented tap pattern.
+        // v0.9.11: the echo gate rides the same read — while
+        // GUS is speaking through the built-in synthesizer (and
+        // for the tail after), the buffer is measured and
+        // converted as always (the hearing line and the session
+        // telemetry keep their numbers) but NEVER appended to
+        // the recognizer: GUS's own voice must not become a
+        // turn. Only the recognizer feed is gated; the PCM path
+        // below is unchanged.
         voiceStashLock.lock()
         let recognitionRequest = voiceRecognitionRequest
+        let echoGated = voiceCaptureEchoGated
         voiceStashLock.unlock()
-        recognitionRequest?.append(buffer)
+        if !echoGated {
+            recognitionRequest?.append(buffer)
+        }
 
         // The converter is built LAZILY from the first buffer's
         // actual format (and rebuilt whenever a buffer arrives
@@ -824,6 +871,10 @@ final class DesktopModel: ObservableObject {
         }
         advanceVoicePlayback()
         advanceVoiceSpeech()
+        // v0.9.11: work the echo gate on the same beat, after
+        // playback has advanced — the speaking state it reads
+        // is this tick's freshest.
+        updateVoiceEchoGate()
         // v0.9.7: the recognizer's sentence-end watch rides
         // the same ~250 ms beat as everything else in the call.
         advanceVoiceRecognition()
@@ -863,6 +914,61 @@ final class DesktopModel: ObservableObject {
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate
         voiceSynthesizer.speak(utterance)
+    }
+
+    /// v0.9.11: the echo gate's driver, run by the chunk timer
+    /// (~250 ms) in a built-in call — and ONLY a built-in call:
+    /// the gate exists for the pairing where this app is both
+    /// the ears (Speech-framework recognizer) and the mouth
+    /// (AVSpeechSynthesizer). An endpoint mouth is server audio
+    /// through the player, whose energy barge-in is the designed
+    /// behavior; an endpoint ear has no recognizer to feed.
+    ///
+    /// Engaging (GUS starts speaking — synthesizer active or a
+    /// sentence still queued): the tap's recognizer feed closes
+    /// (voiceCaptureEchoGated, read under the stash lock), and
+    /// any in-progress partial is DISCARDED, never posted — the
+    /// recognition task ends without a final, the generation
+    /// bump makes its trailing callbacks no-ops, exactly the
+    /// mute path's discipline in toggleVoiceMute.
+    ///
+    /// Lifting (speech over, plus a 0.6 s tail for the room's
+    /// last echo and the synthesizer's decay): the feed opens
+    /// and a fresh recognition task starts — unless the call is
+    /// muted, in which case Unmute owns the restart, as it
+    /// already does.
+    private func updateVoiceEchoGate() {
+        guard voiceSttMode == "local", voiceTtsMode == "local" else { return }
+        let speaking = voiceSynthesizer.isSpeaking || !voiceSpeakQueue.isEmpty
+        if speaking {
+            voiceEchoSpeechLastSeen = Date()
+            if !voiceEchoGateEngaged {
+                voiceEchoGateEngaged = true
+                voiceStashLock.lock()
+                voiceCaptureEchoGated = true
+                voiceStashLock.unlock()
+                voiceRecognitionGen += 1
+                voiceRecognitionTask?.cancel()
+                voiceRecognitionTask = nil
+                voiceStashLock.lock()
+                voiceRecognitionRequest = nil
+                voiceStashLock.unlock()
+                voicePartialText = ""
+                voicePartialLastChange = Date()
+                voiceEndAudioSent = false
+            }
+            return
+        }
+        if voiceEchoGateEngaged,
+           Date().timeIntervalSince(voiceEchoSpeechLastSeen) >= 0.6 {
+            voiceEchoGateEngaged = false
+            voiceStashLock.lock()
+            voiceCaptureEchoGated = false
+            voiceStashLock.unlock()
+            if !voiceMuted {
+                beginVoiceRecognitionTask()
+            }
+        }
     }
 
     // MARK: Built-in ears (v0.9.6)
@@ -1070,6 +1176,12 @@ final class DesktopModel: ObservableObject {
                 self.voiceTurns = s.turns
                 self.voicePhase = s.phase ?? "listening"
                 self.voiceElapsedMs = s.elapsedMs ?? 0
+                // v0.9.11: the Shield mode rides every poll, the
+                // start answer's value kept current (a mid-call
+                // settings edit still lands on the NEXT call —
+                // the control plane resolves it at call start —
+                // so in practice this simply confirms it).
+                self.voiceShieldMode = s.shieldMode
                 self.voiceBargeIn = s.bargeIn ?? self.voiceBargeIn
                 if let l = s.lastLatency {
                     var line = "last turn — heard \(Self.seconds(l.sttMs)) · thought \(Self.seconds(l.jobMs))"
@@ -1108,10 +1220,15 @@ final class DesktopModel: ObservableObject {
         voiceSessionId = nil
         voiceInCall = false
         voicePhase = "listening"
+        // v0.9.11: the Shield chip is the call's, not the app's.
+        voiceShieldMode = nil
         // v0.9.8: mute never outlives its call.
         voiceMuted = false
+        // v0.9.11: neither does the echo gate.
+        voiceEchoGateEngaged = false
         voiceStashLock.lock()
         voiceCaptureMuted = false
+        voiceCaptureEchoGated = false
         voiceStashLock.unlock()
     }
 

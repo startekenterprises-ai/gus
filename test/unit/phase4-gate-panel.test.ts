@@ -394,6 +394,137 @@ test("providers: Anthropic + OpenAI-compatible parse text and usage via fake tra
   assert.equal((await ollama.complete("hi")).reply.text, "local hello");
 });
 
+test("providers (v0.9.11): an empty reply is retried ONCE — empty-then-text succeeds with usage summed; empty-empty throws the named error", async () => {
+  const { vault } = tempVault();
+  vault.add("anthropic", "sk-ant-unit");
+  vault.add("openai", "sk-unit-1234");
+
+  // OpenAI-compatible: first attempt answers 200 with no text,
+  // the retry answers for real. Exactly two transport calls,
+  // and the token usage is the SUM across both attempts.
+  let calls = 0;
+  const flakyTransport: ProviderTransport = async () => {
+    calls++;
+    if (calls === 1) {
+      return {
+        status: 200,
+        json: async () => ({
+          choices: [{ message: { content: "" } }],
+          usage: { prompt_tokens: 4, completion_tokens: 0 },
+        }),
+      };
+    }
+    return {
+      status: 200,
+      json: async () => ({
+        choices: [{ message: { content: "second wind" } }],
+        usage: { prompt_tokens: 4, completion_tokens: 3 },
+      }),
+    };
+  };
+  const flaky = new OpenAiCompatibleProvider(vault, {
+    id: "openai",
+    model: "gpt-5-mini",
+    baseUrl: "https://api.openai.com/v1",
+    keyName: "openai",
+    keyRequired: true,
+    who: "OpenAI",
+    transport: flakyTransport,
+  });
+  const done = await flaky.complete("hi");
+  assert.equal(done.reply.text, "second wind");
+  assert.equal(calls, 2, "exactly one retry — no more, no fewer");
+  assert.equal(done.tokensIn, 8, "input usage summed across both attempts");
+  assert.equal(done.tokensOut, 3, "output usage summed across both attempts");
+
+  // Empty twice: the job fails, with the error naming the
+  // configured backend AND model — and still exactly two calls
+  // (the retry is not a loop).
+  let emptyCalls = 0;
+  const emptyTransport: ProviderTransport = async () => {
+    emptyCalls++;
+    return {
+      status: 200,
+      json: async () => ({
+        choices: [{ message: { content: "" } }],
+        usage: { prompt_tokens: 4, completion_tokens: 0 },
+      }),
+    };
+  };
+  const empty = new OpenAiCompatibleProvider(vault, {
+    id: "openai",
+    model: "gpt-5-mini",
+    baseUrl: "https://api.openai.com/v1",
+    keyName: "openai",
+    keyRequired: true,
+    who: "OpenAI",
+    transport: emptyTransport,
+  });
+  await assert.rejects(() => empty.complete("hi"), /OpenAI \(gpt-5-mini\) returned no text/);
+  assert.equal(emptyCalls, 2, "one retry, then the named failure");
+
+  // Anthropic: the same seam — empty-then-text succeeds with
+  // usage summed, empty-empty throws its named error.
+  let aCalls = 0;
+  const aFlaky: ProviderTransport = async () => {
+    aCalls++;
+    if (aCalls === 1) {
+      return { status: 200, json: async () => ({ content: [], usage: { input_tokens: 6, output_tokens: 0 } }) };
+    }
+    return {
+      status: 200,
+      json: async () => ({
+        content: [{ type: "text", text: "claude, second wind" }],
+        usage: { input_tokens: 6, output_tokens: 5 },
+      }),
+    };
+  };
+  const anthropic = new AnthropicProvider(vault, "claude-sonnet-5", { transport: aFlaky });
+  const aDone = await anthropic.complete("hi");
+  assert.equal(aDone.reply.text, "claude, second wind");
+  assert.equal(aCalls, 2);
+  assert.equal(aDone.tokensIn, 12, "input usage summed across both attempts");
+  assert.equal(aDone.tokensOut, 5);
+
+  const aEmpty = new AnthropicProvider(vault, "claude-sonnet-5", {
+    transport: async () => ({
+      status: 200,
+      json: async () => ({ content: [], usage: { input_tokens: 6, output_tokens: 0 } }),
+    }),
+  });
+  await assert.rejects(() => aEmpty.complete("hi"), /Anthropic \(claude-sonnet-5\) returned no text/);
+});
+
+test("providers (v0.9.11): factory errors name the CONFIGURED backend — Meta for Meta's base URL, OpenAI for OpenAI's", async () => {
+  const { dir, vault } = tempVault();
+  vault.add("openai", "sk-unit-1234");
+  const emptyTransport: ProviderTransport = async () => ({
+    status: 200,
+    json: async () => ({
+      choices: [{ message: { content: "" } }],
+      usage: { prompt_tokens: 4, completion_tokens: 0 },
+    }),
+  });
+
+  // The field case (2026-11-12): an "openai"-shaped config whose
+  // baseUrl is Meta's API and whose model is muse-spark-1.3 must
+  // fail as Meta — the bare class name blamed the wrong vendor
+  // for every empty reply and refusal.
+  writeProviderConfig(dir, {
+    provider: "openai",
+    model: "muse-spark-1.3",
+    baseUrl: "https://api.meta.ai/v1",
+  });
+  const meta = resolveProvider(dir, vault, emptyTransport);
+  await assert.rejects(() => meta.complete("hi"), /Meta \(muse-spark-1\.3\) returned no text/);
+
+  // A BYOK config pointed at OpenAI itself still says OpenAI —
+  // the name is derived from the config, not special-cased.
+  writeProviderConfig(dir, { provider: "openai", model: "gpt-5-mini" });
+  const openai = resolveProvider(dir, vault, emptyTransport);
+  await assert.rejects(() => openai.complete("hi"), /OpenAI \(gpt-5-mini\) returned no text/);
+});
+
 test("governor pricing: built-in per-model rates; local models cost $0", () => {
   const dir = mkdtempSync(join(tmpdir(), "gus-p4-gov-"));
   const governor = new Governor(dir);

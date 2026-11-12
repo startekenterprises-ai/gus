@@ -263,6 +263,15 @@ struct PanelVoiceSession: Decodable {
     var sttMode: String?
     var ttsMode: String?
     var speechNotice: String?
+    /// v0.9.11: the call's Shield mode for spoken turns —
+    /// "fast" (the Shield-scan switch is on; voice scans run
+    /// the gate's fast mode) or "off" (the switch is off;
+    /// spoken turns skip the ingress scan). The in-call strip
+    /// renders it as a chip next to Mute, so the operator can
+    /// SEE the state mid-call instead of digging in Settings
+    /// to check which way the switch sits. Optional: an older
+    /// control plane sends none, and the chip doesn't render.
+    var shieldMode: String?
 }
 
 /// One spoken segment of a live call's reply (v0.9.1): a single
