@@ -41,6 +41,7 @@ import {
   VoiceAdapter,
   VoiceSessionService,
   VOICE_CONVERSATION,
+  VOICE_GREETING_TEXT,
   chunkRms,
   normalizePcm16Gain,
   splitSentences,
@@ -494,6 +495,16 @@ test("session: a full turn — streamed in, settled through the pipeline, stream
   const id = await startCall(r);
   const t0 = r.clock.now;
 
+  // v0.9.7: the call opens by speaking — the app fetches the
+  // greeting segment the moment the call starts, before the
+  // operator says a word. The rig does the same.
+  const greeting = r.sessions.nextAudio(id, 0);
+  assert.equal(
+    Buffer.from(greeting.audioBase64!, "base64").toString("utf8"),
+    VOICE_GREETING_TEXT,
+    "the call opened by speaking its greeting",
+  );
+
   say(r, id);
   const jobId = await driveJob(r, "First part. Second part. Third part.");
   await r.sessions.drain();
@@ -517,9 +528,10 @@ test("session: a full turn — streamed in, settled through the pipeline, stream
   assert.equal(typeof turn.latency!.ttsFirstMs, "number");
   assert.deepEqual(state.lastLatency, turn.latency);
 
-  // Segments: one per sentence, in order, content-identifiable.
+  // Reply segments: one per sentence, in order,
+  // content-identifiable, following the greeting fetched above.
   const heard: string[] = [];
-  let after = 0;
+  let after = greeting.seq!;
   for (let i = 0; i < 3; i++) {
     const seg = r.sessions.nextAudio(id, after);
     assert.equal(seg.ok, true);
@@ -528,7 +540,7 @@ test("session: a full turn — streamed in, settled through the pipeline, stream
     heard.push(Buffer.from(seg.audioBase64!, "base64").toString("utf8"));
   }
   assert.deepEqual(heard, ["First part.", "Second part.", "Third part."]);
-  assert.deepEqual(r.script.ttsInputs, ["First part.", "Second part.", "Third part."]);
+  assert.deepEqual(r.script.ttsInputs, [VOICE_GREETING_TEXT, "First part.", "Second part.", "Third part."]);
   const none = r.sessions.nextAudio(id, after);
   assert.equal(none.seq, undefined, "the queue drains honestly");
 
@@ -621,7 +633,10 @@ test("session: the Shield gate blocks a spoken injection at session level, recei
   assert.equal(voiceJobs[0].receiptId, "rcpt_test_session_block");
   const turn = r.sessions.state(id).turns[0];
   assert.match(turn.replyText ?? "", /blocked by the Agent-Shield gate/);
-  // The block notice is what gets spoken — the operator hears the refusal.
+  // The block notice is what gets spoken — the operator hears
+  // the refusal. (The v0.9.7 greeting was superseded by this
+  // turn's speech before any fetch — a stale greeting is
+  // dropped unsaid, like any stale reply.)
   const seg = r.sessions.nextAudio(id, 0);
   assert.ok(seg.seq !== undefined, "the refusal has a spoken segment");
   r.sessions.end(id);
@@ -673,15 +688,19 @@ test("session: barge-in cancels pending synthesis and drops unfetched segments �
   const r = await sessionRig({
     transcripts: ["tell me a story"],
     ttsGate: async (callIndex) => {
-      if (callIndex === 2) await secondGate; // sentence two hangs in synthesis
+      // Call 1 is the v0.9.7 greeting (synthesized at call
+      // start); call 3 is the reply's second sentence.
+      if (callIndex === 3) await secondGate; // sentence two hangs in synthesis
     },
   });
   const id = await startCall(r);
   say(r, id);
   const jobId = await driveJob(r, "One sentence here. Two sentence here. Three sentence here.");
 
-  // Sentence one synthesized; sentence two is in flight, blocked.
-  await until(() => r.script.ttsInputs.length === 2, "the second sentence to enter synthesis");
+  // Greeting + sentence one synthesized; sentence two is in
+  // flight, blocked. (The greeting segment itself was
+  // superseded by the reply's stream before any fetch.)
+  await until(() => r.script.ttsInputs.length === 3, "the second sentence to enter synthesis");
   const first = r.sessions.nextAudio(id, 0);
   assert.equal(Buffer.from(first.audioBase64!, "base64").toString("utf8"), "One sentence here.");
 
@@ -690,7 +709,7 @@ test("session: barge-in cancels pending synthesis and drops unfetched segments �
   releaseSecond!();
   await r.sessions.drain();
 
-  assert.equal(r.script.ttsInputs.length, 2, "the third sentence was never synthesized");
+  assert.equal(r.script.ttsInputs.length, 3, "greeting + two sentences — the third sentence was never synthesized");
   const after = r.sessions.nextAudio(id, first.seq!);
   assert.equal(after.seq, undefined, "no further segment is fetchable — the rest was dropped unsaid");
   const turn = r.sessions.state(id).turns[0];
@@ -737,6 +756,11 @@ test("session: the kill phrase trips the kill switch and ends the call", async (
 test("session: three minutes of silence ends the call — idle-timeout, on the record", async () => {
   const r = await sessionRig({ idleTimeoutMs: 4_000, maxSessionMs: 600_000 });
   const id = await startCall(r);
+  // The app fetches the greeting the moment the call opens
+  // (v0.9.7) — an unfetched segment is speech in flight, not
+  // idleness, so the rig does what the app does.
+  const greeting = r.sessions.nextAudio(id, 0);
+  assert.ok(greeting.seq !== undefined, "the greeting was there to fetch");
   r.clock.now += 3_999;
   r.sessions.tick();
   assert.equal(r.sessions.state(id).active, true, "inside the window, the call lives");
@@ -870,6 +894,13 @@ test("session (v0.9.6): built-in STT — a posted transcript takes the identical
   assert.equal(started.ttsMode, "local");
   const id = started.sessionId!;
 
+  // v0.9.7: the greeting opened the call as a speak-text
+  // segment — fetched now, as the app fetches it, before the
+  // first turn's speech could supersede it.
+  const greeting = r.sessions.nextAudio(id, 0);
+  assert.equal(greeting.text, VOICE_GREETING_TEXT);
+  assert.equal(greeting.audioBase64, undefined);
+
   // The PCM stream still flows (hearing telemetry), and the VAD
   // still closes utterances — but in built-in mode a closed
   // utterance is not a turn: the recognizer owns the words.
@@ -898,7 +929,7 @@ test("session (v0.9.6): built-in STT — a posted transcript takes the identical
   // Built-in TTS: the reply's segments carry text, not audio —
   // and the fetch script saw NOTHING all call: no probe (both
   // engines local), no transcription, no synthesis.
-  const first = r.sessions.nextAudio(id, 0);
+  const first = r.sessions.nextAudio(id, greeting.seq!);
   assert.equal(first.text, "Built in and answering.");
   assert.equal(first.audioBase64, undefined);
   const second = r.sessions.nextAudio(id, first.seq!);
@@ -955,6 +986,12 @@ test("session (v0.9.6): local TTS with endpoint STT — text segments out, synth
   assert.equal(started.ttsMode, "local");
   const id = started.sessionId!;
 
+  // v0.9.7: the greeting opened the call as a speak-text
+  // segment (built-in mouth) — fetched now, as the app does.
+  const greeting = r.sessions.nextAudio(id, 0);
+  assert.equal(greeting.text, VOICE_GREETING_TEXT);
+  assert.equal(greeting.audioBase64, undefined);
+
   say(r, id);
   await driveJob(r, "Endpoint heard you. Built-in speaks.");
   await r.sessions.drain();
@@ -962,7 +999,7 @@ test("session (v0.9.6): local TTS with endpoint STT — text segments out, synth
   const turn = r.sessions.state(id).turns[0];
   assert.equal(turn.kind, "reply");
   assert.equal(turn.via, "endpoint");
-  const first = r.sessions.nextAudio(id, 0);
+  const first = r.sessions.nextAudio(id, greeting.seq!);
   assert.equal(first.text, "Endpoint heard you.");
   assert.equal(first.audioBase64, undefined, "no audio was synthesized for a text segment");
   const second = r.sessions.nextAudio(id, first.seq!);
@@ -998,6 +1035,11 @@ test("session (v0.9.6): an unreachable endpoint resolves to built-in for the cal
   const id = started.sessionId!;
   assert.equal(r.sessions.state(id).speechNotice, started.speechNotice, "the notice rides every state poll");
 
+  // v0.9.7: even a fallback call opens with the greeting, in
+  // the resolved (built-in) mouth — fetched now, as the app does.
+  const greeting = r.sessions.nextAudio(id, 0);
+  assert.equal(greeting.text, VOICE_GREETING_TEXT);
+
   // And the fallback call actually works, end to end, on the
   // built-in path — the call 0.9.5 never got to have.
   const posted = r.sessions.submitTranscript(id, "hello gus");
@@ -1006,7 +1048,7 @@ test("session (v0.9.6): an unreachable endpoint resolves to built-in for the cal
   await r.sessions.drain();
   const turn = r.sessions.state(id).turns[0];
   assert.equal(turn.kind, "reply");
-  const seg = r.sessions.nextAudio(id, 0);
+  const seg = r.sessions.nextAudio(id, greeting.seq!);
   assert.equal(seg.text, "Still here.");
   assert.equal(
     r.script.calls.filter((u) => u.includes("/audio/")).length,
@@ -1032,6 +1074,74 @@ test("session (v0.9.6): a transcript post in endpoint mode is refused — one se
   assert.equal(r.sessions.state(id).turns.length, 0, "the refused transcript minted no turn");
   assert.equal(r.pushed.length, 0, "and no job");
   r.sessions.end(id);
+});
+
+// ---------------------------------------------------------------- v0.9.7: voice that answers
+
+test("session (v0.9.7): a built-in call opens with exactly one greeting segment — text, and zero network", async () => {
+  const r = await sessionRig({ sttEngine: "local", ttsEngine: "local" });
+  const started = await r.sessions.start();
+  assert.equal(started.ok, true, started.detail);
+  const id = started.sessionId!;
+
+  const seg = r.sessions.nextAudio(id, 0);
+  assert.equal(seg.ok, true);
+  assert.equal(seg.text, VOICE_GREETING_TEXT, "the greeting is the call's first segment");
+  assert.equal(seg.audioBase64, undefined, "built-in mouth: text, not synthesized audio");
+  const none = r.sessions.nextAudio(id, seg.seq!);
+  assert.equal(none.seq, undefined, "exactly one greeting — the queue is empty behind it");
+  assert.deepEqual(r.script.calls, [], "no probe, no synthesis: built-in mode touched no network");
+  assert.deepEqual(r.script.ttsInputs, []);
+  assert.equal(r.sessions.state(id).turns.length, 0, "the greeting is a segment, not a turn");
+  r.sessions.end(id);
+});
+
+test("session (v0.9.7): an endpoint call opens with one synthesized greeting segment", async () => {
+  const r = await sessionRig({ transcripts: ["hello gus"] });
+  const started = await r.sessions.start();
+  assert.equal(started.ok, true, started.detail);
+  const id = started.sessionId!;
+
+  assert.deepEqual(
+    r.script.ttsInputs,
+    [VOICE_GREETING_TEXT],
+    "exactly one synthesis at call start: the greeting, through the endpoint mouth",
+  );
+  const seg = r.sessions.nextAudio(id, 0);
+  assert.equal(seg.text, undefined, "endpoint mouth: audio, not text");
+  assert.equal(
+    Buffer.from(seg.audioBase64!, "base64").toString("utf8"),
+    VOICE_GREETING_TEXT,
+    "the segment's audio is the greeting",
+  );
+  const none = r.sessions.nextAudio(id, seg.seq!);
+  assert.equal(none.seq, undefined, "exactly one greeting segment");
+  assert.equal(r.sessions.state(id).turns.length, 0, "the greeting minted no turn");
+  r.sessions.end(id);
+});
+
+test("session (v0.9.7): barge-in cuts the greeting like any speech", async () => {
+  const r = await sessionRig({ sttEngine: "local", ttsEngine: "local" });
+  const id = await startCall(r);
+  // The greeting sits unfetched (the operator starts talking
+  // over it the instant the call opens): the interrupt must
+  // drop it unsaid, exactly as it drops a reply's sentences.
+  const cut = r.sessions.interrupt(id);
+  assert.equal(cut.ok, true);
+  const seg = r.sessions.nextAudio(id, 0);
+  assert.equal(seg.seq, undefined, "the greeting was dropped, not held for later");
+  r.sessions.end(id);
+});
+
+test("session (v0.9.7): a failed session start speaks no greeting", async () => {
+  const r = await sessionRig({ enableVoice: false });
+  const started = await r.sessions.start();
+  assert.equal(started.ok, false);
+  assert.equal(started.active, false);
+  assert.deepEqual(r.script.ttsInputs, [], "no synthesis happened for a call that never opened");
+  assert.equal(r.script.calls.length, 0, "no speech service was ever called");
+  const seg = r.sessions.nextAudio("call-nope", 0);
+  assert.equal(seg.seq, undefined, "no segment exists to fetch");
 });
 
 // ---------------------------------------------------------------- panel routes

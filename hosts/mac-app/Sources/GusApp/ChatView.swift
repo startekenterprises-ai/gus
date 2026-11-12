@@ -52,6 +52,39 @@ struct ChatView: View {
         .onChange(of: model.composerFocusToken) { _, _ in
             composerFocused = true
         }
+        // v0.9.7: the speech-settings prompt — when built-in
+        // listening is walled off by macOS, the call surface
+        // itself offers the switches (deep links to the exact
+        // Settings panes) instead of leaving a reason in the
+        // notice line and sending the operator hunting.
+        .alert(
+            Text(model.voiceSpeechPrompt?.title ?? ""),
+            isPresented: Binding(
+                get: { model.voiceSpeechPrompt != nil },
+                set: { presented in
+                    if !presented { model.voiceSpeechPrompt = nil }
+                }
+            ),
+            presenting: model.voiceSpeechPrompt
+        ) { prompt in
+            switch prompt {
+            case .dictationDisabled:
+                Button("Open Dictation Settings") {
+                    model.openSystemSettings(pane: "com.apple.preference.keyboard?Dictation")
+                }
+                Button("Open Siri Settings") {
+                    model.openSystemSettings(pane: "com.apple.preference.siri")
+                }
+                Button("Not now", role: .cancel) { model.voiceSpeechPrompt = nil }
+            case .accessDenied:
+                Button("Open Speech Recognition Settings") {
+                    model.openSystemSettings(pane: "com.apple.preference.security?Privacy_SpeechRecognition")
+                }
+                Button("Not now", role: .cancel) { model.voiceSpeechPrompt = nil }
+            }
+        } message: { prompt in
+            Text(prompt.message)
+        }
     }
 
     // MARK: Transcript

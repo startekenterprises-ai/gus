@@ -68,6 +68,20 @@
  * reply sentences are queued as speak-text segments for the
  * app's synthesizer instead of synthesized audio.
  *
+ * Voice that answers (v0.9.7): the 0.9.6 field call heard Glenn
+ * (the VAD counted sixteen sentences) and still never spoke —
+ * the app's recognizer only POSTed on a FINAL Speech-framework
+ * result, and nothing ever ended the audio for a sentence, so
+ * no transcript ever completed a turn (voice-turns.jsonl has
+ * zero built-in entries). The app's half of that fix is in the
+ * app (partials tracked, endAudio() at a sentence's end). This
+ * half: a call now OPENS by speaking — one greeting segment is
+ * queued before any turn (below), through whichever mouth the
+ * call resolved, so the speech-out path proves itself in the
+ * first second instead of after the first unanswered minute.
+ * The greeting is a segment, not a turn: no transcript, no job,
+ * no turn record — and barge-in cuts it like any other speech.
+ *
  * The microphone's liveness is the app's side of the contract:
  * this service only ever sees audio the app chose to stream, and
  * only while a session the operator started is active. There is
@@ -266,6 +280,21 @@ interface ActiveSession {
 const DEFAULT_IDLE_TIMEOUT_MS = 180_000;
 const DEFAULT_MAX_SESSION_MS = 3_600_000;
 
+/** v0.9.7: the call's opening line — queued as the session's
+ *  first segment the moment a call starts (see the header).
+ *  Fixed text on purpose: it is the product introducing itself,
+ *  not a model output, so it is never scanned, jobbed, or
+ *  receipted — it only has to be spoken, in the call's own
+ *  voice, before anything else can be. */
+export const VOICE_GREETING_TEXT =
+  "Hi — I'm GUS, running on your machine. What would you like me to do?";
+
+/** The greeting segment's turn index: no turn owns it. Turn
+ *  records are indexed from 0, so -1 can never collide with a
+ *  real turn — and the speech machinery's per-turn bookkeeping
+ *  (interrupted flags, latency) simply doesn't apply to it. */
+const GREETING_TURN_INDEX = -1;
+
 export class VoiceSessionService {
   private fetchFn: FetchFn;
   private now: () => number;
@@ -387,12 +416,84 @@ export class VoiceSessionService {
     // control plane alive by itself.
     session.timer = setInterval(() => this.tick(), 1_000);
     session.timer.unref?.();
+    // v0.9.7: the call opens by speaking — the greeting segment
+    // is queued before start() answers, so the app's first
+    // segment poll already has it. A greeting that fails to
+    // synthesize (endpoint mouth) doesn't fail the call: the
+    // reason rides the start detail, the way a mid-reply speech
+    // failure rides its turn.
+    const greetingNote = await this.speakGreeting(session, config);
     return {
       ...this.state(session.id),
       detail:
         "Call started. Speak naturally — a pause ends your turn. Talking over a reply cuts it off; \"GUS stop\" ends the call and trips the kill switch." +
-        (speechNotice ? ` ${speechNotice}` : ""),
+        (speechNotice ? ` ${speechNotice}` : "") +
+        (greetingNote ? ` ${greetingNote}` : ""),
     };
+  }
+
+  /**
+   * v0.9.7: queue the call's one greeting segment through the
+   * mouth the call resolved — a speak-text segment for built-in
+   * TTS, one synthesize() call for an endpoint, exactly like a
+   * one-sentence reply. It takes the speech generation like any
+   * speech: an interrupt bumps the generation, aborts an
+   * in-flight synthesis, and drops the segment unfetched, so
+   * talking over the greeting cuts it precisely like talking
+   * over a reply. Returns the failure note for the start detail
+   * when the endpoint mouth couldn't speak it (built-in can't
+   * fail here — queueing text is all it does).
+   */
+  private async speakGreeting(
+    session: ActiveSession,
+    config: VoiceConfig,
+  ): Promise<string | undefined> {
+    const gen = ++session.speechGen;
+    if (session.ttsMode === "local") {
+      session.segments.push({
+        seq: session.nextSeq++,
+        turnIndex: GREETING_TURN_INDEX,
+        sentenceIndex: 0,
+        audioBase64: "",
+        audioContentType: "",
+        text: VOICE_GREETING_TEXT,
+        fetched: false,
+      });
+      return undefined;
+    }
+    const abort = new AbortController();
+    session.speechAbort = abort;
+    session.streaming = true;
+    try {
+      const out = await synthesize(
+        this.fetchFn,
+        { baseUrl: config.ttsBaseUrl, model: config.ttsModel, voice: config.ttsVoice },
+        VOICE_GREETING_TEXT,
+        undefined,
+        abort.signal,
+      );
+      if (gen !== session.speechGen || this.session !== session) return undefined;
+      session.segments.push({
+        seq: session.nextSeq++,
+        turnIndex: GREETING_TURN_INDEX,
+        sentenceIndex: 0,
+        audioBase64: Buffer.from(out.audio).toString("base64"),
+        audioContentType: out.contentType,
+        fetched: false,
+      });
+      return undefined;
+    } catch (e) {
+      if (gen !== session.speechGen || this.session !== session) return undefined;
+      return (
+        "The opening greeting couldn't be spoken: " +
+        (e instanceof SpeechServiceError ? e.message : String(e))
+      );
+    } finally {
+      if (gen === session.speechGen) {
+        session.streaming = false;
+        session.speechAbort = undefined;
+      }
+    }
   }
 
   /** v0.9.6: resolve one call's speech modes from the configured

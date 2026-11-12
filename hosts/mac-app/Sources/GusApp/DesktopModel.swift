@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import Foundation
 import Speech
@@ -8,6 +9,47 @@ extension Notification.Name {
     static let gusOpenSettings = Notification.Name("gus.openSettings")
     static let gusCheckForUpdates = Notification.Name("gus.checkForUpdates")
     static let gusRunSetup = Notification.Name("gus.runSetup")
+}
+
+/// v0.9.7: why built-in listening can't start, presented as a
+/// prompt with the fix one button away. macOS owns these
+/// switches — no app may flip Dictation, Siri, or a privacy
+/// grant on the user's behalf — so the prompt's buttons
+/// deep-link to the exact Settings panes (the app's existing
+/// x-apple.systempreferences convention, as in the Settings
+/// grant rows) instead of leaving the reason in a dead-end
+/// status line the operator has to go hunting from.
+enum VoiceSpeechPrompt: Identifiable {
+    /// Permission is granted but Apple's recognizer is
+    /// unavailable — the Dictation/Siri-disabled signature
+    /// (the 0.9.6 field call's dead end).
+    case dictationDisabled
+    /// Speech recognition permission was denied (or is
+    /// restricted) for GUS.
+    case accessDenied
+
+    var id: String {
+        switch self {
+        case .dictationDisabled: return "dictation"
+        case .accessDenied: return "denied"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .dictationDisabled: return "Dictation and Siri are off"
+        case .accessDenied: return "Speech Recognition is off for GUS"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .dictationDisabled:
+            return "Built-in listening runs on Apple's speech recognition, which macOS keeps off while Dictation and Siri are disabled. GUS can't flip those switches for you — these buttons open the exact Settings panes."
+        case .accessDenied:
+            return "GUS doesn't have permission to transcribe your voice on this Mac. Grant it under Privacy & Security → Speech Recognition, then try the call again."
+        }
+    }
 }
 
 /// The desktop window's store: a polling read model over the local
@@ -148,6 +190,31 @@ final class DesktopModel: ObservableObject {
     private var voiceRecognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var voiceRecognitionTask: SFSpeechRecognitionTask?
     private var voiceRecognitionGen = 0
+    // v0.9.7 (Voice that answers): sentence-end tracking for
+    // the built-in ears. Through 0.9.6 the recognizer reported
+    // finals only and nothing ever ended a sentence's audio,
+    // so finals essentially never arrived mid-call and no
+    // transcript ever completed a turn — the call heard
+    // everything and answered nothing. Now the recognizer
+    // reports partials; the chunk timer watches the partial
+    // (text + when it last changed) and the mic's own activity
+    // (voiceLastLoudAt, written on the audio thread under the
+    // stash lock like the other capture counters) and calls
+    // endAudio() at a real sentence end, which forces the
+    // final the pipeline waits on.
+    private var voicePartialText = ""
+    private var voicePartialLastChange = Date()
+    private var voiceTaskStartedAt = Date()
+    private var voiceEndAudioSent = false
+    /// The generation whose task already posted a final: an
+    /// error trailing that final is the task closing, not the
+    /// call failing (see the recognition handler).
+    private var voiceFinalGen = -1
+    private var voiceLastLoudAt = Date.distantPast
+    /// v0.9.7: the Settings prompt when built-in listening is
+    /// walled off by macOS — ChatView presents it; its buttons
+    /// deep-link to the panes GUS can't flip itself.
+    @Published var voiceSpeechPrompt: VoiceSpeechPrompt?
     /// The last action's outcome, in the panel's own words (or the
     /// transport error). Shown under the composer / sidebar so a
     /// refusal is never silent.
@@ -264,10 +331,107 @@ final class DesktopModel: ObservableObject {
                         self.notice = "GUS is receiving silence from the microphone — the call wasn't started. Check that the input device in System Settings → Sound is the mic you're speaking into, and that no other app is holding it."
                         return
                     }
+                    self.prepareVoiceSession()
+                }
+            }
+        }
+    }
+
+    /// v0.9.7: the preflight heard sound — before any session
+    /// opens, meet the macOS speech walls HERE, while there is
+    /// still no call to kill. If the call will use the built-in
+    /// ears (the configured STT engine, read through the same
+    /// settings endpoint Settings uses), speech-recognition
+    /// readiness is checked first: the system's own
+    /// authorization popup when it has never asked, or the
+    /// in-app prompt deep-linking to the Settings panes when a
+    /// switch is off. An endpoint call skips this — its
+    /// call-start probe is its check, and if the probe falls
+    /// back to built-in, the same readiness gate runs inside
+    /// startVoiceRecognition before the recognizer starts. A
+    /// settings fetch that fails proves nothing either way:
+    /// the session start's own loud refusals handle that world,
+    /// so the call proceeds to it.
+    private func prepareVoiceSession() {
+        client.get("/api/voice/settings", as: PanelVoiceSettings.self) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self, self.voiceCallStarting else { return }
+                if case .success(let settings) = result,
+                   settings.enabled,
+                   (settings.sttEngine ?? "local") == "local" {
+                    self.checkSpeechReadiness { ready in
+                        guard self.voiceCallStarting else { return }
+                        if ready {
+                            self.openVoiceSession()
+                        } else {
+                            self.voiceCallStarting = false
+                            self.stopVoiceCapture()
+                            self.notice = "The call wasn't started: built-in listening is walled off in System Settings — the prompt has the switches, one tap away."
+                        }
+                    }
+                } else {
                     self.openVoiceSession()
                 }
             }
         }
+    }
+
+    /// v0.9.7: is Apple's speech recognition actually usable
+    /// right now? Three walls, three handlings: notDetermined
+    /// asks (the system popup is the meeting place — the app
+    /// raises it rather than describing it); denied/restricted
+    /// sets the prompt naming the Speech Recognition privacy
+    /// pane; authorized-but-unavailable is the Dictation/Siri
+    /// signature and sets that prompt. Only authorized AND
+    /// available reports ready. Main thread only (it reads and
+    /// sets published state).
+    private func checkSpeechReadiness(completion: @escaping (Bool) -> Void) {
+        switch SFSpeechRecognizer.authorizationStatus() {
+        case .authorized:
+            completion(recognizerIsAvailable())
+        case .notDetermined:
+            SFSpeechRecognizer.requestAuthorization { [weak self] status in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if status == .authorized {
+                        completion(self.recognizerIsAvailable())
+                    } else {
+                        self.voiceSpeechPrompt = .accessDenied
+                        completion(false)
+                    }
+                }
+            }
+        default:
+            voiceSpeechPrompt = .accessDenied
+            completion(false)
+        }
+    }
+
+    /// The Dictation/Siri wall, tested exactly the way the
+    /// recognizer start tests it — no recognizer for the
+    /// locale, or an unavailable one, while permission stands
+    /// granted. Sets the prompt as its side effect: the caller
+    /// only has to act on the bool.
+    private func recognizerIsAvailable() -> Bool {
+        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")),
+              recognizer.isAvailable else {
+            voiceSpeechPrompt = .dictationDisabled
+            return false
+        }
+        return true
+    }
+
+    /// Deep-link to a System Settings pane — the app's existing
+    /// x-apple.systempreferences convention (the Settings grant
+    /// rows). The app cannot change these settings itself;
+    /// opening the pane at the right switch is the deliverable.
+    /// Choosing a pane also answers the prompt that sent the
+    /// operator there.
+    func openSystemSettings(pane: String) {
+        if let url = URL(string: "x-apple.systempreferences:\(pane)") {
+            NSWorkspace.shared.open(url)
+        }
+        voiceSpeechPrompt = nil
     }
 
     /// The preflight heard sound: open the session in the
@@ -457,7 +621,12 @@ final class DesktopModel: ObservableObject {
         voiceStashLock.lock()
         voiceMicLevel = Int(raw.rounded())
         if raw > voiceRawPeakLevel { voiceRawPeakLevel = raw }
-        if raw > Self.voiceAudibleFloor { voiceRawSpeechBuffers += 1 }
+        if raw > Self.voiceAudibleFloor {
+            voiceRawSpeechBuffers += 1
+            // v0.9.7: the mic-quiet half of the recognizer's
+            // sentence-end test, read by the chunk timer.
+            voiceLastLoudAt = Date()
+        }
         voiceStashLock.unlock()
 
         // v0.9.6: the built-in recognizer eats the SAME buffer,
@@ -589,6 +758,9 @@ final class DesktopModel: ObservableObject {
         }
         advanceVoicePlayback()
         advanceVoiceSpeech()
+        // v0.9.7: the recognizer's sentence-end watch rides
+        // the same ~250 ms beat as everything else in the call.
+        advanceVoiceRecognition()
     }
 
     private func advanceVoicePlayback() {
@@ -629,43 +801,57 @@ final class DesktopModel: ObservableObject {
 
     // MARK: Built-in ears (v0.9.6)
 
-    /// Ask for speech-recognition authorization, then start the
-    /// recognizer. A denial ends the call with the reason
-    /// stated: this call's ears were resolved as built-in, and a
-    /// call must not sit in a fake "listening" state when the OS
-    /// won't provide them — the silent-mic preflight's honesty
-    /// rule, applied to the recognizer.
+    /// Start the recognizer once readiness is proven — the
+    /// same gate prepareVoiceSession ran before the session
+    /// opened (for a call that fell back to built-in at its
+    /// probe, this is where the gate runs instead). A wall
+    /// ends the call with the reason stated AND the prompt
+    /// raised: this call's ears were resolved as built-in, and
+    /// a call must not sit in a fake "listening" state when
+    /// the OS won't provide them — the silent-mic preflight's
+    /// honesty rule, applied to the recognizer.
     private func startVoiceRecognition() {
-        SFSpeechRecognizer.requestAuthorization { [weak self] status in
-            DispatchQueue.main.async {
-                guard let self, self.voiceInCall else { return }
-                guard status == .authorized else {
-                    self.notice = "Speech recognition is off for GUS — grant it in System Settings → Privacy & Security → Speech Recognition, then try the call again. The call is closed."
-                    self.teardownVoice(sendEnd: true)
-                    return
-                }
-                self.beginVoiceRecognitionTask()
+        checkSpeechReadiness { [weak self] ready in
+            guard let self, self.voiceInCall else { return }
+            guard ready else {
+                self.notice = "Built-in listening is walled off in System Settings — the call is closed; the prompt has the switches, one tap away."
+                self.teardownVoice(sendEnd: true)
+                return
             }
+            self.beginVoiceRecognitionTask()
         }
     }
 
     /// One recognition task: on-device when the recognizer
     /// supports it (the words then never leave this Mac — the
-    /// local-first posture in the framework's own terms), final
-    /// results only. A final result is POSTed as the call's next
-    /// transcript and the task restarts — Apple's per-task limit
-    /// is about a minute, a call's limit is sixty.
+    /// local-first posture in the framework's own terms).
+    /// Partial results ON (v0.9.7): the partial is the sentence
+    /// in progress, and advanceVoiceRecognition() ends its
+    /// audio when the words stop changing and the mic goes
+    /// quiet — that endAudio() is what makes the final below
+    /// ever arrive mid-call. A final result is POSTed as the
+    /// call's next transcript and the task restarts — Apple's
+    /// per-task limit is about a minute, a call's limit is
+    /// sixty (the same backstop lives in the sentence-end
+    /// watch: ~50 s of continuous recognition ends the audio
+    /// and banks the partial as a final).
     private func beginVoiceRecognitionTask() {
         guard voiceInCall, voiceSttMode == "local" else { return }
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")),
               recognizer.isAvailable else {
-            notice = "Built-in speech recognition isn't available on this Mac right now — the call is closed. In Settings → Voice you can point transcription at an endpoint instead."
+            // v0.9.7: the Dictation/Siri wall, met with the
+            // prompt (its buttons deep-link to the panes), not
+            // a bare status line. Readiness was checked before
+            // this start, so reaching here means availability
+            // dropped in between — the handling is the same.
+            voiceSpeechPrompt = .dictationDisabled
+            notice = "Built-in speech recognition isn't available on this Mac right now — the call is closed. The prompt has the Dictation and Siri switches; in Settings → Voice you can also point transcription at an endpoint instead."
             teardownVoice(sendEnd: true)
             return
         }
         voiceRecognizer = recognizer
         let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = false
+        request.shouldReportPartialResults = true
         if recognizer.supportsOnDeviceRecognition {
             request.requiresOnDeviceRecognition = true
         }
@@ -674,11 +860,23 @@ final class DesktopModel: ObservableObject {
         voiceStashLock.unlock()
         voiceRecognitionGen += 1
         let gen = voiceRecognitionGen
+        // A fresh task starts with a clean sentence: no partial,
+        // nothing ended, the backstop clock running from now.
+        voicePartialText = ""
+        voicePartialLastChange = Date()
+        voiceTaskStartedAt = Date()
+        voiceEndAudioSent = false
         voiceRecognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
             if let result, result.isFinal {
                 let text = result.bestTranscription.formattedString
                 DispatchQueue.main.async {
                     guard let self, self.voiceInCall, gen == self.voiceRecognitionGen else { return }
+                    // This task delivered its sentence — an
+                    // error trailing it (the framework often
+                    // appends one as a task winds down) is the
+                    // sound of it closing, not a failure; the
+                    // error branch below checks this mark.
+                    self.voiceFinalGen = gen
                     if let id = self.voiceSessionId {
                         self.client.postVoiceSessionTranscript(sessionId: id, text: text) { _ in }
                     }
@@ -695,14 +893,74 @@ final class DesktopModel: ObservableObject {
                 }
                 return
             }
+            if let result {
+                // A partial: the sentence so far. Tracked —
+                // text and the moment it last changed — for
+                // the chunk timer's sentence-end watch. No
+                // posting: a partial is a draft, and the turn
+                // pipeline only ever sees finals.
+                let text = result.bestTranscription.formattedString
+                DispatchQueue.main.async {
+                    guard let self, self.voiceInCall, gen == self.voiceRecognitionGen else { return }
+                    if text != self.voicePartialText {
+                        self.voicePartialText = text
+                        self.voicePartialLastChange = Date()
+                    }
+                }
+            }
             if let error {
                 DispatchQueue.main.async {
                     guard let self, self.voiceInCall, gen == self.voiceRecognitionGen else { return }
+                    if self.voiceFinalGen == gen {
+                        // The error arrived AFTER this task's
+                        // final — restart the ears for the next
+                        // sentence instead of closing the call
+                        // over a sentence that already landed.
+                        self.voiceRecognitionTask = nil
+                        self.voiceStashLock.lock()
+                        self.voiceRecognitionRequest = nil
+                        self.voiceStashLock.unlock()
+                        self.beginVoiceRecognitionTask()
+                        return
+                    }
                     self.notice = "Built-in speech recognition stopped: \(error.localizedDescription) — the call is closed rather than left listening to nothing."
                     self.teardownVoice(sendEnd: true)
                 }
             }
         }
+    }
+
+    /// v0.9.7: the sentence-end watch, run by the chunk timer
+    /// (~250 ms) while a built-in call is open. When a partial
+    /// exists, its words have been stable for ~0.9 s, and the
+    /// mic itself has been quiet for ~0.9 s, the sentence is
+    /// over: endAudio() forces the final that POSTs the
+    /// transcript. The mic-quiet half matters — a partial can
+    /// sit unchanged between two loud halves of one sentence,
+    /// and the raw level (not the recognizer) says whether the
+    /// operator is still talking. Backstop: ~50 s of continuous
+    /// recognition with a partial outstanding also ends the
+    /// audio, banking the words before Apple's ~1-minute
+    /// per-task limit can take them. endAudio is sent at most
+    /// once per task; the restarted task resets the flag.
+    private func advanceVoiceRecognition() {
+        guard voiceInCall, voiceSttMode == "local",
+              voiceRecognitionTask != nil, !voiceEndAudioSent else { return }
+        let partial = voicePartialText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !partial.isEmpty else { return }
+        let now = Date()
+        voiceStashLock.lock()
+        let lastLoud = voiceLastLoudAt
+        voiceStashLock.unlock()
+        let sentenceDone = now.timeIntervalSince(voicePartialLastChange) >= 0.9
+            && now.timeIntervalSince(lastLoud) >= 0.9
+        let taskAged = now.timeIntervalSince(voiceTaskStartedAt) >= 50
+        guard sentenceDone || taskAged else { return }
+        voiceEndAudioSent = true
+        voiceStashLock.lock()
+        let request = voiceRecognitionRequest
+        voiceStashLock.unlock()
+        request?.endAudio()
     }
 
     /// Stop the recognizer: generation bump first (every pending
@@ -719,6 +977,9 @@ final class DesktopModel: ObservableObject {
         voiceRecognitionRequest = nil
         voiceStashLock.unlock()
         voiceRecognizer = nil
+        // v0.9.7: no sentence survives the call it was spoken in.
+        voicePartialText = ""
+        voiceEndAudioSent = false
     }
 
     /// The state poll (~0.8 s): transcript, phase, elapsed,
