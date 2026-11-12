@@ -16,7 +16,13 @@
 //     replies, barge-in — over the panel's voice session routes;
 //     v0.9.2: the call shows its hearing (mic vs heard levels in
 //     the in-call strip) and capture restarts itself once
-//     without voice processing when a microphone yields nothing).
+//     without voice processing when a microphone yields nothing;
+//     v0.9.3: the capture path is rebuilt — no voice processing,
+//     the tap takes the microphone's native format and the
+//     converter is built from the buffers that actually arrive,
+//     the strip's mic number is the raw pre-conversion level,
+//     and a preflight refuses to open a call on a silent
+//     microphone instead of listening forever).
 //     It launches GusMacHost from inside the bundle (so
 //     Accessibility / Screen Recording grants attach to
 //     GUS.app), shows status, starts/stops the launchd agents, and

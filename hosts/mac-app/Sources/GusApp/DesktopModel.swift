@@ -57,13 +57,15 @@ final class DesktopModel: ObservableObject {
     @Published var voiceLatencyLine: String?
     /// v0.9.2: the in-call strip's hearing line — the server's
     /// ledger (what the session's VAD is receiving) next to the
-    /// app's own latest mic level. The gap between the two IS
-    /// the diagnosis when a call won't take a turn: mic moving
-    /// + heard flat means the audio dies between here and the
-    /// segmenter; both flat means the microphone itself.
+    /// app's own mic level. v0.9.3: the app's number is the RAW
+    /// level, measured in the tap from the buffers as the
+    /// microphone delivered them, before any conversion — so
+    /// the gap between the two isolates the converter: mic
+    /// moving + heard flat means conversion is eating the
+    /// audio; both flat means the microphone itself.
     @Published var voiceHearingLine: String?
-    /// The app's own latest shipped chunk's energy (the same
-    /// PCM the tick posts), on the int16 scale like the
+    /// The app's latest raw microphone level (pre-conversion,
+    /// from the tap handler), on the int16 scale like the
     /// server's numbers, so the two compare directly.
     private var voiceMicLevel = 0
     private var voiceSessionId: String?
@@ -71,29 +73,49 @@ final class DesktopModel: ObservableObject {
     private var voiceLastSeq = 0
     // Capture: AVAudioEngine tap → converter → a PCM16 stash the
     // chunk timer drains in ~250 ms posts (never from the audio
-    // thread itself).
+    // thread itself). v0.9.3 shape: the tap is installed with NO
+    // explicit format (buffers arrive in the input node's true
+    // running format) and the converter is built lazily from the
+    // first buffer that actually arrives — never from a format
+    // queried before the engine started, which is how 0.9.1/
+    // 0.9.2 could convert faithfully into silence.
     private var voiceEngine: AVAudioEngine?
     private var voiceConverter: AVAudioConverter?
+    /// The input format the current converter was built from;
+    /// a buffer in any other format rebuilds it.
+    private var voiceConverterSourceFormat: AVAudioFormat?
     private let voiceTargetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true)!
     private var voiceStash = Data()
     private let voiceStashLock = NSLock()
     private var voiceChunkTimer: Timer?
     private var voicePollTimer: Timer?
     private var voiceLoudStreak = 0
-    // Capture health (v0.9.2): frames the converter actually
-    // produced vs buffers it dropped (error / zero frames),
-    // counted on the audio thread under the stash lock and read
-    // by the health check on the main thread. The 0.9.1 capture
-    // dropped silently by design, so a converter that produced
-    // nothing presented as a call that listened forever; now a
-    // call whose capture yields no frames within 2 s restarts
-    // once without voice processing, and a call that STILL
-    // yields nothing ends with the reason on the notice instead
-    // of listening forever.
+    // Capture evidence (v0.9.3), counted on the audio thread
+    // under the stash lock and read on the main thread: frames
+    // the converter produced vs buffers it dropped, buffers
+    // whose RAW level crossed the audible floor, and the raw
+    // peak since capture started. The preflight reads the peak
+    // (~600 ms in: silence never opens a call); the converter
+    // guard reads the deltas (raw sound arriving for 2 s while
+    // the converter produces nothing ends the call, loudly).
     private var voiceConvertedFrames = 0
     private var voiceDroppedBuffers = 0
-    private var voiceCaptureRestarted = false
-    private var voiceHealthTimer: Timer?
+    private var voiceRawSpeechBuffers = 0
+    private var voiceRawPeakLevel: Double = 0
+    /// True between the Call tap and the call opening (or the
+    /// attempt failing) — the preflight window, during which
+    /// the Call button must not start a second attempt.
+    private var voiceCallStarting = false
+    private var voicePreflightTimer: Timer?
+    private var voiceConvertGuardTimer: Timer?
+    private var voiceGuardFramesMark = 0
+    private var voiceGuardSpeechMark = 0
+    private var voiceGuardTicks = 0
+    /// The audible floor on the int16 scale: raw RMS above
+    /// this is a microphone delivering sound, not a quiet room
+    /// (ordinary speech reads in the low thousands; a silent
+    /// room in the low tens).
+    private static let voiceAudibleFloor: Double = 150
     // Playback: a queue of sentence segments through one player,
     // advanced by the chunk timer (no delegate — the timer asks
     // isPlaying, which is all the chaining needs).
@@ -179,11 +201,18 @@ final class DesktopModel: ObservableObject {
     // MARK: Voice — Call GUS, live (v0.9.1)
 
     /// The Call button: open a live call. The mic permission is
-    /// asked first (the same gate as 0.9.0), then the session is
-    /// opened in the control plane, and only then does capture
-    /// start — the order matters: no session, no microphone.
+    /// asked first (the same gate as 0.9.0), then capture starts
+    /// as a PREFLIGHT (v0.9.3): for ~600 ms the app only measures
+    /// the raw microphone level — nothing is posted anywhere, no
+    /// session exists, and the measured audio is discarded. Only
+    /// a microphone that provably delivers sound opens a session
+    /// and becomes a call. The order changed in v0.9.3 because
+    /// the old one (session first, capture second) let a dead
+    /// capture path present as a call "listening" forever; a
+    /// silent mic now gets a plain refusal within about a
+    /// second, before any session exists.
     func startVoiceCall() {
-        guard !voiceInCall else { return }
+        guard !voiceInCall, !voiceCallStarting else { return }
         AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -191,35 +220,66 @@ final class DesktopModel: ObservableObject {
                     self.notice = "Microphone access is off for GUS — grant it in System Settings → Privacy & Security → Microphone, then try the call again."
                     return
                 }
-                self.client.startVoiceSession { [weak self] result in
-                    DispatchQueue.main.async {
-                        guard let self else { return }
-                        switch result {
-                        case .success(let session) where session.ok && session.active:
-                            self.voiceSessionId = session.sessionId
-                            self.voiceBargeIn = session.bargeIn ?? true
-                            self.voiceTurns = session.turns
-                            self.voiceLastSeq = 0
-                            self.voicePlayQueue = []
-                            self.voiceLatencyLine = nil
-                            self.voiceHearingLine = nil
-                            self.voiceMicLevel = 0
-                            self.voiceCaptureRestarted = false
-                            self.voiceInCall = true
-                            self.notice = session.detail
-                            self.beginVoiceCapture()
-                            self.voiceChunkTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-                                self?.voiceChunkTick()
-                            }
-                            self.voicePollTimer = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: true) { [weak self] _ in
-                                self?.pollVoiceSession()
-                            }
-                        case .success(let session):
-                            self.notice = session.detail
-                        case .failure(let e):
-                            self.notice = "The call didn't reach GUS: \(e.localizedDescription)"
-                        }
+                self.voiceCallStarting = true
+                guard self.beginVoiceCapture() else {
+                    // beginVoiceCapture set the notice.
+                    self.voiceCallStarting = false
+                    return
+                }
+                self.voicePreflightTimer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: false) { [weak self] _ in
+                    guard let self, self.voiceCallStarting else { return }
+                    self.voiceStashLock.lock()
+                    let peak = self.voiceRawPeakLevel
+                    self.voiceStashLock.unlock()
+                    guard peak > Self.voiceAudibleFloor else {
+                        self.voiceCallStarting = false
+                        self.stopVoiceCapture()
+                        self.notice = "GUS is receiving silence from the microphone — the call wasn't started. Check that the input device in System Settings → Sound is the mic you're speaking into, and that no other app is holding it."
+                        return
                     }
+                    self.openVoiceSession()
+                }
+            }
+        }
+    }
+
+    /// The preflight heard sound: open the session in the
+    /// control plane and become a call. The probe audio in the
+    /// stash is dropped, not sent — it was a level check, not a
+    /// first sentence.
+    private func openVoiceSession() {
+        client.startVoiceSession { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.voiceCallStarting = false
+                switch result {
+                case .success(let session) where session.ok && session.active:
+                    self.voiceSessionId = session.sessionId
+                    self.voiceBargeIn = session.bargeIn ?? true
+                    self.voiceTurns = session.turns
+                    self.voiceLastSeq = 0
+                    self.voicePlayQueue = []
+                    self.voiceLatencyLine = nil
+                    self.voiceHearingLine = nil
+                    self.voiceMicLevel = 0
+                    self.voiceStashLock.lock()
+                    self.voiceStash = Data()
+                    self.voiceStashLock.unlock()
+                    self.voiceInCall = true
+                    self.notice = session.detail
+                    self.voiceChunkTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+                        self?.voiceChunkTick()
+                    }
+                    self.voicePollTimer = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: true) { [weak self] _ in
+                        self?.pollVoiceSession()
+                    }
+                    self.scheduleVoiceConvertGuard()
+                case .success(let session):
+                    self.stopVoiceCapture()
+                    self.notice = session.detail
+                case .failure(let e):
+                    self.stopVoiceCapture()
+                    self.notice = "The call didn't reach GUS: \(e.localizedDescription)"
                 }
             }
         }
@@ -233,95 +293,149 @@ final class DesktopModel: ObservableObject {
         notice = "Call ended."
     }
 
-    private func beginVoiceCapture(voiceProcessing: Bool = true) {
+    /// Start the microphone: engine first, tap second, converter
+    /// later (lazily, from the buffers that actually arrive).
+    /// Returns false — with the notice set — when the engine
+    /// won't start. The capture runs during the preflight with
+    /// no session behind it; the caller decides what a live
+    /// capture becomes.
+    ///
+    /// Deliberately NO voice processing (v0.9.3): through
+    /// 0.9.2 the call enabled the input node's voice processing
+    /// (echo cancellation / gain control), and on Glenn's iMac
+    /// that pipeline delivered frames of silence to a converter
+    /// built from a pre-start format — every meter downstream
+    /// read zero while the system input meter moved. Voice
+    /// processing is out of the call path entirely now; echo
+    /// management lives where it observably works: the barge-in
+    /// energy thresholds and the server's VAD.
+    @discardableResult
+    private func beginVoiceCapture() -> Bool {
         let engine = AVAudioEngine()
         let input = engine.inputNode
-        // Voice processing (echo cancellation + gain control)
-        // where the hardware offers it: GUS's own spoken reply
-        // stays out of the microphone, which is what keeps the
-        // barge-in energy check honest. If it's refused, the
-        // plain input still carries the call. (v0.9.2: the
-        // capture health check below restarts WITHOUT it when
-        // it yields no convertible audio on this microphone.)
-        if voiceProcessing {
-            try? input.setVoiceProcessingEnabled(true)
-        }
-        let format = input.outputFormat(forBus: 0)
-        guard let converter = AVAudioConverter(from: format, to: voiceTargetFormat) else {
-            notice = "This Mac's microphone format can't be converted for the call — nothing is being recorded."
-            teardownVoice(sendEnd: true)
-            return
-        }
-        voiceConverter = converter
-        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
-            self?.ingestVoiceBuffer(buffer)
-        }
+        voiceConverter = nil
+        voiceConverterSourceFormat = nil
+        // A fresh capture starts with clean evidence counters —
+        // the preflight reads the peak, the converter guard
+        // reads the deltas.
+        voiceStashLock.lock()
+        voiceConvertedFrames = 0
+        voiceDroppedBuffers = 0
+        voiceRawSpeechBuffers = 0
+        voiceRawPeakLevel = 0
+        voiceMicLevel = 0
+        voiceStash = Data()
+        voiceStashLock.unlock()
         engine.prepare()
         do {
             try engine.start()
-            voiceEngine = engine
-            // A fresh capture starts with a clean health slate,
-            // and the check runs 2 s in: frames by then, or the
-            // self-heal (once) / honest ending (after that).
-            voiceStashLock.lock()
-            voiceConvertedFrames = 0
-            voiceDroppedBuffers = 0
-            voiceStashLock.unlock()
-            scheduleVoiceHealthCheck()
         } catch {
             notice = "The microphone wouldn't start: \(error.localizedDescription)"
-            teardownVoice(sendEnd: true)
+            return false
         }
+        voiceEngine = engine
+        // The tap goes on AFTER the engine is running and with
+        // format nil, so buffers arrive in the input node's
+        // true running format — whatever the hardware settled
+        // on, not whatever a pre-start query claimed.
+        input.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, _ in
+            self?.ingestVoiceBuffer(buffer)
+        }
+        return true
     }
 
-    /// The capture health check (v0.9.2), ~2 s after a capture
-    /// (re)starts: if the converter has produced ZERO frames by
-    /// now, the audio path is dead however healthy the engine
-    /// looks. The first death restarts capture once without
-    /// voice processing (the notice says so); a second death
-    /// ends the call with the reason stated — never a call that
-    /// listens forever in silence.
-    private func scheduleVoiceHealthCheck() {
-        voiceHealthTimer?.invalidate()
-        voiceHealthTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
+    /// The converter guard (v0.9.3), replacing the v0.9.2
+    /// restart-without-voice-processing health check (voice
+    /// processing is gone, so there is nothing to restart
+    /// without). Every 2 s of an open call it compares deltas:
+    /// if buffers whose RAW level crossed the audible floor
+    /// kept arriving while the converter produced ZERO frames,
+    /// the converter is the failure — the call ends with that
+    /// stated, loudly, instead of listening forever. A quiet
+    /// room trips nothing: no raw speech, no conclusion.
+    private func scheduleVoiceConvertGuard() {
+        voiceConvertGuardTimer?.invalidate()
+        voiceStashLock.lock()
+        voiceGuardFramesMark = voiceConvertedFrames
+        voiceGuardSpeechMark = voiceRawSpeechBuffers
+        voiceStashLock.unlock()
+        voiceGuardTicks = 0
+        voiceConvertGuardTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self, self.voiceInCall else { return }
+            self.voiceGuardTicks += 1
+            guard self.voiceGuardTicks % 2 == 0 else { return }
             self.voiceStashLock.lock()
             let frames = self.voiceConvertedFrames
+            let speech = self.voiceRawSpeechBuffers
             self.voiceStashLock.unlock()
-            guard frames == 0 else { return }
-            if !self.voiceCaptureRestarted {
-                self.voiceCaptureRestarted = true
-                self.notice = "Voice processing didn't agree with this microphone — restarted the call audio without it."
-                self.stopVoiceCapture()
-                self.beginVoiceCapture(voiceProcessing: false)
-            } else {
-                self.notice = "The microphone produced no usable audio — the call is closed. Check the microphone and try the call again."
+            let dFrames = frames - self.voiceGuardFramesMark
+            let dSpeech = speech - self.voiceGuardSpeechMark
+            self.voiceGuardFramesMark = frames
+            self.voiceGuardSpeechMark = speech
+            if dSpeech > 0 && dFrames == 0 {
+                self.notice = "Sound is reaching the app, but the call's audio converter is producing nothing from it — the call is closed. That's a converter failure, not a quiet room."
                 self.teardownVoice(sendEnd: true)
             }
         }
     }
 
-    /// Stop just the capture (tap, engine, converter, stash) —
-    /// the session stays open. The health restart uses this;
-    /// teardownVoice uses it too, on its way to ending the
-    /// session as well.
+    /// Stop just the capture (timers, tap, engine, converter,
+    /// stash) — the session, if one exists, stays open. The
+    /// preflight's failure path uses this (no session ever
+    /// existed); teardownVoice uses it too, on its way to
+    /// ending the session as well.
     private func stopVoiceCapture() {
-        voiceHealthTimer?.invalidate()
-        voiceHealthTimer = nil
+        voicePreflightTimer?.invalidate()
+        voicePreflightTimer = nil
+        voiceConvertGuardTimer?.invalidate()
+        voiceConvertGuardTimer = nil
         voiceEngine?.inputNode.removeTap(onBus: 0)
         voiceEngine?.stop()
         voiceEngine = nil
         voiceConverter = nil
+        voiceConverterSourceFormat = nil
         voiceStashLock.lock()
         voiceStash = Data()
         voiceStashLock.unlock()
     }
 
-    /// Audio-thread work: convert one input buffer to the call's
-    /// PCM16 shape and stash it. Nothing here posts, allocates
-    /// UI, or touches published state — the chunk timer does all
-    /// of that on the main thread.
+    /// Audio-thread work: measure one input buffer RAW, then
+    /// convert it to the call's PCM16 shape and stash it.
+    /// Nothing here posts, allocates UI, or touches published
+    /// state — the chunk timer does all of that on the main
+    /// thread.
     private func ingestVoiceBuffer(_ buffer: AVAudioPCMBuffer) {
+        // The raw level FIRST, from the buffer exactly as the
+        // microphone delivered it, before conversion touches
+        // it (v0.9.3): this is the number the hearing line
+        // shows as "mic", and the preflight + converter guard
+        // read it. A conversion problem can no longer masquerade
+        // as a silent microphone — the raw number says what the
+        // mic actually sent.
+        let raw = Self.rawBufferRms(buffer)
+        voiceStashLock.lock()
+        voiceMicLevel = Int(raw.rounded())
+        if raw > voiceRawPeakLevel { voiceRawPeakLevel = raw }
+        if raw > Self.voiceAudibleFloor { voiceRawSpeechBuffers += 1 }
+        voiceStashLock.unlock()
+
+        // The converter is built LAZILY from the first buffer's
+        // actual format (and rebuilt whenever a buffer arrives
+        // in a different one) — never from a format queried
+        // before the engine started. 0.9.1/0.9.2 built one up
+        // front from outputFormat(forBus:) and, on Glenn's
+        // iMac, converted faithfully into silence.
+        if voiceConverter == nil || !Self.sameAudioFormat(buffer.format, voiceConverterSourceFormat) {
+            guard buffer.format.sampleRate > 0,
+                  let fresh = AVAudioConverter(from: buffer.format, to: voiceTargetFormat) else {
+                voiceStashLock.lock()
+                voiceDroppedBuffers += 1
+                voiceStashLock.unlock()
+                return
+            }
+            voiceConverter = fresh
+            voiceConverterSourceFormat = buffer.format
+        }
         guard let converter = voiceConverter else { return }
         let ratio = voiceTargetFormat.sampleRate / buffer.format.sampleRate
         let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 128
@@ -338,13 +452,11 @@ final class DesktopModel: ObservableObject {
             return buffer
         }
         guard status != .error, out.frameLength > 0, let channel = out.int16ChannelData?[0] else {
-            // v0.9.2: a buffer arrived and produced nothing —
-            // counted, under the lock, for the health check.
-            // (Before, this guard returned silently, which is
-            // why a dead converter looked exactly like a quiet
-            // room.) A converter that isn't there at all — the
-            // guard at the top — is teardown's business, not a
-            // drop.
+            // A buffer arrived and produced nothing — counted,
+            // under the lock, for the converter guard. (Before
+            // v0.9.2 this guard returned silently, which is why
+            // a dead converter looked exactly like a quiet
+            // room.)
             voiceStashLock.lock()
             voiceDroppedBuffers += 1
             voiceStashLock.unlock()
@@ -369,17 +481,19 @@ final class DesktopModel: ObservableObject {
         voiceStashLock.unlock()
 
         if !chunk.isEmpty {
-            // The app's own level for this chunk — the same
-            // number the barge-in check uses — kept for the
-            // in-call strip's hearing line, where it sits next
-            // to the server's heard level (v0.9.2).
-            voiceMicLevel = Int(Self.pcmRms(chunk).rounded())
+            // This chunk's energy, for the barge-in check below
+            // only. (The hearing line's "mic" number is NOT this
+            // — since v0.9.3 it's the raw level the tap handler
+            // measures before conversion, so the strip compares
+            // what the microphone delivered against what the
+            // server heard.)
+            let chunkLevel = Self.pcmRms(chunk)
             // Barge-in, the app's half: sustained speech energy
             // while GUS is audibly talking means the operator is
             // talking over it — stop the player here, and tell
             // the control plane to drop the rest of the reply.
             if voiceBargeIn, voicePlayer?.isPlaying == true {
-                if Self.pcmRms(chunk) > 900 {
+                if chunkLevel > 900 {
                     voiceLoudStreak += 1
                 } else {
                     voiceLoudStreak = 0
@@ -493,6 +607,57 @@ final class DesktopModel: ObservableObject {
 
     private static func seconds(_ ms: Double) -> String {
         String(format: "%.1fs", ms / 1000)
+    }
+
+    /// RMS of a tap buffer AS DELIVERED, before any conversion
+    /// (v0.9.3), on the int16 scale: float samples are scaled by
+    /// 32767, int16 samples read directly, int32 samples scaled
+    /// down by 65536 (their full scale is 65536× the int16
+    /// scale). Channel 0 only — this is a level, not a mixdown.
+    /// Zero for empty buffers and formats with no readable
+    /// channel data.
+    private static func rawBufferRms(_ buffer: AVAudioPCMBuffer) -> Double {
+        let frames = Int(buffer.frameLength)
+        guard frames > 0 else { return 0 }
+        if let floats = buffer.floatChannelData {
+            let ch = floats[0]
+            var sum: Double = 0
+            for i in 0..<frames {
+                let s = Double(ch[i])
+                sum += s * s
+            }
+            return (sum / Double(frames)).squareRoot() * 32_767
+        }
+        if let ints = buffer.int16ChannelData {
+            let ch = ints[0]
+            var sum: Double = 0
+            for i in 0..<frames {
+                let s = Double(ch[i])
+                sum += s * s
+            }
+            return (sum / Double(frames)).squareRoot()
+        }
+        if let wide = buffer.int32ChannelData {
+            let ch = wide[0]
+            var sum: Double = 0
+            for i in 0..<frames {
+                let s = Double(ch[i]) / 65_536
+                sum += s * s
+            }
+            return (sum / Double(frames)).squareRoot()
+        }
+        return 0
+    }
+
+    /// Whether two audio formats are the same for converter
+    /// purposes — the lazy converter rebuilds when an arriving
+    /// buffer's format differs from the one it was built from.
+    private static func sameAudioFormat(_ a: AVAudioFormat, _ b: AVAudioFormat?) -> Bool {
+        guard let b else { return false }
+        return a.sampleRate == b.sampleRate
+            && a.channelCount == b.channelCount
+            && a.commonFormat == b.commonFormat
+            && a.isInterleaved == b.isInterleaved
     }
 
     /// RMS of one raw PCM16 chunk (the call's audio shape), on
