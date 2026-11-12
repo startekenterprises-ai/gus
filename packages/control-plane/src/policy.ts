@@ -31,6 +31,12 @@
  *      the approved work dirs, allowlisted shell in those dirs;
  *      everything else is a Once). It runs in the same slot for the
  *      same reason, and it applies the declared-class floor itself.
+ *   2d. v0.9.5: github_publish_release is classified by
+ *      classifyGitHub — publishing is an external send with the
+ *      vaulted "github" token, so EVERY call parks for a one-time,
+ *      hash-bound approval naming the exact tag and file paths.
+ *      There is no standing-approval coverage for publishing (the
+ *      gmail_delete hard-line logic: some actions are Once forever).
  *   3. Built-in approval triggers: destructive / external-send / pay
  *      class floor; credential use (fetch naming a vault secret);
  *      writes whose path escapes the workspace jail; bulk operations
@@ -60,6 +66,7 @@ import {
   macJailContains,
   macResolveJailed,
 } from "./mac.js";
+import { isGitHubTool } from "./github.js";
 
 export type PolicyAction = "allow" | "deny" | "needs-approval";
 
@@ -490,6 +497,33 @@ export class PolicyStore {
   }
 
   /**
+   * v0.9.5 classification for the GitHub publish pack. Publishing is
+   * an external send performed with a vaulted credential, and it is
+   * irreversible in the way that matters (a published release is
+   * what the in-app updater offers every install) — so every call
+   * parks for a one-time approval bound to the exact arguments, and
+   * NO standing approval can cover it. The park's reason enumerates
+   * the tag and both file paths: an approval that cannot say
+   * precisely what it covers does not get granted (the Yue rule).
+   * Argument SHAPE is not judged here beyond the enumeration — the
+   * service refuses malformed calls loudly at execution.
+   */
+  private classifyGitHub(call: ToolCallShape): Classification {
+    const { args } = call;
+    const tag = typeof args.tag === "string" && args.tag ? args.tag : "(no tag named)";
+    const dmg = typeof args.dmgPath === "string" && args.dmgPath ? args.dmgPath : "(no DMG path named)";
+    const sha = typeof args.shaPath === "string" && args.shaPath ? args.shaPath : "(no checksum path named)";
+    return {
+      action: "needs-approval",
+      effectiveClass: "external-send",
+      reason:
+        `publish GUS release ${tag} to GitHub: upload ${dmg} and ${sha} to the ${tag} draft ` +
+        `and publish it, using the vaulted "github" token inside the control plane — ` +
+        `publishing always needs a one-time approval for the exact tag and files`,
+    };
+  }
+
+  /**
    * Phase 7 classification for mac_* tools — the Mac pack's
    * permission model, mirroring the scope's Nova policy defaults:
    *
@@ -657,6 +691,12 @@ export class PolicyStore {
     // classifyMac). Never already won above.
     if (isMacTool(tool)) {
       return this.classifyMac(call, policy);
+    }
+
+    // 2d. v0.9.5: the GitHub publish pack — every publish parks for
+    // a one-time approval (classifyGitHub). Never already won above.
+    if (isGitHubTool(tool)) {
+      return this.classifyGitHub(call);
     }
 
     // 3. Built-in approval triggers.

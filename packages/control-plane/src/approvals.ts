@@ -152,6 +152,14 @@ export function describeAction(tool: string, args: Record<string, unknown>): str
     }
     case "gmail_block_sender":
       return `Block Gmail sender ${String(args.from ?? args.address ?? "?")} (their future mail skips the inbox and lands in spam)`;
+    // v0.9.5 (GitHub publish pack): the summary enumerates the exact
+    // tag and both files — the publish equivalent of the Yue rule.
+    case "github_publish_release":
+      return (
+        `Publish GUS release ${String(args.tag ?? "?")} to GitHub: upload ${String(args.dmgPath ?? "?")} ` +
+        `and ${String(args.shaPath ?? "?")} to the ${String(args.tag ?? "?")} draft release and publish it ` +
+        `(the vaulted "github" token is used inside the control plane — the agent never sees the value)`
+      );
     case "gmail_draft": {
       const to = gmailRecipients(args);
       return `Create a Gmail draft to ${to.join(", ") || "(no recipients named)"} — subject "${String(args.subject ?? "")}" (draft only, not sent)`;

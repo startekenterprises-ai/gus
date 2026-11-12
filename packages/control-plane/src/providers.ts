@@ -210,6 +210,7 @@ Available tools (args in braces):
 - workspace_read {"path": "relative/path"} — read a file in your sandbox workspace.
 - workspace_write {"path": "relative/path", "content": "..."} — write a file in your sandbox workspace.
 - fetch {"url": "https://...", "method": "GET"} — fetch a web page (via the egress proxy).
+- github_publish_release {"tag": "v0.9.5", "dmgPath": "/absolute/path/GUS-0.9.5.dmg", "shaPath": "/absolute/path/GUS-0.9.5.dmg.sha256"} — publish a GUS release: upload the named DMG + checksum to the existing draft GitHub release for that tag and publish it. The control plane performs it with the vaulted publish token; the checksum is verified against the DMG before anything uploads.
 
 Rules:
 - Some actions need the operator's approval. The system asks them automatically when your call requires it — never ask for permission in your text, and never describe an action as done until a TOOL_RESULT confirms it.
@@ -230,6 +231,11 @@ function toolFloorClass(tool: string, args: Record<string, unknown>): ToolClass 
       const method = typeof args.method === "string" ? args.method.toUpperCase() : "GET";
       return method === "GET" || method === "HEAD" ? "read" : "write";
     }
+    case "github_publish_release":
+      // v0.9.5: publishing is an external send by construction; the
+      // floor says so before the classifier even looks (it parks
+      // every publish regardless — policy.ts classifyGitHub).
+      return "external-send";
     default:
       return "write";
   }

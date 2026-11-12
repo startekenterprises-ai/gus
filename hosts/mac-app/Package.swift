@@ -22,7 +22,9 @@
 //     converter is built from the buffers that actually arrive,
 //     the strip's mic number is the raw pre-conversion level,
 //     and a preflight refuses to open a call on a silent
-//     microphone instead of listening forever).
+//     microphone instead of listening forever; v0.9.5 is a
+//     control-plane-only release (the GitHub publish pack) — no
+//     app changes).
 //     It launches GusMacHost from inside the bundle (so
 //     Accessibility / Screen Recording grants attach to
 //     GUS.app), shows status, starts/stops the launchd agents, and

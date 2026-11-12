@@ -19,6 +19,7 @@ import { canonicalize, type ApprovalEngine, type ApprovalRequest } from "./appro
 import { estimateTokens, fakeComplete, FAKE_MODEL_NAME } from "./provider.js";
 import { stubCompletion, type Provider } from "./providers.js";
 import { isGmailTool } from "./gmail.js";
+import { isGitHubTool } from "./github.js";
 import { isMacTool } from "./mac.js";
 import type { GovernorMode } from "./governor-mode.js";
 import {
@@ -114,6 +115,22 @@ export interface MacGate {
   ): Promise<{ ok: boolean; summary: string; refused?: boolean }>;
 }
 
+/**
+ * The GitHub gate the comm server delegates `github_publish_release`
+ * tool calls to (v0.9.5). Structurally the GitHubPublishService
+ * (github.ts); declared here for the same reason as the GmailGate:
+ * the comm layer depends on the contract, not the pack. Like gmail,
+ * publishing executes HERE — the vaulted token never crosses to the
+ * sandbox, which only ever receives the verified outcome.
+ */
+export interface GitHubGate {
+  execute(
+    jobId: string,
+    tool: string,
+    args: Record<string, unknown>,
+  ): Promise<{ ok: boolean; summary: string; refused?: boolean }>;
+}
+
 /** Shape runtime fetch args into the FetchGate's request form. */
 function fetchArgsFrom(args: Record<string, unknown>): {
   url: string;
@@ -193,6 +210,11 @@ export class CommServer {
      *  parked for a named delegate, instead of proceeding on the
      *  mode's say-so. */
     private approverFn?: () => ApproverPolicy,
+    /** v0.9.5: the GitHub publish pack's executor. Optional so
+     *  pre-v0.9.5 wiring constructs without it; publish calls then
+     *  refuse plainly ("pack not configured") instead of ever
+     *  reaching the runtime. */
+    private githubGate?: GitHubGate,
   ) {}
 
   private permissive(): boolean {
@@ -392,6 +414,37 @@ export class CommServer {
         return;
       }
       const r = await this.macGate.execute(approval.jobId, approval.tool, approval.args);
+      if (r.refused) {
+        try {
+          this.jobs.transition(approval.jobId, "failed-loudly", r.summary);
+        } catch { /* settled already */ }
+        this.hooks.onDenied(approval.jobId, approval.tool, r.summary);
+        return;
+      }
+      this.send({
+        t: "approved_execution",
+        jobId: approval.jobId,
+        tool: approval.tool,
+        args: approval.args,
+        result: r,
+      });
+      return;
+    }
+    if (isGitHubTool(approval.tool)) {
+      // v0.9.5: an approved publish executes HERE, in the control
+      // plane (the vaulted "github" token cannot cross to the
+      // sandbox), with the EXACT stored arguments — the outcome
+      // rides back with the approved_execution, like an approved
+      // gmail action.
+      if (!this.githubGate) {
+        const note = "the GitHub publish pack is not configured in this control plane";
+        try {
+          this.jobs.transition(approval.jobId, "failed-loudly", note);
+        } catch { /* settled already */ }
+        this.hooks.onDenied(approval.jobId, approval.tool, note);
+        return;
+      }
+      const r = await this.githubGate.execute(approval.jobId, approval.tool, approval.args);
       if (r.refused) {
         try {
           this.jobs.transition(approval.jobId, "failed-loudly", r.summary);
@@ -972,6 +1025,40 @@ export class CommServer {
           // A Shield-withheld observation/read (ok:false) rides back
           // as the result, like a blocked fetch: the job continues,
           // the content never crossed.
+          this.send({
+            t: "tool_result",
+            reqId: req.reqId,
+            status: "authorized",
+            result: r,
+          });
+          break;
+        }
+        // --- v0.9.5: github_publish_release executes HERE, in the
+        // control plane, like gmail (the vaulted "github" token
+        // never crosses to the sandbox). The service verifies the
+        // local DMG/checksum pair before any network call and
+        // verifies the published release against GitHub before its
+        // summary rides back with the authorization.
+        if (isGitHubTool(req.tool)) {
+          if (!this.githubGate) {
+            const note = "the GitHub publish pack is not configured in this control plane";
+            this.send({ t: "tool_result", reqId: req.reqId, status: "denied", note });
+            break;
+          }
+          const r = await this.githubGate.execute(req.jobId, req.tool, req.args);
+          if (r.refused) {
+            // Hard refusal (bad pair, missing token, GitHub error,
+            // unverifiable outcome): the egress-refusal shape —
+            // terminal, receipted, loud.
+            try {
+              this.jobs.transition(req.jobId, "failed-loudly", r.summary);
+            } catch {
+              /* already settled/parked — refusal stands regardless */
+            }
+            this.hooks.onDenied(req.jobId, req.tool, r.summary);
+            this.send({ t: "tool_result", reqId: req.reqId, status: "denied", note: r.summary });
+            break;
+          }
           this.send({
             t: "tool_result",
             reqId: req.reqId,

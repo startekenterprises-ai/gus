@@ -58,6 +58,7 @@ import { Updater } from "./updater.js";
 import { runVaultAdmin } from "./vault-admin.js";
 import { loadProviderConfig, resolveProvider } from "./providers.js";
 import { GmailDirectory, GmailService, HttpGmailTransport, runGmailAdmin } from "./gmail.js";
+import { GitHubPublishService } from "./github.js";
 import { MacService } from "./mac.js";
 import { createMacHostAdapter } from "./mac-native.js";
 import { Onboarding, DIGEST_PROMPT } from "./onboarding.js";
@@ -205,6 +206,15 @@ const mac = new MacService(macHost, {
   vault,
 });
 
+// v0.9.5 (Step 2): the GitHub publish pack. Executes in this process
+// (like the Gmail and Mac packs): the classifier parks every publish
+// for a one-time approval, and the service uses the vaulted "github"
+// token only inside withSecret callbacks — a shell job cannot reach
+// it (child process; the vault never crosses a process boundary) and
+// the egress proxy cannot carry a binary DMG, so the publish lives
+// here, where the vault callback and the file bytes meet.
+const github = new GitHubPublishService({ vault });
+
 // Phase 10: the Bridge Inbox — file-based delegate ingress (Telegram
 // never delivers bot-to-bot messages, so Nova's requests arrive as
 // files; bridge-inbox.ts). Inert without a `bridge` binding in
@@ -259,7 +269,7 @@ const comm = new CommServer(socketPath, governor, jobs, {
   onPermissiveAction: (jobId, detail) => host.onPermissiveAction(jobId, detail),
   logRuntime: (level, text) =>
     appendFileSync(`${stateDir}/runtime-log.jsonl`, JSON.stringify({ ts: Date.now(), level, text }) + "\n"),
-}, policy, approvals, egress, shieldGate, () => resolveProvider(stateDir, vault), gmail, mac, () => loadGovernorMode(stateDir), () => loadApproverPolicy(stateDir));
+}, policy, approvals, egress, shieldGate, () => resolveProvider(stateDir, vault), gmail, mac, () => loadGovernorMode(stateDir), () => loadApproverPolicy(stateDir), github);
 host.attachComm(comm);
 
 // Phase 3: the Updater. Constructed always (its queries power
