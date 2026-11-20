@@ -17,6 +17,7 @@
     "@gus/egress": "0.0.1",
     "@gus/telegram": "0.0.1",
     "@gus/voice": "0.0.1",
+    "@gus/kokoro-local": "0.0.1",
     "@gus/panel": "0.0.1"
   }
 }

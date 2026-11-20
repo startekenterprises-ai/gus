@@ -17,9 +17,11 @@
 #        Contents/Helpers/GusMacHost     the native host helper
 #        Contents/Resources/gus/         the Node payload: every
 #          package's dist/, node_modules/@gus/* as relative symlinks
-#          back into it (all GUS dependencies are workspace-internal
-#          — there is nothing third-party to bundle), the Nova policy
-#          template, and the launchd plist templates.
+#          back into it (GUS dependencies are workspace-internal —
+#          the one exception is the bundled Kokoro voice engine,
+#          whose third-party runtime deps are installed into its
+#          own payload directory by a scoped step below), the Nova
+#          policy template, and the launchd plist templates.
 #   4. Ad-hoc codesigns the bundle (codesign --sign -) and builds
 #      dist/GUS-<version>.dmg with hdiutil (app + /Applications
 #      symlink, drag-to-install).
@@ -139,7 +141,7 @@ base64 -d < "$SCRIPT_DIR/Resources/DefaultAvatarA.png.b64" > "$APP/Contents/Reso
 
 PAYLOAD="$APP/Contents/Resources/gus"
 cp "$REPO_DIR/package.json" "$PAYLOAD/package.json"
-for pkg in shared gate vault egress panel control-plane runtime; do
+for pkg in shared gate vault egress panel control-plane runtime kokoro-local; do
   mkdir -p "$PAYLOAD/packages/$pkg"
   cp -R "$REPO_DIR/packages/$pkg/dist" "$PAYLOAD/packages/$pkg/dist"
   cp "$REPO_DIR/packages/$pkg/package.json" "$PAYLOAD/packages/$pkg/package.json"
@@ -155,11 +157,36 @@ cp "$REPO_DIR/packages/channels/voice/package.json" "$PAYLOAD/packages/channels/
 # @gus/* through these relative symlinks, exactly like the repo's
 # npm-workspaces layout.
 mkdir -p "$PAYLOAD/node_modules/@gus"
-for pkg in shared gate vault egress panel control-plane runtime; do
+for pkg in shared gate vault egress panel control-plane runtime kokoro-local; do
   ln -s "../../packages/$pkg" "$PAYLOAD/node_modules/@gus/$pkg"
 done
 ln -s "../../packages/channels/telegram" "$PAYLOAD/node_modules/@gus/telegram"
 ln -s "../../packages/channels/voice" "$PAYLOAD/node_modules/@gus/voice"
+
+# Bundled Kokoro engine deps (v0.17.2): @gus/kokoro-local is the
+# one package with third-party runtime dependencies (kokoro-js →
+# @huggingface/transformers → onnxruntime-node, whose platform
+# binaries ship inside its npm tarball — no install-time download
+# on darwin; its postinstall only fetches CUDA binaries on Linux,
+# so --ignore-scripts loses nothing and matches the verified
+# install). Install them STANDALONE in a scratch dir — running
+# npm inside the payload would read the payload root's workspaces
+# field and try to install the whole workspace tree — then copy
+# the resulting node_modules into the package's payload dir,
+# where the spawned server resolves them. The model itself is
+# NOT bundled: it downloads on first enable into ~/.gus/models.
+echo "build-dmg: installing the bundled Kokoro engine's dependencies…"
+KOKORO_DEPS=$(mktemp -d)
+cp "$REPO_DIR/packages/kokoro-local/package.json" "$KOKORO_DEPS/package.json"
+(cd "$KOKORO_DEPS" && npm install --omit=dev --ignore-scripts --no-audit --no-fund) \
+  || fail "installing @gus/kokoro-local's dependencies failed — the bundled voice engine would ship broken; failing the build instead."
+mkdir -p "$PAYLOAD/packages/kokoro-local/node_modules"
+cp -R "$KOKORO_DEPS/node_modules/." "$PAYLOAD/packages/kokoro-local/node_modules/"
+rm -rf "$KOKORO_DEPS"
+# Prune the onnxruntime binaries for platforms this DMG can never
+# run on (each is ~35 MB); darwin x64 + arm64 both stay.
+find "$PAYLOAD/packages/kokoro-local/node_modules" -type d -path "*onnxruntime-node/bin/napi-v3/win32" -exec rm -rf {} + 2>/dev/null || true
+find "$PAYLOAD/packages/kokoro-local/node_modules" -type d -path "*onnxruntime-node/bin/napi-v3/linux" -exec rm -rf {} + 2>/dev/null || true
 
 mkdir -p "$PAYLOAD/docs" "$PAYLOAD/hosts/mac-resident"
 cp "$REPO_DIR/docs/mac-policy-template.json" "$PAYLOAD/docs/mac-policy-template.json"

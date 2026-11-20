@@ -115,6 +115,20 @@ final class SettingsModel: ObservableObject {
     /// settings read; a panel that doesn't send it seeds the
     /// shipped default, ON.
     @Published var voiceShieldScan = true
+    /// v0.17.2: the bundled Kokoro engine's status line —
+    /// the control plane's own sentence (Downloading… /
+    /// Ready / Unavailable + reason), shown under the Speech
+    /// picker when Built-in Kokoro is the picked engine.
+    /// Empty when the control plane reports no bundled
+    /// engine. Refreshed on its own (refreshVoiceSettings)
+    /// so a download's progress lands without touching the
+    /// operator's unsaved form edits.
+    @Published var voiceBundledStatus = ""
+    /// v0.17.2: the bundled engine's loopback base URL, kept
+    /// alongside its status so the speaker test below can ask
+    /// the bundled engine itself (not the endpoint fields)
+    /// when Built-in Kokoro is the picked engine.
+    @Published var voiceBundledBaseUrl = ""
     private var voiceSeeded = false
 
     // Devices & identity (v0.12.0 — pivot Phase 1 / iPhone
@@ -255,6 +269,24 @@ final class SettingsModel: ObservableObject {
                 self.voiceTtsModel = v.ttsModel
                 self.voiceTtsVoice = v.ttsVoice
                 self.voiceShieldScan = v.shieldScan ?? true
+                self.voiceBundledStatus = v.bundled?.detail ?? ""
+                self.voiceBundledBaseUrl = v.bundled?.baseUrl ?? ""
+            }
+        }
+    }
+
+    /// v0.17.2: re-read ONLY the bundled Kokoro status —
+    /// the Voice pane calls this when it appears, so a
+    /// download started by picking the engine (the save
+    /// starts it) shows its progress instead of a stale
+    /// line. Deliberately touches nothing else: the form
+    /// may hold unsaved edits the seed must never clobber.
+    func refreshVoiceSettings() {
+        client.get("/api/voice/settings", as: PanelVoiceSettings.self) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self, case .success(let v) = result else { return }
+                self.voiceBundledStatus = v.bundled?.detail ?? ""
+                self.voiceBundledBaseUrl = v.bundled?.baseUrl ?? ""
             }
         }
     }
@@ -646,10 +678,22 @@ final class SettingsModel: ObservableObject {
             voiceTestSpeakerResult = "Playing the test sentence with the built-in voice — listen for it."
             return
         }
-        voiceTestSpeakerResult = "Asking the speech endpoint for the test sentence…"
+        // v0.17.2: with Built-in Kokoro picked, the test asks
+        // the bundled engine (its loopback URL + the one model
+        // it serves), not the endpoint fields — testing the
+        // endpoint while Kokoro is picked would pass or fail
+        // the wrong engine.
+        let bundled = voiceTtsEngine == "bundled"
+        if bundled && voiceBundledBaseUrl.isEmpty {
+            voiceTestSpeakerResult = "Built-in Kokoro isn't reporting yet — its status line above has the latest; the test can run once it's ready."
+            return
+        }
+        voiceTestSpeakerResult = bundled
+            ? "Asking built-in Kokoro for the test sentence…"
+            : "Asking the speech endpoint for the test sentence…"
         client.testVoiceSpeech(
-            baseUrl: voiceTtsUrl.trimmingCharacters(in: .whitespacesAndNewlines),
-            model: voiceTtsModel.trimmingCharacters(in: .whitespacesAndNewlines),
+            baseUrl: bundled ? voiceBundledBaseUrl : voiceTtsUrl.trimmingCharacters(in: .whitespacesAndNewlines),
+            model: bundled ? "kokoro" : voiceTtsModel.trimmingCharacters(in: .whitespacesAndNewlines),
             voice: voiceTtsVoice.trimmingCharacters(in: .whitespacesAndNewlines)
         ) { [weak self] result in
             DispatchQueue.main.async {
@@ -659,7 +703,9 @@ final class SettingsModel: ObservableObject {
                     if r.ok, let b64 = r.audioBase64, let data = Data(base64Encoded: b64) {
                         self.voiceTestPlayer = try? AVAudioPlayer(data: data)
                         self.voiceTestPlayer?.play()
-                        self.voiceTestSpeakerResult = "Playing the test sentence from the endpoint — listen for it."
+                        self.voiceTestSpeakerResult = bundled
+                            ? "Playing the test sentence from built-in Kokoro — listen for it."
+                            : "Playing the test sentence from the endpoint — listen for it."
                     } else {
                         self.voiceTestSpeakerResult = "Speaker test failed: \(r.detail)"
                     }

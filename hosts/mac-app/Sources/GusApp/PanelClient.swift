@@ -292,6 +292,23 @@ struct PanelVoiceSettings: Decodable, Equatable {
     /// older control plane doesn't send it, and Settings treats
     /// nil as the shipped default, ON.
     var shieldScan: Bool?
+    /// v0.17.2: the bundled Kokoro engine's status, riding the
+    /// settings read. Optional here: a control plane without
+    /// the bundled engine doesn't send it, and the Voice pane
+    /// then shows no status line under the engine picker.
+    var bundled: PanelBundledKokoroStatus?
+}
+
+/// v0.17.2: the bundled Kokoro engine's status as the control
+/// plane's supervisor reports it — `detail` is one
+/// plain-language sentence the Voice pane shows verbatim
+/// (Downloading… / Ready / Unavailable + the reason).
+struct PanelBundledKokoroStatus: Decodable, Equatable {
+    var state: String
+    var detail: String
+    var progress: Double?
+    var port: Int
+    var baseUrl: String
 }
 
 /// v0.9.9: one Test Connection answer (POST

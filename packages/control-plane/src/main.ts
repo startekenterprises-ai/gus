@@ -35,7 +35,8 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { dirname } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import type { ChannelAdapter } from "@gus/shared";
 import { GUS_VERSION } from "@gus/shared";
 import { LocalReceiptIssuer, ShieldClient, ShieldGate } from "@gus/gate";
@@ -77,6 +78,7 @@ import {
   writeVoiceConfig,
   type VoiceSessionStateData,
 } from "@gus/voice";
+import { KokoroServerManager } from "@gus/kokoro-local";
 import { WatchFrameSource, readWatchTimeline } from "./watch.js";
 import { loadDelegates } from "./delegates.js";
 import {
@@ -293,7 +295,32 @@ const voiceService = new VoiceCallService(stateDir, voiceAdapter, voiceApprovals
 // (VAD-segmented PCM chunks), a streamed mouth (sentence
 // segments), barge-in, idle/max-length endings, per-turn
 // latency — all inside the voice package; this file only wires.
-const voiceSessions = new VoiceSessionService(stateDir, voiceAdapter, voiceApprovals);
+// v0.17.2: the bundled Kokoro engine's supervisor. Constructed
+// here and only here; NOTHING about it runs at startup — the
+// server spawns when the bundled engine is selected in Settings
+// (the save below ensures it) or when a call resolves the
+// bundled mouth, and it stops when the engine is switched away
+// or the process shuts down. The model lives in ~/.gus/models,
+// outside the state dir and outside the app bundle, so neither
+// a state reset nor an app update re-downloads it.
+const kokoroManager = new KokoroServerManager({
+  modelDir: join(homedir(), ".gus", "models"),
+});
+const voiceSessions = new VoiceSessionService(stateDir, voiceAdapter, voiceApprovals, {
+  bundledTts: {
+    baseUrl: kokoroManager.baseUrl,
+    ensureRunning: async () => {
+      const s = await kokoroManager.ensureRunning();
+      return {
+        serverUp: s.state === "ready" || s.state === "downloading" || s.state === "starting",
+        modelReady: s.state === "ready",
+        downloading: s.state === "downloading",
+        progress: s.progress,
+        detail: s.detail,
+      };
+    },
+  },
+});
 const watchFrames = new WatchFrameSource(macHost);
 // v0.9.9: the host also gets the voice Shield-scan switch,
 // read live from voice.json on every voice job — off means the
@@ -967,7 +994,12 @@ const panelBackend: PanelBackend = {
   // adds no path: no transcript is minted here, no approval is
   // resolved here — those happen inside the ChannelHost, reached
   // through the adapter like every other channel's business.
-  voiceSettings: () => loadVoiceConfig(stateDir),
+  // v0.17.2: the settings read also carries the bundled
+  // engine's last known status (the supervisor's cache — the
+  // read stays sync; the cache is kept warm by the save and
+  // call paths that drive the supervisor, and by the child
+  // exit events that update it the moment they happen).
+  voiceSettings: () => ({ ...loadVoiceConfig(stateDir), bundled: kokoroManager.statusSync() }),
   setVoiceSettings: async (s) => {
     writeVoiceConfig(
       stateDir,
@@ -984,7 +1016,7 @@ const panelBackend: PanelBackend = {
         sttBaseUrl: s.sttBaseUrl,
         sttModel: s.sttModel,
         ttsEngine:
-          s.ttsEngine === "endpoint" || s.ttsEngine === "local"
+          s.ttsEngine === "endpoint" || s.ttsEngine === "local" || s.ttsEngine === "bundled"
             ? s.ttsEngine
             : loadVoiceConfig(stateDir).ttsEngine,
         ttsBaseUrl: s.ttsBaseUrl,
@@ -1002,7 +1034,8 @@ const panelBackend: PanelBackend = {
           s.sttEngine === "endpoint" ||
           s.sttEngine === "local" ||
           s.ttsEngine === "endpoint" ||
-          s.ttsEngine === "local"
+          s.ttsEngine === "local" ||
+          s.ttsEngine === "bundled"
             ? true
             : loadVoiceConfig(stateDir).enginesChosen === true,
         // v0.9.1: a save that doesn't mention barge-in keeps the
@@ -1023,7 +1056,21 @@ const panelBackend: PanelBackend = {
     const mouth =
       saved.ttsEngine === "local"
         ? "speech: built into the app"
-        : `speech: ${saved.ttsModel} (${saved.ttsVoice}) at ${saved.ttsBaseUrl}`;
+        : saved.ttsEngine === "bundled"
+          ? `speech: built-in Kokoro (${saved.ttsVoice}) — bundled with GUS, runs on this Mac`
+          : `speech: ${saved.ttsModel} (${saved.ttsVoice}) at ${saved.ttsBaseUrl}`;
+    // v0.17.2: the bundled engine's lifecycle follows the
+    // saved pick — selecting it starts the server (and the
+    // first-enable model download) NOW, not at some later
+    // call; selecting anything else stops the server, so a
+    // switched-away engine never lingers. Fire-and-forget: the
+    // save's answer must not wait on a 330 MB download; the
+    // status rides the settings read.
+    if (saved.ttsEngine === "bundled") {
+      void kokoroManager.ensureRunning().catch(() => undefined);
+    } else {
+      kokoroManager.stop();
+    }
     // v0.9.9: the scan sentence follows the switch — the save
     // confirmation must not claim a scan the operator just
     // turned off, and must say plainly what off means.
@@ -1245,5 +1292,14 @@ appendFileSync(
 );
 console.log(`gus control plane up (channel=${channelKind}, killed=${governor.isKilled()})`);
 
-process.on("SIGTERM", () => process.exit(0));
-process.on("SIGINT", () => process.exit(0));
+// v0.17.2: the bundled Kokoro server is this process's child —
+// stop it on the way out. (Its own parent-death watchdog is the
+// backstop for exits these handlers can't see.)
+process.on("SIGTERM", () => {
+  kokoroManager.stop();
+  process.exit(0);
+});
+process.on("SIGINT", () => {
+  kokoroManager.stop();
+  process.exit(0);
+});

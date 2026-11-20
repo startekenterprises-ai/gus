@@ -1,0 +1,1 @@
+{"dependencies":{"@huggingface/transformers":"^3.5.1","kokoro-js":"^1.2.1"},"exports":{".":{"default":"./dist/index.js","types":"./dist/index.d.ts"}},"license":"Apache-2.0","name":"@gus/kokoro-local","private":true,"type":"module","version":"0.0.1"}

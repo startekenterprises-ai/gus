@@ -339,6 +339,15 @@ interface ActiveSession {
    *  voice setting. */
   sttMode: VoiceEngine;
   ttsMode: VoiceEngine;
+  /** v0.17.2: the base URL this call's synthesis actually
+   *  posts to — the configured endpoint URL for an endpoint
+   *  mouth, the bundled supervisor's loopback URL for a bundled
+   *  mouth. Resolved with the modes at call start so the three
+   *  synthesis sites (greeting, filler, reply stream) all speak
+   *  through the mouth the call resolved, never a re-read. For
+   *  endpoint calls this is config.ttsBaseUrl verbatim — the
+   *  behavior of every call before this field existed. */
+  ttsBaseUrl: string;
   /** v0.9.6: the fallback notice, when resolution fell back. */
   speechNotice?: string;
   /** v0.9.11: the call's Shield mode (see VoiceSessionStateData)
@@ -407,6 +416,27 @@ const DEFAULT_FILLER_DELAY_MS = 2_500;
  *  the answer. */
 const FILLER_SENTENCE_INDEX = -1;
 
+/** v0.17.2: the bundled-Kokoro resolver the control plane
+ *  injects — this package's only window onto the bundled
+ *  engine, declared here so the voice package never imports
+ *  the engine or its supervisor (the PendingApprovalLookup
+ *  pattern). ensureRunning asks the supervisor to have the
+ *  server up and reports the model's state; the session then
+ *  probes the speech surface itself before trusting it, the
+ *  same discipline an endpoint gets. */
+export interface BundledTtsStatus {
+  serverUp: boolean;
+  modelReady: boolean;
+  downloading: boolean;
+  progress: number | null;
+  detail: string;
+}
+
+export interface BundledTtsResolver {
+  baseUrl: string;
+  ensureRunning(): Promise<BundledTtsStatus>;
+}
+
 export class VoiceSessionService {
   private fetchFn: FetchFn;
   private now: () => number;
@@ -416,6 +446,7 @@ export class VoiceSessionService {
   private vadThreshold?: number;
   private probeTimeoutMs: number;
   private fillerDelayMs: number;
+  private bundledTts?: BundledTtsResolver;
   private calls: VoiceCallService;
   private session?: ActiveSession;
   /** The last ended session's state, kept so the app's poll can
@@ -438,6 +469,11 @@ export class VoiceSessionService {
       vadThreshold?: number;
       probeTimeoutMs?: number;
       fillerDelayMs?: number;
+      /** v0.17.2: the bundled-Kokoro resolver (see
+       *  BundledTtsResolver). Absent in surfaces that can't
+       *  supervise the bundled engine — a bundled pick there
+       *  resolves to the app voice with the notice saying so. */
+      bundledTts?: BundledTtsResolver;
     },
   ) {
     this.fetchFn = opts?.fetchFn ?? fetch;
@@ -448,6 +484,7 @@ export class VoiceSessionService {
     this.vadThreshold = opts?.vadThreshold;
     this.probeTimeoutMs = opts?.probeTimeoutMs ?? 2_500;
     this.fillerDelayMs = opts?.fillerDelayMs ?? DEFAULT_FILLER_DELAY_MS;
+    this.bundledTts = opts?.bundledTts;
     this.calls = new VoiceCallService(stateDir, adapter, approvals, {
       fetchFn: this.fetchFn,
       replyTimeoutMs: opts?.replyTimeoutMs,
@@ -495,7 +532,7 @@ export class VoiceSessionService {
           "Voice is enabled but an endpoint it needs is missing from its settings. Nothing was sent to GUS — check Settings → Voice.",
       };
     }
-    const { sttMode, ttsMode, speechNotice } = await this.resolveModes(config);
+    const { sttMode, ttsMode, ttsBaseUrl, speechNotice } = await this.resolveModes(config);
     const now = this.now();
     const session: ActiveSession = {
       id: `call-${now.toString(36)}-${this.counter++}`,
@@ -503,6 +540,7 @@ export class VoiceSessionService {
       lastSpeechAt: now,
       sttMode,
       ttsMode,
+      ttsBaseUrl,
       speechNotice,
       // v0.9.11: the Shield mode rides the config this call
       // already resolved — switch on means the gate's fast
@@ -586,7 +624,7 @@ export class VoiceSessionService {
     try {
       const out = await synthesize(
         this.fetchFn,
-        { baseUrl: config.ttsBaseUrl, model: config.ttsModel, voice: config.ttsVoice },
+        { baseUrl: session.ttsBaseUrl, model: config.ttsModel, voice: config.ttsVoice },
         VOICE_GREETING_TEXT,
         undefined,
         abort.signal,
@@ -624,6 +662,7 @@ export class VoiceSessionService {
   private async resolveModes(config: VoiceConfig): Promise<{
     sttMode: VoiceEngine;
     ttsMode: VoiceEngine;
+    ttsBaseUrl: string;
     speechNotice?: string;
   }> {
     const [sttOk, ttsOk] = await Promise.all([
@@ -636,17 +675,83 @@ export class VoiceSessionService {
     ]);
     const sttMode: VoiceEngine =
       config.sttEngine === "endpoint" && !sttOk ? "local" : config.sttEngine;
-    const ttsMode: VoiceEngine =
+    let ttsMode: VoiceEngine =
       config.ttsEngine === "endpoint" && !ttsOk ? "local" : config.ttsEngine;
-    const fellBack =
-      sttMode !== config.sttEngine || ttsMode !== config.ttsEngine;
-    return {
-      sttMode,
-      ttsMode,
-      speechNotice: fellBack
+    let ttsBaseUrl = config.ttsBaseUrl;
+    // v0.17.2: the bundled mouth resolves through its
+    // supervisor (see resolveBundledTts) — ready means the
+    // call speaks Kokoro from the bundled engine; anything
+    // else resolves to the app voice for this call with the
+    // reason in the notice, exactly the endpoint discipline.
+    let bundledNotice: string | undefined;
+    if (config.ttsEngine === "bundled") {
+      const resolved = await this.resolveBundledTts();
+      if (resolved) {
+        ttsMode = "bundled";
+        ttsBaseUrl = resolved;
+      } else {
+        ttsMode = "local";
+        bundledNotice = this.bundledNotice;
+      }
+    }
+    const endpointFellBack =
+      sttMode !== config.sttEngine ||
+      (config.ttsEngine === "endpoint" && ttsMode !== config.ttsEngine);
+    const speechNotice = bundledNotice
+      ? endpointFellBack
+        ? `${bundledNotice} The configured speech service was also unreachable.`
+        : bundledNotice
+      : endpointFellBack
         ? "Speech service unreachable — using built-in voice for this call."
-        : undefined,
-    };
+        : undefined;
+    return { sttMode, ttsMode, ttsBaseUrl, speechNotice };
+  }
+
+  /** The notice resolveBundledTts leaves when the bundled
+   *  mouth can't take this call — set as a field because the
+   *  reasons are several and the caller composes one notice. */
+  private bundledNotice?: string;
+
+  /** v0.17.2: resolve the bundled mouth for one call. Returns
+   *  the loopback base URL to synthesize against when the
+   *  bundled engine is up AND its model is ready AND the speech
+   *  surface itself answers a probe; otherwise undefined, with
+   *  bundledNotice saying which of those failed, in words the
+   *  operator can act on. A model still downloading resolves to
+   *  the app voice for this call rather than a call full of
+   *  503s — the next call, after the download lands, speaks
+   *  Kokoro. */
+  private async resolveBundledTts(): Promise<string | undefined> {
+    this.bundledNotice = undefined;
+    if (!this.bundledTts) {
+      this.bundledNotice =
+        "Built-in Kokoro isn't available in this build — using the app voice for this call.";
+      return undefined;
+    }
+    let status: BundledTtsStatus | undefined;
+    try {
+      status = await this.bundledTts.ensureRunning();
+    } catch {
+      status = undefined;
+    }
+    if (!status || !status.serverUp) {
+      this.bundledNotice =
+        "Built-in Kokoro is unavailable — using the app voice for this call." +
+        (status?.detail ? ` (${status.detail})` : "");
+      return undefined;
+    }
+    if (!status.modelReady) {
+      this.bundledNotice = status.downloading
+        ? `Built-in Kokoro is still downloading${status.progress !== null ? ` (${Math.floor(status.progress * 100)}%)` : ""} — using the app voice for this call.`
+        : "Built-in Kokoro is still loading — using the app voice for this call.";
+      return undefined;
+    }
+    const ok = await probeEndpoint(this.fetchFn, this.bundledTts.baseUrl, this.probeTimeoutMs);
+    if (!ok) {
+      this.bundledNotice = "Built-in Kokoro didn't answer — using the app voice for this call.";
+      return undefined;
+    }
+    return this.bundledTts.baseUrl;
   }
 
   /** End the call from the operator's side (the End Call
@@ -1125,7 +1230,7 @@ export class VoiceSessionService {
     try {
       out = await synthesize(
         this.fetchFn,
-        { baseUrl: config.ttsBaseUrl, model: config.ttsModel, voice: config.ttsVoice },
+        { baseUrl: session.ttsBaseUrl, model: config.ttsModel, voice: config.ttsVoice },
         VOICE_FILLER_TEXT,
         undefined,
         session.speechAbort?.signal,
@@ -1251,7 +1356,7 @@ export class VoiceSessionService {
         try {
           out = await synthesize(
             this.fetchFn,
-            { baseUrl: config.ttsBaseUrl, model: config.ttsModel, voice: config.ttsVoice },
+            { baseUrl: session.ttsBaseUrl, model: config.ttsModel, voice: config.ttsVoice },
             sentences[i],
             undefined,
             abort.signal,

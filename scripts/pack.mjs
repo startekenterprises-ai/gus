@@ -54,6 +54,12 @@ const libs = [
   ["packages/egress", "egress"],
   ["packages/channels/telegram", "telegram"],
   ["packages/panel", "panel"],
+  // v0.17.2: the control plane imports the bundled-Kokoro
+  // supervisor at module load, so the bundle must resolve it.
+  // Only the supervisor ships — the engine's third-party deps
+  // (kokoro-js/onnxruntime) do not; a bundled pick inside the
+  // sandbox reports itself unavailable, which is the truth.
+  ["packages/kokoro-local", "kokoro-local"],
 ];
 for (const [src, name] of libs) {
   const dest = join(out, "node_modules/@gus", name);

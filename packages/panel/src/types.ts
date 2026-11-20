@@ -228,6 +228,23 @@ export interface PanelVoiceSettingsData {
    *  control plane derives it from whether a save's body
    *  carried engine values; surfaces never send it. */
   enginesChosen?: boolean;
+  /** v0.17.2: the bundled Kokoro engine's status, present on
+   *  the settings READ (never sent by surfaces): the
+   *  supervisor's last known state, so Settings → Voice can
+   *  show Downloading… / Ready / Unavailable + the reason
+   *  under the engine picker. */
+  bundled?: PanelBundledKokoroStatus;
+}
+
+/** v0.17.2: the bundled Kokoro engine's status as the control
+ *  plane's supervisor reports it — one plain-language detail
+ *  sentence is the contract; surfaces show it verbatim. */
+export interface PanelBundledKokoroStatus {
+  state: "stopped" | "starting" | "downloading" | "ready" | "unavailable";
+  detail: string;
+  progress: number | null;
+  port: number;
+  baseUrl: string;
 }
 
 /** v0.9.9: the answer to a Settings → Voice Test Connection

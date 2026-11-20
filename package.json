@@ -11,7 +11,7 @@
   "name": "gus",
   "private": true,
   "scripts": {
-    "build": "tsc -b packages/shared packages/gate packages/vault packages/egress packages/channels/telegram packages/channels/voice packages/panel packages/control-plane packages/runtime",
+    "build": "tsc -b packages/shared packages/gate packages/vault packages/egress packages/channels/telegram packages/channels/voice packages/kokoro-local packages/panel packages/control-plane packages/runtime",
     "build:test": "tsc -p tsconfig.test.json",
     "check:budget": "node test/promise/check-budget.mjs",
     "check:shell": "node test/promise/check-shell-invariants.mjs",
@@ -20,7 +20,7 @@
     "smoke:headless": "node scripts/headless-smoke.mjs"
   },
   "type": "module",
-  "version": "0.17.1",
+  "version": "0.17.2",
   "workspaces": [
     "packages/shared",
     "packages/gate",
@@ -28,6 +28,7 @@
     "packages/egress",
     "packages/channels/telegram",
     "packages/channels/voice",
+    "packages/kokoro-local",
     "packages/panel",
     "packages/control-plane",
     "packages/runtime"

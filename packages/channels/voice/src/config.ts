@@ -60,8 +60,19 @@ import { join } from "node:path";
 
 /** v0.9.6: where one half of the call's speech lives — in the
  *  app on the operator's Mac ("local") or at the configured
- *  OpenAI-compatible endpoint ("endpoint"). */
-export type VoiceEngine = "local" | "endpoint";
+ *  OpenAI-compatible endpoint ("endpoint").
+ *
+ *  v0.17.2: a third value, TTS only — "bundled": the Kokoro
+ *  engine GUS carries itself (@gus/kokoro-local), supervised by
+ *  the control plane and reached at its loopback base URL. It is
+ *  never a default and never the product of the configured-URL
+ *  fallback below: a stored "bundled" can only have come from
+ *  the operator picking "Built-in Kokoro" in Settings, so it is
+ *  honored as written, like a stored "endpoint". The STT side
+ *  has no bundled engine (the bundled package is a mouth, not
+ *  ears): a "bundled" in the STT slot resolves exactly like any
+ *  other unrecognized value does today. */
+export type VoiceEngine = "local" | "endpoint" | "bundled";
 
 /** v0.9.11: how a call's spoken turns meet the Shield — "fast"
  *  when the operator's Shield-scan switch is on (voice scans run
@@ -174,7 +185,17 @@ function urlConfigured(raw: unknown, shippedDefault: string): boolean {
  *  unmarked "local" that may be the old default restating
  *  itself — the default decides: endpoint when the operator
  *  configured that side's URL, built-in when they didn't. */
-function resolveEngine(rawEngine: unknown, configured: boolean, chosen: boolean): VoiceEngine {
+function resolveEngine(
+  rawEngine: unknown,
+  configured: boolean,
+  chosen: boolean,
+  allowBundled: boolean = false,
+): VoiceEngine {
+  // v0.17.2: "bundled" is honored verbatim where it exists
+  // (TTS) — it was never a shipped default, so its presence in
+  // the file is proof of an explicit pick, the same standing
+  // "endpoint" has below.
+  if (rawEngine === "bundled" && allowBundled) return "bundled";
   if (rawEngine === "endpoint") return "endpoint";
   if (rawEngine === "local" && chosen) return "local";
   return configured ? "endpoint" : "local";
@@ -196,7 +217,7 @@ export function parseVoiceConfig(raw: unknown): VoiceConfig {
     sttEngine: resolveEngine(r.sttEngine, urlConfigured(r.sttBaseUrl, DEFAULT_VOICE_CONFIG.sttBaseUrl), chosen),
     sttBaseUrl: urlOr(r.sttBaseUrl, DEFAULT_VOICE_CONFIG.sttBaseUrl),
     sttModel: textOr(r.sttModel, DEFAULT_VOICE_CONFIG.sttModel),
-    ttsEngine: resolveEngine(r.ttsEngine, urlConfigured(r.ttsBaseUrl, DEFAULT_VOICE_CONFIG.ttsBaseUrl), chosen),
+    ttsEngine: resolveEngine(r.ttsEngine, urlConfigured(r.ttsBaseUrl, DEFAULT_VOICE_CONFIG.ttsBaseUrl), chosen, true),
     ttsBaseUrl: urlOr(r.ttsBaseUrl, DEFAULT_VOICE_CONFIG.ttsBaseUrl),
     ttsModel: textOr(r.ttsModel, DEFAULT_VOICE_CONFIG.ttsModel),
     ttsVoice: textOr(r.ttsVoice, DEFAULT_VOICE_CONFIG.ttsVoice),
@@ -231,6 +252,8 @@ export function writeVoiceConfig(stateDir: string, config: VoiceConfig, setBy: s
 export function voiceConfigured(config: VoiceConfig): boolean {
   if (!config.enabled) return false;
   const sttOk = config.sttEngine === "local" || config.sttBaseUrl.length > 0;
-  const ttsOk = config.ttsEngine === "local" || config.ttsBaseUrl.length > 0;
+  // v0.17.2: the bundled mouth needs no URL on file — its base
+  // URL is the supervisor's, resolved at call start.
+  const ttsOk = config.ttsEngine === "local" || config.ttsEngine === "bundled" || config.ttsBaseUrl.length > 0;
   return sttOk && ttsOk;
 }

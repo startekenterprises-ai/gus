@@ -28,6 +28,9 @@
       "path": "../channels/voice"
     },
     {
+      "path": "../kokoro-local"
+    },
+    {
       "path": "../panel"
     }
   ]

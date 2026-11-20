@@ -385,8 +385,26 @@ struct SettingsVoiceView: View {
             Picker("Speech (TTS)", selection: $model.voiceTtsEngine) {
                 Text("Built-in").tag("local")
                 Text("Endpoint").tag("endpoint")
+                // v0.17.2: the bundled Kokoro engine — the
+                // real Kokoro model running on this Mac under
+                // GUS's own supervision; no server to run, no
+                // endpoint to keep reachable. Opt-in: picking
+                // it starts the engine (and the one-time model
+                // download); every other engine is untouched.
+                Text("Built-in Kokoro").tag("bundled")
             }
             .pickerStyle(.segmented)
+            .onAppear { model.refreshVoiceSettings() }
+            if model.voiceTtsEngine == "bundled" {
+                // The supervisor's own status sentence —
+                // Downloading… (with progress) / Ready /
+                // Unavailable + the reason, verbatim.
+                Text(model.voiceBundledStatus.isEmpty
+                    ? "Built-in Kokoro runs the Kokoro voice model on this Mac — the model downloads once, the first time it's picked."
+                    : model.voiceBundledStatus)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
             Text("Built-in speech lives in the app on this Mac — nothing to install, run, or keep reachable. Endpoint speech uses the services below; if one doesn't answer when a call starts, that call uses built-in voice instead and says so — the setting itself is never changed for you.")
                 .font(.caption)
                 .foregroundColor(.secondary)
