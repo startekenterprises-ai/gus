@@ -133,7 +133,7 @@ const gmailDirectory = new GmailDirectory(`${stateDir}/gmail-directory.json`);
 if (process.argv[2] === "gmail-admin") {
   const rest = process.argv.slice(3);
   // The cleanup layer (gmail-cleanup.ts) is an operator surface of
-  // the same pack: `gmail-admin cleanup <status|dry-run|archive|undo|show>`.
+  // the same pack: `gmail-admin cleanup <status|dry-run|archive|undo|show|verify>`.
   // It needs the state dir (rule file + manifest store), so it is
   // routed here rather than inside runGmailAdmin.
   if (rest[0] === "cleanup") {

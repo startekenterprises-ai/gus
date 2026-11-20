@@ -41,11 +41,19 @@
  * intervals. A Mac that slept through 02:30 runs the cycle at its
  * first tick after wake; a report left undelivered by a sleep is
  * delivered before the next cycle overwrites it.
+ *
+ * Chunk 5 (hardening): the config save is atomic (tmp + rename),
+ * the state load shape-checks every field, the multi-day-off
+ * catch-up is pinned by tests (one combined cycle on wake, still
+ * capped — never one run per missed day), and the morning report
+ * gains the trailing-7-days weekly summary line, computed from
+ * the manifest store like every other number in it.
  */
 import { existsSync, readFileSync, renameSync, writeFileSync, chmodSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { LocalReceiptIssuer } from "@gus/gate";
 import {
+  buildWeeklyCleanupSummary,
   GmailCleanupEngine,
   GmailCleanupManifestStore,
   loadCleanupRules,
@@ -137,7 +145,12 @@ export function loadCleanupSchedulerConfig(stateDir: string): { config: GmailCle
 export function saveCleanupSchedulerConfig(stateDir: string, config: GmailCleanupSchedulerConfig): string {
   const path = schedulerConfigPath(stateDir);
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+  // Atomic (tmp + rename, the state pattern below): a crash mid-
+  // save leaves the previous complete config, never a torn one
+  // the next tick would have to treat as unreadable (chunk 5).
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+  renameSync(tmp, path);
   chmodSync(path, 0o600);
   return path;
 }
@@ -166,19 +179,32 @@ function schedulerStatePath(stateDir: string): string {
   return join(stateDir, "gmail-cleanup-scheduler-state.json");
 }
 
+const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
 /** State is bookkeeping, not authority: a missing or malformed
  *  file reads as empty (worst case a cycle re-runs — and the
- *  engine itself refuses to execute the same batch twice). */
+ *  engine itself refuses to execute the same batch twice).
+ *  Chunk 5: the fields are shape-checked, not merely type-checked
+ *  — dates must be real YYYY-MM-DD keys, and a pending report's
+ *  fields are kept only when each is individually well-formed (a
+ *  corrupt batchId is dropped, degrading that report to the plain
+ *  failure shape rather than crashing its delivery). */
 export function loadCleanupSchedulerState(stateDir: string): GmailCleanupSchedulerState {
   try {
     const raw = JSON.parse(readFileSync(schedulerStatePath(stateDir), "utf8")) as Partial<GmailCleanupSchedulerState>;
-    if (raw && typeof raw === "object") {
-      return {
-        version: 1,
-        ...(typeof raw.lastRunDate === "string" ? { lastRunDate: raw.lastRunDate } : {}),
-        ...(typeof raw.lastReportDate === "string" ? { lastReportDate: raw.lastReportDate } : {}),
-        ...(raw.pendingReport && typeof raw.pendingReport.date === "string" ? { pendingReport: raw.pendingReport } : {}),
-      };
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      const state: GmailCleanupSchedulerState = { version: 1 };
+      if (typeof raw.lastRunDate === "string" && DATE_KEY_RE.test(raw.lastRunDate)) state.lastRunDate = raw.lastRunDate;
+      if (typeof raw.lastReportDate === "string" && DATE_KEY_RE.test(raw.lastReportDate)) state.lastReportDate = raw.lastReportDate;
+      const pending = raw.pendingReport;
+      if (pending && typeof pending === "object" && typeof pending.date === "string" && DATE_KEY_RE.test(pending.date)) {
+        state.pendingReport = {
+          date: pending.date,
+          ...(typeof pending.batchId === "string" && pending.batchId ? { batchId: pending.batchId } : {}),
+          ...(typeof pending.failure === "string" && pending.failure ? { failure: pending.failure } : {}),
+        };
+      }
+      return state;
     }
   } catch {
     /* absent or malformed → empty state */
@@ -239,6 +265,11 @@ export interface CleanupReportInput {
   /** The cycle's failure detail, when it failed before a run
    *  manifest could settle. */
   failure?: string | null;
+  /** Chunk 5: the trailing-7-days summary line
+   *  (buildWeeklyCleanupSummary over the manifest store), when
+   *  the caller computed one. Appended to the full report only —
+   *  the one-line "nothing to archive" report keeps its shape. */
+  weeklySummary?: string | null;
 }
 
 function leftAloneLine(plan: CleanupPlan): string {
@@ -305,6 +336,7 @@ export function buildCleanupReport(input: CleanupReportInput): string {
   }
   if (run.status === "undone") lines.push("Note: this batch has since been undone.");
   lines.push(`Batch ${run.batchId} • Receipt ${receipt}`);
+  if (input.weeklySummary) lines.push(input.weeklySummary);
   if (done.length > 0) lines.push(`Undo: gmail-admin cleanup undo --batch ${run.batchId}`);
   return lines.join("\n");
 }
@@ -398,6 +430,7 @@ async function deliverReport(
     run,
     plan,
     failure: pending.failure ?? (pending.batchId && !run ? "the run manifest for this batch is missing" : null),
+    weeklySummary: buildWeeklyCleanupSummary(store, (deps.now ?? (() => Date.now()))()).line,
   });
   if (!config.conversationId) {
     // Enabled without a destination can only happen via a hand

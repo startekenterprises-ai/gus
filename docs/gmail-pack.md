@@ -117,7 +117,7 @@ It never enters the agent's context. Getting those three values:
    or expired refresh token shows up here instead of failing
    silently later) — never a credential value.
 
-## The cleanup layer (MVP chunks 1–4)
+## The cleanup layer (MVP chunks 1–5)
 
 On top of the pack sits a deterministic cleanup engine
 (`packages/control-plane/src/gmail-cleanup.ts`) for the overnight
@@ -157,6 +157,7 @@ node main.js gmail-admin cleanup dry-run            # "would archive N, by rule"
 node main.js gmail-admin cleanup archive --batch <batchId>   # execute exactly that dry run's manifest
 node main.js gmail-admin cleanup undo --batch <batchId>      # restore the batch's exact prior label sets
 node main.js gmail-admin cleanup show --batch <batchId>      # the batch's full record (tap-through; read-only)
+node main.js gmail-admin cleanup verify --batch <batchId>    # re-check the batch's receipts against its manifest (read-only)
 node main.js gmail-admin cleanup schedule enable --conversation <telegram chat id>   # arm the overnight run
 node main.js gmail-admin cleanup schedule status    # armed state, run/report times, last run + report dates
 node main.js gmail-admin cleanup schedule disable   # disarm (config kept)
@@ -182,7 +183,8 @@ at/after the report time (default 07:00) it sends the morning
 report over Telegram (the channel host's send path) to the
 configured chat. The report is built only from the batch's
 manifests: archived counts by rule, left-alone counts, the batch
-id, its receipt id, and the undo command for the batch. A Mac
+id, its receipt id, a trailing-7-days summary line ("This week:
+…", chunk 5), and the undo command for the batch. A Mac
 that slept through a window catches up at its first tick after
 wake; a failed cycle (pack not set up, selection error) still
 reports at report time — plainly, as a failure, with "nothing was
@@ -238,6 +240,109 @@ before archiving. `proposals reject <id>` is final: the record
 stays as the audit trail and the sender is never proposed
 again.
 
+### Hardening (chunk 5)
+
+The final MVP pass hardens the edges the first four chunks left
+to trust, without adding any mailbox surface — the transport
+the engine can see is still search/get/modify, and nothing new
+can archive, delete, or send:
+
+- **Adversarial inputs fail closed, loudly.** The rule file is
+  capped at 1 MiB, 256 rules, 1,000 entries per list, and 512
+  characters per entry; ages must be finite (a JSON `1e999`
+  parses to Infinity and is refused); duplicated list entries
+  collapse to their canonical selves. A manifest that is
+  unparseable, mislabelled, names a different batch than its
+  file, holds more entries than the hard cap, names a message
+  twice, or carries an unknown entry state is **corrupt**:
+  every load throws a named error and leaves the file exactly
+  as found. Absence is still absence (null) — the two are never
+  confused.
+- **Manifest writes are atomic** (tmp + rename, like the
+  scheduler state): a crash mid-save leaves the previous
+  complete manifest, so the write-ahead record is never torn.
+  A leftover `.tmp` is never promoted — it may itself be the
+  torn one. The scheduler's config save is atomic the same
+  way, and its state load shape-checks every field (real
+  `YYYY-MM-DD` dates; a pending report's fields are kept only
+  when individually well-formed).
+- **Transient failures retry; the mutations are idempotent.**
+  Gmail 429/5xx responses and network errors are retried with
+  backoff (4 attempts, 250 ms doubling) on search, reads, and
+  modifies. The archive delta is remove-INBOX-only, so if a
+  modify landed but its response was lost, the retry's fresh
+  read sees INBOX already gone and stands down — a message is
+  never archived twice, and the run manifest remains the
+  single record. Undo recomputes its delta from a fresh read
+  on every attempt, so a lost response there resolves to an
+  empty delta and verification, never an overshoot.
+  Non-transient failures (a 400, a refusal) are not retried —
+  they fail exactly as before.
+- **Receipt integrity is checkable.** `cleanup verify --batch
+  <id>` re-verifies the receipts the batch's manifest names:
+  each must be present in `<state>/receipts.jsonl`, carry a
+  valid HMAC from the local issuer, and match the content hash
+  recomputed from the settled manifest. A tampered manifest
+  reads as `hash-mismatch`, a tampered log entry as
+  `bad-signature`, a lost entry as `missing` — three different
+  stories, three different verdicts. (The local-stub scheme
+  has no cross-receipt chain to check; this is the integrity
+  the pattern supports, and the seam the gate's real receipts
+  will plug into.)
+- **Catch-up is pinned.** A Mac off for days runs exactly one
+  combined cycle on wake — still capped, never one run per
+  missed day — and a stale undelivered report goes out before
+  the fresh one.
+- **Weekly summary.** The morning report's "This week:" line
+  rolls the trailing 7 days of run manifests into batches /
+  archived / undone / failed counts. Corrupt manifests are
+  counted in the line, never silently skipped.
+
+## Operator runbook (cleanup)
+
+The short version of running this thing, in order:
+
+1. **Setup status.** `node main.js gmail-admin cleanup
+   status` — pack configured? OAuth healthy (it performs a
+   live token exchange, so a revoked or 7-day-expired token
+   shows here, not at 2 AM)? Rule file present, cap sane,
+   scheduler armed or off, proposals pending?
+2. **First dry run.** `cleanup dry-run` — read the "would
+   archive N, by rule" counts and the sample IDs. Spot-check
+   a few in Gmail. The dry run changes nothing; run it as
+   often as you like. Any rule-file edit invalidates earlier
+   manifests — dry-run again after edits.
+3. **First batch by hand.** `cleanup archive --batch <id>`
+   with the dry run's batch id, then `cleanup show --batch
+   <id>` and eyeball the result in Gmail. Then the **undo
+   drill**: `cleanup undo --batch <id>` and confirm every
+   message is back with its prior labels. Do this once before
+   arming anything.
+4. **Arm the scheduler.** `cleanup schedule enable
+   --conversation <telegram chat id>` (the chat the morning
+   report should land in). Arming lands on the next tick — no
+   restart. `schedule status` confirms; `schedule disable`
+   turns it off and keeps the config.
+5. **Read the morning report.** Archived counts by rule,
+   left-alone counts, the batch + receipt line, the weekly
+   line, and the undo command for the batch. `cleanup show
+   --batch <id>` is the tap-through: every message the batch
+   touched, under its receipt.
+6. **What a failure report means.** "The overnight cleanup
+   FAILED: … Nothing was archived" — the cycle died before a
+   run manifest settled (pack not set up, selection error);
+   the next night retries on its own once the cause is fixed.
+   A report line "⚠️ N messages could not be archived" is
+   different: the batch ran and settled failed-loudly; the
+   manifest (`cleanup show`) names each failure, and `cleanup
+   undo --batch <id>` still restores whatever did archive.
+7. **When something looks wrong.** `cleanup verify --batch
+   <id>` checks the batch's receipts against its manifest. A
+   `corrupt manifest` error from any command means a file in
+   `<state>/gmail-cleanup/` is damaged — it was left untouched
+   and nothing ran against it; inspect it by hand rather than
+   deleting it, since it may be a batch's only record.
+
 ## Revoking
 
 One click, either side:
@@ -252,6 +357,12 @@ Deleting `<state>/gmail-directory.json` resets the learned directory
 
 ## Known limitations
 
+- **Cleanup tuning is data-pending.** Chunk 5's cap/exclusion
+  tuning was scoped to "the first weeks' manifests" — no live
+  runs exist yet, so there is nothing to tune from. The
+  defaults (200/night cap, the chunk-1 exclusion set) stand
+  until real manifests say otherwise; the weekly summary line
+  is the surface that will show it.
 - **Live-account test pending.** The pack is unit-proven against the
   mock transport and a fake HTTP layer (token exchange, message
   parsing, MIME send). The first run against a real mailbox happens

@@ -1,5 +1,5 @@
 /**
- * The Gmail cleanup layer (MVP chunks 1–2) — the deterministic
+ * The Gmail cleanup layer (MVP chunks 1–2, hardened in chunk 5) — the deterministic
  * overnight-cleanup engine that sits on top of the Phase 6 Gmail
  * pack (gmail.ts). It is NOT a model tool: the model has no path to
  * anything in this file. The operator decrees a rule file; this
@@ -57,11 +57,34 @@
  *    `gmail-admin cleanup show --batch <id>` and the panel's
  *    read-only GET /api/gmail-cleanup/batches/<id>. Read-only:
  *    neither surface can mutate anything.
+ *
+ * Chunk 5 (hardening) adds, without widening any surface above:
+ *
+ *  - Adversarial inputs fail closed, loudly: the rule file is
+ *    size- and count-capped and must be finite throughout; a
+ *    manifest that is unparseable, mislabelled, oversized, or
+ *    names a message twice is CORRUPT — loads throw a named error
+ *    instead of guessing, and the file is left untouched.
+ *  - Manifest writes are atomic (tmp + rename, the scheduler-state
+ *    pattern): a crash mid-save leaves the previous complete
+ *    manifest — the write-ahead record is never torn.
+ *  - Transient transport failures (Gmail 429/5xx, network errors)
+ *    are retried with backoff. The archive modify is idempotent
+ *    under retry: if a modify landed but its response was lost,
+ *    the retry's fresh read sees INBOX already gone and stands
+ *    down — a message is never archived twice, and the run
+ *    manifest stays the single record of the batch.
+ *  - Receipt integrity is checkable after the fact:
+ *    verifyCleanupBatchReceipts re-verifies a batch's receipts
+ *    against the local issuer's HMAC and the manifest-bound
+ *    content hash (`gmail-admin cleanup verify --batch <id>`).
+ *  - buildWeeklyCleanupSummary rolls the trailing 7 days of run
+ *    manifests into the report's weekly line (chunk 5).
  */
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { LocalReceiptIssuer, sha256Hex } from "@gus/gate";
+import { LocalReceiptIssuer, sha256Hex, type Receipt } from "@gus/gate";
 import {
   gmailCredentialHealth,
   HttpGmailTransport,
@@ -126,12 +149,36 @@ function fail(msg: string): never {
   throw new Error(`gmail cleanup rules: ${msg}`);
 }
 
+/** Adversarial-input limits for the rule file (chunk 5). The rule
+ *  file is operator-authored, but it is also the one input that
+ *  decides what gets archived — a bloated or pathological file
+ *  must fail closed at load, not exhaust memory or quietly widen
+ *  selection. The limits sit far above any sane hand-written file. */
+export const MAX_CLEANUP_RULE_FILE_BYTES = 1_048_576;
+export const MAX_CLEANUP_RULES = 256;
+export const MAX_CLEANUP_LIST_ENTRIES = 1_000;
+export const MAX_CLEANUP_RULE_STRING_CHARS = 512;
+
+function dedupe(xs: string[]): string[] {
+  return [...new Set(xs)];
+}
+
 function stringList(value: unknown, what: string): string[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value) || value.some((v) => typeof v !== "string")) {
     fail(`${what} must be a list of strings`);
   }
-  return (value as string[]).map((s) => s.trim().toLowerCase()).filter(Boolean);
+  if (value.length > MAX_CLEANUP_LIST_ENTRIES) {
+    fail(`${what} has ${value.length} entries — over the ${MAX_CLEANUP_LIST_ENTRIES}-entry limit; refusing to load an oversized rule file`);
+  }
+  for (const s of value as string[]) {
+    if (s.length > MAX_CLEANUP_RULE_STRING_CHARS) {
+      fail(`${what} holds a ${s.length}-character entry — over the ${MAX_CLEANUP_RULE_STRING_CHARS}-character limit`);
+    }
+  }
+  // Duplicates carry no meaning for matching; collapse them so a
+  // deeply duplicated list loads as its canonical self.
+  return dedupe((value as string[]).map((s) => s.trim().toLowerCase()).filter(Boolean));
 }
 
 /** Load + validate the operator's rule file. A missing file is the
@@ -144,6 +191,10 @@ export function loadCleanupRules(path: string): { rules: GmailCleanupRuleFile; h
   if (!existsSync(path)) {
     return { rules: structuredClone(DEFAULT_CLEANUP_RULES), hash: sha256Hex(JSON.stringify(DEFAULT_CLEANUP_RULES)), existed: false };
   }
+  const size = statSync(path).size;
+  if (size > MAX_CLEANUP_RULE_FILE_BYTES) {
+    fail(`${path} is ${size} bytes — over the ${MAX_CLEANUP_RULE_FILE_BYTES}-byte limit; refusing to load an oversized rule file`);
+  }
   const raw = readFileSync(path, "utf8");
   let parsed: Partial<GmailCleanupRuleFile>;
   try {
@@ -151,11 +202,17 @@ export function loadCleanupRules(path: string): { rules: GmailCleanupRuleFile; h
   } catch {
     fail(`${path} is not valid JSON — refusing to guess`);
   }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    fail(`${path} must hold a JSON object — refusing to guess`);
+  }
   if (parsed.version !== undefined && parsed.version !== 1) fail(`unsupported version ${String(parsed.version)}`);
   const cap = parsed.nightlyCap ?? GMAIL_CLEANUP_HARD_CAP;
   if (!Number.isInteger(cap) || cap < 1) fail(`nightlyCap must be a positive integer, got ${String(parsed.nightlyCap)}`);
   const rawRules = parsed.rules ?? [];
   if (!Array.isArray(rawRules)) fail("rules must be a list");
+  if (rawRules.length > MAX_CLEANUP_RULES) {
+    fail(`${rawRules.length} rules — over the ${MAX_CLEANUP_RULES}-rule limit; refusing to load an oversized rule file`);
+  }
   const rules: GmailCleanupRule[] = rawRules.map((r, i) => {
     if (!r || typeof r !== "object") fail(`rule #${i + 1} is not an object`);
     const rule = r as GmailCleanupRule;
@@ -163,8 +220,16 @@ export function loadCleanupRules(path: string): { rules: GmailCleanupRuleFile; h
     const from = stringList(rule.from, `rule "${rule.name}" from`)?.map(normalizeAddress);
     const fromDomain = stringList(rule.fromDomain, `rule "${rule.name}" fromDomain`)?.map((d) => d.replace(/^@/, ""));
     const labelIds = stringList(rule.labelIds, `rule "${rule.name}" labelIds`)?.map((l) => l.toUpperCase());
-    if (rule.olderThanDays !== undefined && (typeof rule.olderThanDays !== "number" || rule.olderThanDays < 0)) {
-      fail(`rule "${rule.name}" olderThanDays must be a number >= 0`);
+    // Normalization can collapse distinct spellings into one
+    // entry ("@x.com" and "x.com"); dedupe again after mapping.
+    const fromD = from ? dedupe(from) : undefined;
+    const fromDomainD = fromDomain ? dedupe(fromDomain) : undefined;
+    const labelIdsD = labelIds ? dedupe(labelIds) : undefined;
+    // JSON has no NaN/Infinity literals, but 1e999 parses to
+    // Infinity — an age that can never (or always) match is a
+    // broken rule, not a wide one: refuse it.
+    if (rule.olderThanDays !== undefined && (typeof rule.olderThanDays !== "number" || !Number.isFinite(rule.olderThanDays) || rule.olderThanDays < 0)) {
+      fail(`rule "${rule.name}" olderThanDays must be a finite number >= 0`);
     }
     if (rule.readOnly !== undefined && typeof rule.readOnly !== "boolean") fail(`rule "${rule.name}" readOnly must be a boolean`);
     if (!from?.length && !fromDomain?.length && !labelIds?.length && rule.olderThanDays === undefined) {
@@ -172,9 +237,9 @@ export function loadCleanupRules(path: string): { rules: GmailCleanupRuleFile; h
     }
     return {
       name: rule.name,
-      ...(from?.length ? { from } : {}),
-      ...(fromDomain?.length ? { fromDomain } : {}),
-      ...(labelIds?.length ? { labelIds } : {}),
+      ...(fromD?.length ? { from: fromD } : {}),
+      ...(fromDomainD?.length ? { fromDomain: fromDomainD } : {}),
+      ...(labelIdsD?.length ? { labelIds: labelIdsD } : {}),
       ...(rule.olderThanDays !== undefined ? { olderThanDays: rule.olderThanDays } : {}),
       ...(rule.readOnly !== undefined ? { readOnly: rule.readOnly } : {}),
     };
@@ -276,6 +341,30 @@ export interface CleanupTransport {
   modify(id: string, addLabelIds: string[], removeLabelIds: string[]): Promise<void>;
 }
 
+// ------------------------------------------------- transient failures
+
+/**
+ * Is this transport failure worth retrying? (Chunk 5.) Transient
+ * means: Gmail rate-limit / server statuses (429, 500, 502, 503,
+ * 504 — the HTTP transport names the status in its error text),
+ * and network-layer failures (undici surfaces them as TypeError;
+ * socket resets/timeouts carry a code). Everything else — a 400,
+ * a 404-shaped refusal, a credential error — is final and fails
+ * exactly as it did before retries existed.
+ */
+const TRANSIENT_HTTP_RE = /HTTP (429|500|502|503|504)\b/;
+const TRANSIENT_CODES: ReadonlySet<string> = new Set(["ECONNRESET", "ETIMEDOUT", "ECONNABORTED", "EAI_AGAIN"]);
+
+export function isTransientGmailError(e: unknown): boolean {
+  if (e instanceof TypeError) return true; // fetch/network failure shape
+  if (e instanceof Error) {
+    if (TRANSIENT_HTTP_RE.test(e.message)) return true;
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === "string" && TRANSIENT_CODES.has(code)) return true;
+  }
+  return false;
+}
+
 // ------------------------------------------------------------------- plan
 
 export interface CleanupPlanEntry {
@@ -350,21 +439,67 @@ function assertBatchId(batchId: string): void {
   }
 }
 
+const RUN_ENTRY_STATES: ReadonlySet<string> = new Set(["pending", "done", "skipped-stale", "failed"]);
+
 /** The manifest store: <state>/gmail-cleanup/. Dry-run manifests
  *  are `dry-<batchId>.json`; run manifests are `<batchId>.json`.
- *  Files are 0600 — they enumerate the operator's mail metadata. */
+ *  Files are 0600 — they enumerate the operator's mail metadata.
+ *
+ *  Chunk 5 hardening: writes are atomic (tmp + rename, the
+ *  scheduler-state pattern), so a crash mid-save leaves the
+ *  previous complete manifest — the write-ahead record the whole
+ *  design leans on is never torn. (A leftover `.tmp` is never
+ *  promoted: it may itself be the torn one.) Reads validate: an
+ *  absent file is null, but a present file that is unparseable,
+ *  mislabelled, oversized, or names a message twice is CORRUPT
+ *  and throws a named error — every consumer of a manifest is
+ *  deciding what may be archived or restored, and none of them
+ *  may guess. The corrupt file is left exactly as found. */
 export class GmailCleanupManifestStore {
   constructor(private dir: string) {}
 
   private write(path: string, data: unknown): void {
     mkdirSync(this.dir, { recursive: true });
-    writeFileSync(path, JSON.stringify(data, null, 2) + "\n", { mode: 0o600 });
+    const tmp = `${path}.tmp`;
+    writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", { mode: 0o600 });
+    renameSync(tmp, path);
     chmodSync(path, 0o600);
   }
 
-  private read<T>(path: string): T | null {
+  private readManifest<T>(path: string, kind: "gmail-cleanup-dry-run" | "gmail-cleanup-run", batchId: string): T | null {
     if (!existsSync(path)) return null;
-    return JSON.parse(readFileSync(path, "utf8")) as T;
+    const corrupt = (why: string): never => {
+      throw new Error(`gmail cleanup: manifest at ${path} is corrupt (${why}) — refusing to guess; the file was left untouched`);
+    };
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(path, "utf8"));
+    } catch {
+      corrupt("not valid JSON");
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) corrupt("top level is not an object");
+    const m = parsed as Record<string, unknown>;
+    if (m.kind !== kind) corrupt(`kind is ${JSON.stringify(m.kind)}, expected "${kind}"`);
+    if (m.batchId !== batchId) corrupt(`it names batch ${JSON.stringify(m.batchId)}, not "${batchId}"`);
+    if (typeof m.ruleFileHash !== "string" || !m.ruleFileHash) corrupt("ruleFileHash is missing");
+    if (!Array.isArray(m.entries)) corrupt("entries is not a list");
+    const entries: unknown[] = m.entries as unknown[];
+    if (entries.length > GMAIL_CLEANUP_HARD_CAP) {
+      corrupt(`${entries.length} entries exceeds the nightly hard cap of ${GMAIL_CLEANUP_HARD_CAP} — no cleanup run can have produced this`);
+    }
+    const seen = new Set<string>();
+    entries.forEach((e, i) => {
+      if (!e || typeof e !== "object" || Array.isArray(e)) corrupt(`entry #${i + 1} is not an object`);
+      const entry = e as Record<string, unknown>;
+      const id: unknown = entry.id;
+      if (typeof id !== "string" || !id) corrupt(`entry #${i + 1} has no message id`);
+      if (seen.has(id as string)) corrupt(`message id "${id as string}" appears twice — a real selection names each message once`);
+      seen.add(id as string);
+      if (kind === "gmail-cleanup-run" && (typeof entry.state !== "string" || !RUN_ENTRY_STATES.has(entry.state))) {
+        corrupt(`entry "${id as string}" has unknown state ${JSON.stringify(entry.state)}`);
+      }
+    });
+    return parsed as T;
   }
 
   dryRunPath(batchId: string): string {
@@ -385,8 +520,7 @@ export class GmailCleanupManifestStore {
   }
 
   loadDryRun(batchId: string): CleanupDryRunManifest | null {
-    const m = this.read<CleanupDryRunManifest>(this.dryRunPath(batchId));
-    return m && m.kind === "gmail-cleanup-dry-run" && m.batchId === batchId ? m : null;
+    return this.readManifest<CleanupDryRunManifest>(this.dryRunPath(batchId), "gmail-cleanup-dry-run", batchId);
   }
 
   saveRun(run: CleanupRunManifest): string {
@@ -396,8 +530,27 @@ export class GmailCleanupManifestStore {
   }
 
   loadRun(batchId: string): CleanupRunManifest | null {
-    const m = this.read<CleanupRunManifest>(this.runPath(batchId));
-    return m && m.kind === "gmail-cleanup-run" && m.batchId === batchId ? m : null;
+    return this.readManifest<CleanupRunManifest>(this.runPath(batchId), "gmail-cleanup-run", batchId);
+  }
+
+  /** Every run manifest in the store, for aggregate readers (the
+   *  weekly summary). Per-file corruption is reported, not thrown:
+   *  an aggregate must not let one bad file silence the rest, and
+   *  the caller surfaces the corrupt names loudly. */
+  listRuns(): { runs: CleanupRunManifest[]; corrupt: string[] } {
+    const runs: CleanupRunManifest[] = [];
+    const corrupt: string[] = [];
+    if (!existsSync(this.dir)) return { runs, corrupt };
+    for (const name of readdirSync(this.dir).sort()) {
+      if (!name.endsWith(".json") || name.startsWith("dry-")) continue;
+      try {
+        const run = this.loadRun(name.slice(0, -".json".length));
+        if (run) runs.push(run);
+      } catch {
+        corrupt.push(name);
+      }
+    }
+    return { runs, corrupt };
   }
 }
 
@@ -524,6 +677,194 @@ export function formatCleanupBatchRecord(record: CleanupBatchRecord): string[] {
   return lines;
 }
 
+// ------------------------------------------- receipt integrity (chunk 5)
+
+export type CleanupReceiptCheckStatus =
+  | "ok" // recorded receipt found in the log, signature valid, hash matches the manifest
+  | "not-recorded" // the run issued no receipt (no sink was wired) — nothing claimed, nothing to check
+  | "not-run" // undo only: the batch has not been undone
+  | "missing" // the manifest names a receipt the log does not hold
+  | "bad-signature" // the log's receipt fails the issuer's HMAC check
+  | "hash-mismatch"; // the receipt verifies but is not bound to THIS manifest
+
+export interface CleanupReceiptCheck {
+  status: CleanupReceiptCheckStatus;
+  receiptId?: string;
+  detail: string;
+}
+
+export interface CleanupReceiptVerification {
+  batchId: string;
+  ok: boolean;
+  archive: CleanupReceiptCheck;
+  undo: CleanupReceiptCheck;
+  /** Non-fatal observations (e.g. torn lines elsewhere in the
+   *  shared receipts log) — reported, never silently dropped. */
+  warnings: string[];
+}
+
+/** The exact content hash the archive path bound into its
+ *  receipt — recomputed here from the settled manifest. Undo
+ *  mutates entries (undone flags, details) but never the id /
+ *  rule / state triple this hash covers, so it stays checkable
+ *  for the batch's whole life. */
+function archiveReceiptContentHash(run: CleanupRunManifest): string {
+  return sha256Hex(
+    JSON.stringify({
+      batchId: run.batchId,
+      jobId: run.jobId,
+      ruleFileHash: run.ruleFileHash,
+      entries: run.entries.map((e) => ({ id: e.id, rule: e.rule, state: e.state })),
+    }),
+  );
+}
+
+/** The undo receipt's content hash, as the undo path computed it
+ *  at issue time. Checkable against the LATEST undo receipt (the
+ *  one the manifest records): a resumed undo restores more
+ *  entries and re-issues, superseding the earlier receipt. */
+function undoReceiptContentHash(run: CleanupRunManifest): string {
+  return sha256Hex(
+    JSON.stringify({
+      batchId: run.batchId,
+      undoOfReceiptId: run.receiptId ?? null,
+      restoredIds: run.entries.filter((e) => e.undone).map((e) => e.id),
+    }),
+  );
+}
+
+/**
+ * Verify a settled batch's receipts after the fact: each receipt
+ * the manifest names must be present in the receipts log, carry a
+ * valid HMAC from the local issuer, and be bound by its content
+ * hash to this exact manifest. This is the integrity check the
+ * local-stub receipt pattern supports — per-receipt HMAC plus
+ * manifest binding (the stub scheme has no cross-receipt chain;
+ * when the gate's real receipts land, this is the seam they plug
+ * into). Read-only: nothing here touches the mailbox or the log.
+ */
+export function verifyCleanupBatchReceipts(
+  store: GmailCleanupManifestStore,
+  batchId: string,
+  sink: CleanupReceiptSink,
+): CleanupReceiptVerification | null {
+  const run = store.loadRun(batchId);
+  if (!run) return null;
+
+  const warnings: string[] = [];
+  const byId = new Map<string, Receipt>();
+  if (existsSync(sink.logPath)) {
+    const lines = readFileSync(sink.logPath, "utf8").split("\n");
+    lines.forEach((line, i) => {
+      if (!line.trim()) return;
+      try {
+        const r = JSON.parse(line) as Receipt;
+        if (r && typeof r.receiptId === "string") byId.set(r.receiptId, r);
+      } catch {
+        warnings.push(
+          `receipts log line ${i + 1} is not valid JSON (a torn append?) — it names no batch, so it cannot be attributed; the log wants a look`,
+        );
+      }
+    });
+  }
+
+  const check = (
+    role: "archive" | "undo",
+    recordedId: string | undefined,
+    jobId: string,
+    expectedHash: string,
+  ): CleanupReceiptCheck => {
+    if (!recordedId) {
+      return role === "undo" && run.status !== "undone" && !run.undoReceiptId
+        ? { status: "not-run", detail: "the batch has not been undone — no undo receipt exists to check" }
+        : { status: "not-recorded", detail: `no ${role} receipt was recorded for this batch (the run settled without a receipt sink)` };
+    }
+    const receipt = byId.get(recordedId);
+    if (!receipt) {
+      return {
+        status: "missing",
+        receiptId: recordedId,
+        detail: `the manifest names ${role} receipt ${recordedId}, but the receipts log does not hold it — the log was truncated, or the receipt was never appended`,
+      };
+    }
+    if (!sink.issuer.verify(receipt)) {
+      return {
+        status: "bad-signature",
+        receiptId: recordedId,
+        detail: `${role} receipt ${recordedId} fails the issuer's signature check — the log entry was altered after issue`,
+      };
+    }
+    if (receipt.jobId !== jobId || receipt.contentHash !== expectedHash) {
+      return {
+        status: "hash-mismatch",
+        receiptId: recordedId,
+        detail: `${role} receipt ${recordedId} verifies as a genuine receipt but is not bound to this manifest (job or content hash differs) — the manifest was altered after the run settled`,
+      };
+    }
+    return { status: "ok", receiptId: recordedId, detail: `${role} receipt ${recordedId} verifies and is bound to this manifest` };
+  };
+
+  const archive = check("archive", run.receiptId, run.jobId, archiveReceiptContentHash(run));
+  const undo = check("undo", run.undoReceiptId, `gmail-cleanup-undo-${batchId}`, undoReceiptContentHash(run));
+  const okStatus = (s: CleanupReceiptCheckStatus): boolean => s === "ok" || s === "not-recorded" || s === "not-run";
+  return { batchId, ok: okStatus(archive.status) && okStatus(undo.status), archive, undo, warnings };
+}
+
+/** The `cleanup verify` rendering. Deterministic, like the batch
+ *  record's: the same store + log always print the same lines. */
+export function formatCleanupReceiptVerification(v: CleanupReceiptVerification): string[] {
+  const lines: string[] = [];
+  lines.push(`gmail cleanup verify — batch ${v.batchId}: ${v.ok ? "OK" : "FAILED"}`);
+  lines.push(`  archive: [${v.archive.status}] ${v.archive.detail}`);
+  lines.push(`  undo: [${v.undo.status}] ${v.undo.detail}`);
+  for (const w of v.warnings) lines.push(`  warning: ${w}`);
+  return lines;
+}
+
+// --------------------------------------------- weekly summary (chunk 5)
+
+export interface CleanupWeeklySummary {
+  /** Run manifests settled in the trailing 7 days. */
+  batches: number;
+  /** Entries those batches archived and have not since restored. */
+  archived: number;
+  /** Of those batches, how many have been undone. */
+  undoneBatches: number;
+  /** Entries across those batches that failed to archive. */
+  failedEntries: number;
+  /** Manifest files in the store that would not load — named in
+   *  the store's corrupt list, counted here, never hidden. */
+  corruptManifests: number;
+  line: string;
+}
+
+/** Roll the trailing 7 days of run manifests into the morning
+ *  report's weekly summary line (the plan's chunk 5). Built only
+ *  from the manifest store, like every other report number. */
+export function buildWeeklyCleanupSummary(store: GmailCleanupManifestStore, now: number): CleanupWeeklySummary {
+  const { runs, corrupt } = store.listRuns();
+  const since = now - 7 * DAY_MS;
+  const week = runs.filter((r) => r.startedAt >= since && r.startedAt <= now);
+  const archived = week.reduce((n, r) => n + r.entries.filter((e) => e.state === "done" && !e.undone).length, 0);
+  const failedEntries = week.reduce((n, r) => n + r.entries.filter((e) => e.state === "failed").length, 0);
+  const undoneBatches = week.filter((r) => r.status === "undone").length;
+  const parts = [
+    `${week.length} cleanup batch${week.length === 1 ? "" : "es"}`,
+    `${archived} archived`,
+  ];
+  if (undoneBatches > 0) parts.push(`${undoneBatches} undone`);
+  if (failedEntries > 0) parts.push(`${failedEntries} failed`);
+  if (corrupt.length > 0) parts.push(`${corrupt.length} corrupt manifest${corrupt.length === 1 ? "" : "s"} skipped`);
+  return {
+    batches: week.length,
+    archived,
+    undoneBatches,
+    failedEntries,
+    corruptManifests: corrupt.length,
+    line: `This week: ${parts.join(", ")}.`,
+  };
+}
+
 // ------------------------------------------------------------------ engine
 
 export interface CleanupReceiptSink {
@@ -539,6 +880,15 @@ export interface GmailCleanupEngineOpts {
   now?: () => number;
   /** Injected in tests; production uses the clock + randomness. */
   batchId?: () => string;
+  /** Chunk 5 retry plumbing: injected in tests so backoff costs
+   *  no wall-clock; production sleeps for real. */
+  sleep?: (ms: number) => Promise<void>;
+  /** Total attempts per transport call before a transient failure
+   *  is final. Default 4. */
+  transientAttempts?: number;
+  /** First backoff delay; doubles per attempt, capped at 8s.
+   *  Default 250ms. */
+  retryBaseMs?: number;
 }
 
 function defaultBatchId(now: number): string {
@@ -549,6 +899,9 @@ function defaultBatchId(now: number): string {
 export class GmailCleanupEngine {
   private now: () => number;
   private batchId: () => string;
+  private sleep: (ms: number) => Promise<void>;
+  private transientAttempts: number;
+  private retryBaseMs: number;
 
   constructor(
     private transport: CleanupTransport,
@@ -556,6 +909,34 @@ export class GmailCleanupEngine {
   ) {
     this.now = opts.now ?? (() => Date.now());
     this.batchId = opts.batchId ?? (() => defaultBatchId(this.now()));
+    this.sleep = opts.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.transientAttempts = Math.max(1, opts.transientAttempts ?? 4);
+    this.retryBaseMs = Math.max(0, opts.retryBaseMs ?? 250);
+  }
+
+  private backoffMs(attempt: number): number {
+    return Math.min(this.retryBaseMs * 2 ** (attempt - 1), 8_000);
+  }
+
+  /** Run a transport call, retrying transient failures with
+   *  backoff. Non-transient failures throw on first sight, exactly
+   *  as they did before retries existed. */
+  private async withTransientRetry<T>(fn: () => Promise<T>): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await fn();
+      } catch (e) {
+        if (!isTransientGmailError(e) || attempt >= this.transientAttempts) throw e;
+        await this.sleep(this.backoffMs(attempt));
+      }
+    }
+  }
+
+  /** A fresh metadata read with transient retries — the only way
+   *  the archive/undo paths read, so a rate-limited verify never
+   *  masquerades as a vanished or unmoved message. */
+  private async getFresh(id: string): Promise<GmailMessage | null> {
+    return this.withTransientRetry(() => this.transport.get(id));
   }
 
   // ---------------------------------------------------------- chunk 1
@@ -574,7 +955,7 @@ export class GmailCleanupEngine {
     const now = this.now();
     const batchId = this.batchId();
     const cap = effectiveCleanupCap(rules);
-    const summaries = await this.transport.search("", opts?.scanLimit ?? 1000);
+    const summaries = await this.withTransientRetry(() => this.transport.search("", opts?.scanLimit ?? 1000));
     const inbox = summaries.filter((m) => m.labelIds.includes("INBOX"));
     // Deterministic: oldest first (unparseable dates last), id as
     // the tiebreak — the cap then keeps the newest overflow, which
@@ -661,6 +1042,30 @@ export class GmailCleanupEngine {
   }
 
   /**
+   * The archive modify, retried on transient failures — and
+   * idempotent under retry (chunk 5): the delta is remove-INBOX
+   * only, so if a modify landed but its response was lost, the
+   * retry's fresh read sees INBOX already gone and stands down
+   * instead of modifying a second time. The run manifest stays
+   * the single record of what the batch did; there is no path
+   * here that archives a message twice.
+   */
+  private async modifyArchive(id: string): Promise<void> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await this.transport.modify(id, [], ["INBOX"]);
+        return;
+      } catch (e) {
+        if (!isTransientGmailError(e) || attempt >= this.transientAttempts) throw e;
+        const now = await this.getFresh(id);
+        if (!now) throw new Error(`message ${id} vanished while its archive was being retried`);
+        if (!now.labelIds.includes("INBOX")) return; // the modify landed; only its response was lost
+        await this.sleep(this.backoffMs(attempt));
+      }
+    }
+  }
+
+  /**
    * Execute a batch — ONLY from the dry-run manifest named by
    * batchId. Refuses loudly, touching nothing, when: the manifest
    * doesn't exist, the rule file changed since the dry run, the
@@ -705,7 +1110,7 @@ export class GmailCleanupEngine {
     let failures = 0;
     for (const entry of run.entries) {
       try {
-        const fresh = await this.transport.get(entry.id);
+        const fresh = await this.getFresh(entry.id);
         if (!fresh) {
           entry.state = "failed";
           entry.detail = "message vanished before its archive — nothing was done to it";
@@ -728,8 +1133,8 @@ export class GmailCleanupEngine {
           continue;
         }
         this.assertArchiveDelta([], ["INBOX"]);
-        await this.transport.modify(entry.id, [], ["INBOX"]);
-        const after = await this.transport.get(entry.id);
+        await this.modifyArchive(entry.id);
+        const after = await this.getFresh(entry.id);
         if (!after || after.labelIds.includes("INBOX")) {
           entry.state = "failed";
           entry.detail = "archive could not be verified — INBOX still present after the modify";
@@ -770,6 +1175,41 @@ export class GmailCleanupEngine {
   }
 
   /**
+   * Restore one entry to its captured prior label set, retrying
+   * transient failures (chunk 5). The label delta is recomputed
+   * from a FRESH read on every attempt, which is what makes the
+   * retry idempotent: if a modify landed but its response was
+   * lost, the next attempt computes an empty delta and goes
+   * straight to verification — the message is never modified
+   * twice toward the same set, and never overshoots it.
+   */
+  private async restoreEntry(entry: CleanupRunEntry): Promise<"restored" | "vanished" | "unverified"> {
+    const prior = new Set(entry.priorLabelIds);
+    for (let attempt = 1; ; attempt++) {
+      const fresh = await this.getFresh(entry.id);
+      if (!fresh) return "vanished";
+      const current = new Set(fresh.labelIds);
+      const add = [...prior].filter((l) => !current.has(l));
+      const remove = [...current].filter((l) => !prior.has(l));
+      if (add.length > 0 || remove.length > 0) {
+        try {
+          await this.transport.modify(entry.id, add, remove);
+        } catch (e) {
+          if (!isTransientGmailError(e) || attempt >= this.transientAttempts) throw e;
+          await this.sleep(this.backoffMs(attempt));
+          continue; // recompute the delta from fresh state
+        }
+      }
+      const after = await this.getFresh(entry.id);
+      const restored =
+        after !== null &&
+        after.labelIds.length === prior.size &&
+        after.labelIds.every((l) => prior.has(l));
+      return restored ? "restored" : "unverified";
+    }
+  }
+
+  /**
    * Restore a batch exactly: every done entry's label set is set
    * back to the prior set its archive captured — not merely "back
    * to inbox" (a message a Gmail filter had labelled keeps those
@@ -791,30 +1231,15 @@ export class GmailCleanupEngine {
     for (const entry of [...run.entries].reverse()) {
       if (entry.state !== "done" || entry.undone) continue;
       try {
-        const fresh = await this.transport.get(entry.id);
-        if (!fresh) {
-          entry.detail = "message vanished before its undo — could not be restored";
-          failures++;
-          store.saveRun(run);
-          continue;
-        }
-        const current = new Set(fresh.labelIds);
-        const prior = new Set(entry.priorLabelIds);
-        const add = [...prior].filter((l) => !current.has(l));
-        const remove = [...current].filter((l) => !prior.has(l));
-        if (add.length > 0 || remove.length > 0) {
-          await this.transport.modify(entry.id, add, remove);
-        }
-        const after = await this.transport.get(entry.id);
-        const restored =
-          after !== null &&
-          after.labelIds.length === prior.size &&
-          after.labelIds.every((l) => prior.has(l));
-        if (!restored) {
-          entry.detail = "undo could not be verified — the label set does not match the manifest's prior set";
-          failures++;
-        } else {
+        const outcome = await this.restoreEntry(entry);
+        if (outcome === "restored") {
           entry.undone = true;
+        } else {
+          entry.detail =
+            outcome === "vanished"
+              ? "message vanished before its undo — could not be restored"
+              : "undo could not be verified — the label set does not match the manifest's prior set";
+          failures++;
         }
       } catch (e) {
         entry.detail = e instanceof Error ? e.message : String(e);
@@ -931,7 +1356,7 @@ function formatPlan(plan: CleanupPlan): string[] {
 
 /**
  * The cleanup operator surface, reached as
- * `node main.js gmail-admin cleanup <status|dry-run|archive|undo|show>`.
+ * `node main.js gmail-admin cleanup <status|dry-run|archive|undo|show|verify>`.
  * (`gmail-admin cleanup schedule <...>` is the chunk-3 arming
  * surface and `gmail-admin cleanup proposals <...>` the chunk-4
  * proposals surface; main.ts routes those two to
@@ -996,6 +1421,32 @@ export async function runGmailCleanupAdmin(argv: string[], deps: GmailCleanupAdm
         for (const line of formatCleanupBatchRecord(record)) console.log(line);
         return 0;
       }
+      case "verify": {
+        // Chunk 5 receipt integrity: also a pure local read (the
+        // manifest store + the receipts log + the issuer's key).
+        // The key is only READ — a verify must never mint one, so
+        // a missing key is a loud "nothing to verify against".
+        const batchId = flag("--batch");
+        if (!batchId) {
+          console.error("usage: gmail-admin cleanup verify --batch <batchId>");
+          return 2;
+        }
+        const keyPath = join(stateDir, "receipt-stub.key");
+        if (!existsSync(keyPath)) {
+          console.error("gmail cleanup: no receipt key in this state dir — no receipts were ever issued from it, so there is nothing to verify against");
+          return 1;
+        }
+        const verification = verifyCleanupBatchReceipts(store, batchId, {
+          issuer: new LocalReceiptIssuer(keyPath),
+          logPath: join(stateDir, "receipts.jsonl"),
+        });
+        if (!verification) {
+          console.error(`gmail cleanup: no run manifest for batch "${batchId}" — receipts exist only for batches that have been archived`);
+          return 1;
+        }
+        for (const line of formatCleanupReceiptVerification(verification)) console.log(line);
+        return verification.ok ? 0 : 1;
+      }
       case "dry-run": {
         const engine = buildEngine();
         if (!engine) return 1;
@@ -1049,7 +1500,7 @@ export async function runGmailCleanupAdmin(argv: string[], deps: GmailCleanupAdm
         return run.status === "undone" ? 0 : 1;
       }
       default:
-        console.error("usage: gmail-admin cleanup <status|dry-run|archive --batch <id>|undo --batch <id>|show --batch <id>|schedule <status|enable|disable>|proposals <list|generate|accept <id>|reject <id>>>");
+        console.error("usage: gmail-admin cleanup <status|dry-run|archive --batch <id>|undo --batch <id>|show --batch <id>|verify --batch <id>|schedule <status|enable|disable>|proposals <list|generate|accept <id>|reject <id>>>");
         return 2;
     }
   } catch (e) {
