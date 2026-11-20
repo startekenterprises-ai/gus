@@ -72,6 +72,21 @@ protocol SpeechEngine: AnyObject {
     /// view concern — resolution and speech never depend
     /// on it.
     var onLevelChange: ((Float) -> Void)? { get set }
+    /// Fired when a sentence's audio actually starts playing
+    /// (v0.17.1) — the call session lines up the next
+    /// sentence's synthesis on this signal, because at that
+    /// moment the current sentence's synthesis is done and
+    /// the synthesizer is free. Never fired for a sentence
+    /// that was cut before it made sound.
+    var onPlaybackStarted: (() -> Void)? { get set }
+    /// Begin synthesizing a sentence before its turn to play
+    /// (v0.17.1 synthesize-ahead): the samples wait in the
+    /// engine until speak() asks for this exact text, which
+    /// then starts playing with no synthesis wait. Preparing
+    /// never makes sound on its own, and a sentence the call
+    /// session has not cleared to speak is never prepared —
+    /// the session scans first, exactly as it always has.
+    func prepare(_ text: String)
     /// Speak one sentence; onFinished fires exactly once —
     /// when the sentence ends OR is cut by stopSpeaking().
     func speak(_ text: String, onFinished: @escaping () -> Void)
@@ -79,6 +94,14 @@ protocol SpeechEngine: AnyObject {
 }
 
 // MARK: - Kokoro (default; on-device CoreML — KokoroTTS.swift)
+
+/// One utterance synthesized ahead of playback (v0.17.1):
+/// Kokoro's samples for a sentence, waiting for speak() to
+/// ask for that sentence by its exact text.
+struct PreparedSpeech {
+    let samples: [Float]
+    let sampleRate: Double
+}
 
 final class KokoroSpeechEngine: SpeechEngine {
     let kind: SpeechEngineKind = .kokoro
@@ -88,6 +111,18 @@ final class KokoroSpeechEngine: SpeechEngine {
     private var generation = 0
     private var pendingFinish: (() -> Void)?
     private var synthTask: Task<Void, Never>?
+
+    /// Playback-start hook (v0.17.1): fired from speak()'s
+    /// task the moment a sentence's samples are scheduled
+    /// and playing — see the protocol note.
+    var onPlaybackStarted: (() -> Void)?
+
+    // Synthesize-ahead slot (v0.17.1): at most one prepared
+    // utterance, keyed by its exact text. speak() consumes
+    // it only for that text; stopSpeaking() discards it, so
+    // a barged-in lineup can never make sound afterwards.
+    private var prepareTask: Task<PreparedSpeech, Error>?
+    private var preparedText: String?
 
     /// The avatar's level, straight from the player: the
     /// player owns the samples, so it owns the level.
@@ -104,21 +139,64 @@ final class KokoroSpeechEngine: SpeechEngine {
     var isAvailable: Bool { KokoroRuntime.shared.isReady }
     var isSpeaking: Bool { player.isPlaying || synthTask != nil }
 
+    /// Start synthesizing `text` into the ahead slot (see
+    /// the protocol note). A repeat call for the text already
+    /// lined up is a no-op; a different text replaces the
+    /// slot. Synthesis still passes the runtime's
+    /// one-at-a-time gate, so a lineup never asks the manager
+    /// for two utterances at once — it runs while the
+    /// previous sentence PLAYS, which is the whole point:
+    /// playback used to wait out this exact latency in
+    /// silence between every pair of sentences.
+    func prepare(_ text: String) {
+        lock.lock()
+        if preparedText == text, prepareTask != nil {
+            lock.unlock()
+            return
+        }
+        prepareTask?.cancel()
+        preparedText = text
+        prepareTask = Task {
+            let result = try await KokoroRuntime.shared.synthesize(text)
+            return PreparedSpeech(samples: result.samples, sampleRate: result.sampleRate)
+        }
+        lock.unlock()
+    }
+
     func speak(_ text: String, onFinished: @escaping () -> Void) {
         lock.lock()
         generation += 1
         let gen = generation
         pendingFinish = onFinished
+        // Consume the synthesize-ahead slot when it holds
+        // this exact sentence: its samples are ready, or its
+        // synthesis is still in flight and this task joins it
+        // instead of synthesizing the same words twice.
+        var preparation: Task<PreparedSpeech, Error>?
+        if preparedText == text {
+            preparation = prepareTask
+            prepareTask = nil
+            preparedText = nil
+        }
         lock.unlock()
 
         synthTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let (samples, sampleRate) = try await KokoroRuntime.shared.synthesize(text)
+                let speech: PreparedSpeech
+                if let preparation {
+                    speech = try await preparation.value
+                } else {
+                    let result = try await KokoroRuntime.shared.synthesize(text)
+                    speech = PreparedSpeech(samples: result.samples, sampleRate: result.sampleRate)
+                }
                 guard self.isCurrent(gen) else { return }
-                try self.player.playSamples(samples, sampleRate: sampleRate) { [weak self] in
+                try self.player.playSamples(speech.samples, sampleRate: speech.sampleRate) { [weak self] in
                     self?.finish(gen)
                 }
+                // The sentence is making sound — tell the
+                // session, so it can line up the next one.
+                self.onPlaybackStarted?()
             } catch {
                 // A barge-in cancel is not an engine failure —
                 // never let it mark the runtime broken.
@@ -134,7 +212,11 @@ final class KokoroSpeechEngine: SpeechEngine {
         lock.lock()
         generation += 1
         let gen = generation
+        let stalePreparation = prepareTask
+        prepareTask = nil
+        preparedText = nil
         lock.unlock()
+        stalePreparation?.cancel()
         synthTask?.cancel()
         synthTask = nil
         player.stop()
@@ -174,6 +256,10 @@ final class StudioVoiceEngine: SpeechEngine {
     /// Nothing plays in this build, so there is no level to
     /// report — the avatar's mouth simply stays settled.
     var onLevelChange: ((Float) -> Void)?
+    /// Nothing plays in this build, so no playback ever
+    /// starts and there is nothing to prepare ahead.
+    var onPlaybackStarted: (() -> Void)?
+    func prepare(_ text: String) {}
     func speak(_ text: String, onFinished: @escaping () -> Void) { onFinished() }
     func stopSpeaking() {}
 }

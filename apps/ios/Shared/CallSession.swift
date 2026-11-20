@@ -132,6 +132,18 @@ final class CallSession: NSObject, ObservableObject {
     private var localGenerationDone = true
     private var localCompletedReply: String?
     private var localTurnCounter = 0
+    // Synthesize-ahead lineup (v0.17.1): the Shield verdict
+    // for the sentence at the head of the local queue,
+    // scanned early — while the previous sentence is still
+    // playing — so its synthesis can run ahead of playback
+    // instead of inside the silent gap after it. The pump
+    // consumes the verdict when it pops the sentence: one
+    // scan, one receipt per sentence, always before its
+    // synthesis and speech. A head recorded blocked here is
+    // never prepared; the pump speaks the canned line for
+    // it at pop time, exactly as a pop-time block is handled.
+    private var preparedHeadText: String?
+    private var preparedHeadBlocked = false
     private var speaker: SpeechEngine = SpeechEngineResolver.resolve()
     private var pollTask: Task<Void, Never>?
     private var playbackTask: Task<Void, Never>?
@@ -195,6 +207,15 @@ final class CallSession: NSObject, ObservableObject {
         // frame, and the hearing paths never see it.
         speaker.onLevelChange = { [weak self] level in
             Task { @MainActor in self?.voiceLevel = level }
+        }
+        // Synthesize-ahead (v0.17.1): when a sentence starts
+        // playing, its synthesis is finished and the
+        // synthesizer is idle — line up the next sentence
+        // then, so playback stops starving between sentences.
+        // In Core mode the lineup is a no-op (there is no
+        // local sentence queue; the core's pump is unchanged).
+        speaker.onPlaybackStarted = { [weak self] in
+            Task { @MainActor in self?.prepareNextLocalSentence() }
         }
         speechNotice = nil
         // Kokoro prepares itself: warm-up starts on its own
@@ -574,6 +595,8 @@ final class CallSession: NSObject, ObservableObject {
             localAnswerTask = nil
         }
         localSentenceQueue = [canned]
+        preparedHeadText = nil
+        preparedHeadBlocked = false
         localCompletedReply = canned
         localGenerationDone = true
         startLocalSpeechPump(turnID: turnID)
@@ -595,6 +618,8 @@ final class CallSession: NSObject, ObservableObject {
             transcript: text, replyText: nil, interrupted: false))
         corePhase = "thinking"
         localSentenceQueue = []
+        preparedHeadText = nil
+        preparedHeadBlocked = false
         localCompletedReply = nil
         localGenerationDone = false
         startLocalSpeechPump(turnID: turnID)
@@ -606,6 +631,13 @@ final class CallSession: NSObject, ObservableObject {
                 Task { @MainActor in
                     guard let self, self.localTurnCounter == turnID else { return }
                     self.localSentenceQueue.append(sentence)
+                    // Line the head up the moment it exists
+                    // (v0.17.1): when the pump is between
+                    // sentences this starts the synthesis now
+                    // instead of after the next pop; while a
+                    // sentence plays, the playback-start hook
+                    // owns the lineup and this is a no-op.
+                    self.prepareNextLocalSentence()
                 }
             }
             // Sentence hops were submitted before this one, and
@@ -639,7 +671,23 @@ final class CallSession: NSObject, ObservableObject {
                 // sentence is scanned before the voice speaks
                 // it. A blocked sentence is never spoken; one
                 // canned line per turn says so, in its place.
-                if self.replySentenceBlocked(sentence) {
+                // The verdict normally comes from the
+                // synthesize-ahead lineup (v0.17.1), which
+                // scanned this sentence while the previous one
+                // played; the pop consumes that verdict rather
+                // than scanning twice — one scan, one receipt
+                // per sentence either way. A sentence the
+                // lineup never reached is scanned here, as
+                // before.
+                let sentenceBlocked: Bool
+                if self.preparedHeadText == sentence {
+                    sentenceBlocked = self.preparedHeadBlocked
+                    self.preparedHeadText = nil
+                    self.preparedHeadBlocked = false
+                } else {
+                    sentenceBlocked = self.replySentenceBlocked(sentence)
+                }
+                if sentenceBlocked {
                     if !shieldCannedSpoken {
                         shieldCannedSpoken = true
                         self.corePhase = "speaking"
@@ -675,6 +723,31 @@ final class CallSession: NSObject, ObservableObject {
         }
     }
 
+    /// Line up the sentence at the head of the local queue
+    /// (v0.17.1): scan it and, when it is allowed, start its
+    /// synthesis in the speech engine — while the current
+    /// sentence is still playing, so the next one starts
+    /// speaking the moment this one ends instead of after a
+    /// full synthesis spent in silence. Called when a
+    /// sentence starts playing and when a sentence lands in
+    /// the queue; it only ever touches the immediate head
+    /// (one deep), so playback order is untouched, and a
+    /// blocked head is never synthesized — its recorded
+    /// verdict waits here for the pump to act on at pop time.
+    private func prepareNextLocalSentence() {
+        guard transport == .local, phase == .live else { return }
+        guard let next = localSentenceQueue.first else { return }
+        guard preparedHeadText != next else { return }
+        if replySentenceBlocked(next) {
+            preparedHeadText = next
+            preparedHeadBlocked = true
+            return
+        }
+        preparedHeadText = next
+        preparedHeadBlocked = false
+        speaker.prepare(next)
+    }
+
     /// Shield on the way out (v0.15.7): scan one reply
     /// sentence at the pump, before TTS — a turn-boundary text
     /// scan, milliseconds, never on the audio render path.
@@ -702,6 +775,8 @@ final class CallSession: NSObject, ObservableObject {
         localPumpTask = nil
         localBrain?.stop()
         localSentenceQueue = []
+        preparedHeadText = nil
+        preparedHeadBlocked = false
         localGenerationDone = true
         if let last = turns.indices.last {
             let t = turns[last]
