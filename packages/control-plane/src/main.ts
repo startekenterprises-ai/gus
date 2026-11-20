@@ -1,0 +1,1249 @@
+/**
+ * Control plane entrypoint.
+ *
+ * Env:
+ *   GUS_STATE_DIR     durable state (ledger, jobs, receipts, kill flag)
+ *   GUS_COMM_SOCKET   unix socket path inside the shared comm volume
+ *   GUS_CHANNEL       "fake-file" (Phase 0 harness) | "telegram"
+ *   GUS_FAKE_INBOUND / GUS_FAKE_OUTBOUND   fake transport files
+ *   GUS_TELEGRAM_BOT_TOKEN                 telegram channel credential
+ *   GUS_TELEGRAM_TRANSPORT "botapi" (default when channel=telegram)
+ *   GUS_VAULT_KEY_FILE  host key for the Vault Broker
+ *                       (default: <state>/vault.key, created 0600)
+ *   GUS_EGRESS_POLICY   egress allowlist + injection bindings
+ *                       (default: <state>/egress-policy.json; a missing
+ *                       file is a deny-all policy, by design)
+ *   GUS_POLICY          approval policy file (default:
+ *                       <state>/policy.json; a missing file is the
+ *                       strict built-in policy, by design)
+ *   Governor caps:      <state>/governor.json (re-read per call; a
+ *                       missing file is the conservative default caps)
+ *   Phase 3 (Updater):  GUS_INSTALL_DIR (default /install; the slot
+ *                       pointer there is what makes updates available),
+ *                       GUS_RELEASES_DIR (default <state>/releases —
+ *                       release bundles are read from <dir>/<version>/),
+ *                       GUS_UPDATE_PUBKEY (default <state>/update-pubkey.pem;
+ *                       no pinned key = updates refuse, by design)
+ *
+ * Operator vault admin (never reachable from the sandbox):
+ *   node main.js vault-admin <add <name> <value|->|list|remove <name>>
+ * runs against the state dir and exits before any server starts.
+ * Phase 6 (Gmail pack): node main.js gmail-admin <status|revoke>
+ * likewise; the pack's OAuth credential is the vault secret
+ * "gmail-oauth" (docs/gmail-pack.md), its learned directory is
+ * <state>/gmail-directory.json.
+ */
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { dirname } from "node:path";
+import type { ChannelAdapter } from "@gus/shared";
+import { GUS_VERSION } from "@gus/shared";
+import { LocalReceiptIssuer, ShieldClient, ShieldGate } from "@gus/gate";
+import { VaultBroker } from "@gus/vault";
+import { EgressProxy } from "@gus/egress";
+import {
+  PanelServer,
+  type PanelBackend,
+  type PanelJobData,
+  type PanelVoiceSessionData,
+} from "@gus/panel";
+import type { ContextProfile, JobRecord } from "@gus/shared";
+import { Governor } from "./governor.js";
+import { JobRunner } from "./jobs.js";
+import { CommServer } from "./comm-server.js";
+import { ChannelHost } from "./channel-host.js";
+import { PolicyStore } from "./policy.js";
+import { ApprovalEngine } from "./approvals.js";
+import { Updater } from "./updater.js";
+import { runVaultAdmin } from "./vault-admin.js";
+import { loadProviderConfig, resolveProvider } from "./providers.js";
+import { GmailDirectory, GmailService, HttpGmailTransport, runGmailAdmin } from "./gmail.js";
+import { GitHubPublishService } from "./github.js";
+import { MacService } from "./mac.js";
+import { createMacHostAdapter } from "./mac-native.js";
+import { Onboarding, DIGEST_PROMPT } from "./onboarding.js";
+import { resolveChannelAdapter } from "./channel-setup.js";
+import { BridgeInboxAdapter } from "./bridge-inbox.js";
+import { PanelChatAdapter, PANEL_CHAT_CONVERSATION } from "./panel-chat.js";
+import {
+  VoiceAdapter,
+  VoiceCallService,
+  VoiceSessionService,
+  loadVoiceConfig,
+  probeEndpointDetailed,
+  synthesize,
+  SpeechServiceError,
+  voiceConfigured,
+  writeVoiceConfig,
+  type VoiceSessionStateData,
+} from "@gus/voice";
+import { WatchFrameSource, readWatchTimeline } from "./watch.js";
+import { loadDelegates } from "./delegates.js";
+import {
+  loadGovernorMode,
+  readPermissiveActions,
+  writeGovernorMode,
+} from "./governor-mode.js";
+import {
+  BUDGET_PROFILES,
+  writeBudgetProfile,
+  type BudgetProfile,
+} from "./budget-profile.js";
+import { loadApproverPolicy, writeApproverPolicy } from "./approver-policy.js";
+import { DeviceRegistry } from "./devices.js";
+import { IdentityService } from "./identity.js";
+import { MemoryWriteService } from "./memory-write.js";
+import { resolveEntitlements } from "./entitlements.js";
+import { SkillInstaller } from "./skills.js";
+import { startHeartbeat } from "./heartbeat.js";
+import { startLivenessBeat } from "./liveness.js";
+import {
+  CONTEXT_PROFILES,
+  ContextAssembler,
+  ContextPackStore,
+} from "./context-pack.js";
+import { JsonlLogCache } from "./log-cache.js";
+
+const stateDir = process.env.GUS_STATE_DIR ?? "/state";
+const socketPath = process.env.GUS_COMM_SOCKET ?? "/comm/gus.sock";
+mkdirSync(stateDir, { recursive: true });
+
+const vault = new VaultBroker(
+  `${stateDir}/vault.json`,
+  process.env.GUS_VAULT_KEY_FILE ?? `${stateDir}/vault.key`,
+);
+
+if (process.argv[2] === "vault-admin") {
+  process.exit(runVaultAdmin(process.argv.slice(3), vault));
+}
+
+// Phase 6: the Gmail pack's learned directory (known correspondents +
+// blocked senders). Constructed before the gmail-admin branch so the
+// CLI can report/revoke against the same file the service maintains.
+const gmailDirectory = new GmailDirectory(`${stateDir}/gmail-directory.json`);
+
+if (process.argv[2] === "gmail-admin") {
+  process.exit(runGmailAdmin(process.argv.slice(3), vault, gmailDirectory));
+}
+
+const governor = new Governor(stateDir);
+const receipts = new LocalReceiptIssuer(`${stateDir}/receipt-stub.key`);
+const jobs = new JobRunner(stateDir, receipts);
+
+// Phase 1: the egress proxy — the sandbox's only path outside, executed
+// here in the control plane. The vault is handed to the proxy (injection
+// happens in this process's memory) and to nothing else.
+const egress = new EgressProxy({
+  vault,
+  policyPath: process.env.GUS_EGRESS_POLICY ?? `${stateDir}/egress-policy.json`,
+  logPath: `${stateDir}/egress.jsonl`,
+  receiptsPath: `${stateDir}/egress-receipts.jsonl`,
+  issuer: receipts,
+});
+
+/** The control plane's runtime log: JSON lines in the state dir —
+ *  the same shape the panel-binding and boot-sweep entries below use. */
+function runtimeLog(level: "info" | "warn" | "error", text: string): void {
+  appendFileSync(
+    `${stateDir}/runtime-log.jsonl`,
+    JSON.stringify({ ts: Date.now(), level, text }) + "\n",
+  );
+}
+
+// Channel resolution (channel-setup.ts): telegram WITH a token — env
+// first, the vault's "telegram-bot" secret (stored by the panel's
+// setup wizard) as fallback — is a live TelegramAdapter, exactly as
+// before. Telegram with NO token yet no longer throws: startup
+// continues with an unconfigured stand-in adapter and one loud
+// warning, so the setup panel binds and the first-run wizard can
+// store the token. (The throw crash-looped fresh installs under the
+// Mac app's launchd KeepAlive before the panel ever came up — the
+// panel is the only place the token can be stored, so throwing made
+// onboarding impossible without CLI knowledge.)
+const channelKind = process.env.GUS_CHANNEL ?? "fake-file";
+const adapter: ChannelAdapter = resolveChannelAdapter({
+  channelKind,
+  envToken: process.env.GUS_TELEGRAM_BOT_TOKEN,
+  fakeInbound: process.env.GUS_FAKE_INBOUND,
+  fakeOutbound: process.env.GUS_FAKE_OUTBOUND,
+  readVaultSecret: (name) => vault.withSecret(name, (v) => v),
+  log: runtimeLog,
+}).adapter;
+
+// Phase 2: the Approval Engine + policy store. Policy is re-read from
+// its file on every classification; approval timeouts come from the
+// same file, re-read at creation time. Expiry settles parked jobs via
+// the host (timeout = deny, failed-loudly, receipted).
+const policy = new PolicyStore(process.env.GUS_POLICY ?? `${stateDir}/policy.json`, {
+  gmailDirectoryPath: `${stateDir}/gmail-directory.json`,
+});
+const approvals = new ApprovalEngine(stateDir, () => policy.load().approvalTimeoutMs);
+
+// Phase 4: the Agent-Shield gate (spec §1.7). The API key lives in
+// the vault; before onboarding provisions one, the gate is inert
+// unless policy requires it — then it fails closed and says so. The
+// base URL is config (GUS_SHIELD_BASE_URL) so drills can point the
+// identical wiring at a stand-in when the live API is unreachable.
+const shieldGate = new ShieldGate({
+  client: new ShieldClient({ vault, baseUrl: process.env.GUS_SHIELD_BASE_URL }),
+  policy: () => policy.shieldPolicy(),
+  logPath: `${stateDir}/gate.jsonl`,
+  // v0.4: the Governor mode (governor-mode.ts) — re-read per scan.
+  mode: () => loadGovernorMode(stateDir),
+});
+
+// v0.10 (Memory Slice A): the context pack — the operator's curated
+// memory files under <state>/context/, assembled by the control
+// plane into jobs' primary model calls (context-pack.ts). Seeding
+// creates the templates on first run and NEVER overwrites an
+// operator edit; the assembler screens with the secret-guard and
+// scans through the same Shield gate as every other surface. The
+// pack is reference data, never authority — nothing in this wiring
+// gives it a path to policy, caps, or approvals.
+const contextStore = new ContextPackStore(stateDir);
+contextStore.ensureSeeded();
+const contextAssembler = new ContextAssembler(contextStore, shieldGate);
+// v0.13.0 (Memory Slice B): the write loop over the same store —
+// memory_propose candidates from jobs, the operator's /remember
+// and /forget, and promotion (memory-write.ts, implemented
+// against the MemoryStore interface the store now satisfies).
+// Wired three ways below: the CommServer (the model's tool), the
+// ChannelHost (the operator's commands), and the panel backend
+// (the Memory inbox). Nothing here gives memory a path to
+// policy, caps, or approvals — the pack stays data, and every
+// write path is either the operator's own words or an inert
+// candidate only the operator can promote.
+const memoryWrite = new MemoryWriteService(contextStore);
+
+// Phase 6: the Gmail pack. Executes in this process (like the egress
+// proxy): the OAuth credential stays in the vault, inbound mail is
+// Shield-scanned before it can reach the model, outbound mail passes
+// the secret-guard, and the classifier reads the same directory file
+// this service maintains. Until the operator stores a "gmail-oauth"
+// secret, every pack call fails loudly with the setup pointer.
+const gmail = new GmailService(new HttpGmailTransport(vault), {
+  directory: gmailDirectory,
+  shield: shieldGate,
+  vault,
+});
+
+// Phase 7: the Mac-control pack. Executes in this process (like the
+// Gmail pack): the classifier applies the Nova Always/Once model, the
+// service enforces the fs/shell jail from the policy's mac section,
+// and every executed action verifies its post-condition against the
+// host. Phase 8: the host adapter is the native bridge when the
+// GusMacHost helper is present on this host. The wiring resolves
+// lazily, per call (mac-native.ts): a helper that appears after this
+// process booted is picked up on the next mac_* call, and until one
+// exists the unavailable adapter refuses every mac_* execution
+// plainly and loudly, exactly as before.
+// The host adapter stays reachable as `macHost`: v0.6's Watch
+// view asks it for observations directly (the operator watching
+// is not an agent action — no job, no classification, no caps;
+// the frame is served by the panel and never stored).
+const macHost = createMacHostAdapter();
+const mac = new MacService(macHost, {
+  workDirs: () => policy.load().mac.workDirs,
+  shield: shieldGate,
+  vault,
+});
+
+// v0.9.5 (Step 2): the GitHub publish pack. Executes in this process
+// (like the Gmail and Mac packs): the classifier parks every publish
+// for a one-time approval, and the service uses the vaulted "github"
+// token only inside withSecret callbacks — a shell job cannot reach
+// it (child process; the vault never crosses a process boundary) and
+// the egress proxy cannot carry a binary DMG, so the publish lives
+// here, where the vault callback and the file bytes meet.
+const github = new GitHubPublishService({ vault });
+
+// Phase 10: the Bridge Inbox — file-based delegate ingress (Telegram
+// never delivers bot-to-bot messages, so Nova's requests arrive as
+// files; bridge-inbox.ts). Inert without a `bridge` binding in
+// delegates.json. Its outbound forwards through the primary adapter,
+// and (v0.6) host deliveries route per conversation — for bridge
+// conversations that still means this adapter, whose send forwards
+// to Telegram as before.
+// v0.6: the panel Chat adapter — the panel as a channel, its
+// transcript durable in chat.jsonl (panel-chat.ts).
+const bridge = new BridgeInboxAdapter(stateDir, {
+  sendVia: (msg) => adapter.send(msg),
+});
+const panelChat = new PanelChatAdapter(stateDir);
+// v0.9: the voice channel — "Call GUS". A third channel adapter
+// next to the panel chat, with the same standing: transcripts
+// enter as ordinary inbound messages (secret-guard, Shield
+// ingress scan, classifier, caps, receipts — no bypass), kill and
+// confirm/deny speech acts become the channel's existing /stop,
+// /approve <id> and /deny <id> commands, and the speech services
+// are the operator's own local endpoints (voice.json). The call
+// service's pending-approval lookup is the Approval Engine's own
+// pending list, filtered to this conversation — the park the
+// operator hears read back is the record itself.
+const voiceAdapter = new VoiceAdapter();
+const voiceApprovals = {
+  pendingFor: (conversationId: string) =>
+    approvals.pending().find((r) => r.conversationId === conversationId),
+};
+const voiceService = new VoiceCallService(stateDir, voiceAdapter, voiceApprovals);
+// v0.9.1: the live call — a session service over the SAME
+// adapter and the SAME turn logic (its own VoiceCallService
+// instance internally, so a session turn and a push-to-talk
+// turn are the same code path into the host). Streaming ears
+// (VAD-segmented PCM chunks), a streamed mouth (sentence
+// segments), barge-in, idle/max-length endings, per-turn
+// latency — all inside the voice package; this file only wires.
+const voiceSessions = new VoiceSessionService(stateDir, voiceAdapter, voiceApprovals);
+const watchFrames = new WatchFrameSource(macHost);
+// v0.9.9: the host also gets the voice Shield-scan switch,
+// read live from voice.json on every voice job — off means the
+// host skips the ingress scan for voice turns only
+// (scan-skipped-by-operator, stamped on the turn record); the
+// config's defensive parse defaults it ON.
+const host = new ChannelHost(
+  stateDir,
+  governor,
+  jobs,
+  [adapter, bridge, panelChat, voiceAdapter],
+  approvals,
+  shieldGate,
+  () => loadVoiceConfig(stateDir).shieldScan === false,
+);
+approvals.onExpire = (req) => host.handleApprovalExpired(req);
+const comm = new CommServer(socketPath, governor, jobs, {
+  onRuntimeHello: () => host.onRuntimeHello(),
+  onModelIssued: (jobId, text) => host.onModelIssued(jobId, text),
+  onModelRefused: (jobId, detail) => host.onModelRefused(jobId, detail),
+  noteAuthorizedWrite: (jobId, path, content) => host.noteAuthorizedWrite(jobId, path, content),
+  onApprovalRequested: (req) => host.onApprovalRequested(req),
+  noteApprovedExecution: (jobId, tool, args) => host.noteApprovedExecution(jobId, tool, args),
+  onDenied: (jobId, tool, note) => host.onDenied(jobId, tool, note),
+  onCapExceeded: (jobId, detail) => host.onCapExceeded(jobId, detail),
+  onJobUpdate: (jobId, note) => host.onJobUpdate(jobId, note),
+  onJobFinal: (jobId, text) => host.onJobFinal(jobId, text),
+  onPermissiveAction: (jobId, detail) => host.onPermissiveAction(jobId, detail),
+  logRuntime: (level, text) =>
+    appendFileSync(`${stateDir}/runtime-log.jsonl`, JSON.stringify({ ts: Date.now(), level, text }) + "\n"),
+}, policy, approvals, egress, shieldGate, () => resolveProvider(stateDir, vault), gmail, mac, () => loadGovernorMode(stateDir), () => loadApproverPolicy(stateDir), github, contextAssembler, {
+  // v0.13.0 (Memory Slice B): memory_propose, adapted to the
+  // CommServer's MemoryGate contract. The candidate's origin is
+  // the JOB's recorded origin (never the model's say-so), and the
+  // tool call's Shield receipt — when the gate produced one —
+  // rides into the candidate record, so a proposal carries the
+  // same audit link as every other gated surface.
+  propose: (jobId, args, shieldReceiptId) => {
+    const job = jobs.get(jobId);
+    const r = memoryWrite.propose({
+      jobId,
+      origin: job?.origin ?? "operator",
+      category: typeof args.category === "string" ? args.category : undefined,
+      text: typeof args.text === "string" ? args.text : "",
+      source: typeof args.source === "string" ? args.source : undefined,
+      shieldReceiptId,
+    });
+    return r.ok
+      ? {
+          ok: true,
+          summary:
+            `Candidate recorded (${r.candidate.id}) — pending operator review in the Memory inbox. ` +
+            "It is not memory yet: only the operator can promote it.",
+        }
+      : { ok: false, summary: r.detail };
+  },
+});
+host.attachComm(comm);
+host.bindMemoryCommands(memoryWrite);
+
+// Phase 3: the Updater. Constructed always (its queries power
+// /version), but the pipeline only runs in a slots layout — with no
+// install pointer (the legacy flat containers of Phases 0–2) begin()
+// refuses plainly. Promotion restarts THIS process via requestSelfExit:
+// the slot launcher boots whatever the pointer names.
+const updater = new Updater(
+  stateDir,
+  process.env.GUS_INSTALL_DIR ?? "/install",
+  process.env.GUS_RELEASES_DIR ?? `${stateDir}/releases`,
+  process.env.GUS_UPDATE_PUBKEY ?? `${stateDir}/update-pubkey.pem`,
+  dirname(socketPath),
+  jobs,
+  governor,
+  approvals,
+  policy,
+  comm,
+  egress,
+);
+updater.bindHost({
+  notify: (conversationId, text) => host.notifyOperator(conversationId, text),
+  requestSelfExit: () => {
+    // Give the just-sent notice a beat to land, then exit cleanly;
+    // the launcher starts the pointer's slot.
+    setTimeout(() => process.exit(0), 300);
+  },
+  pushConfirmationJob: (conversationId) => host.runSystemJob(conversationId, "hello — update confirmation check"),
+});
+host.bindUpdateCommands({
+  startUpdate: (conversationId, version) => {
+    const job = jobs.create("update", conversationId, `update to ${version}`);
+    jobs.transition(job.id, "running");
+    return updater.begin(job.id, version, conversationId);
+  },
+  // v0.4: stage the latest APP release for the one-click installer.
+  // Only metadata crosses here — release tag, DMG URL, and the
+  // published sha256 — into pending-update.json; the app downloads
+  // and verifies before it swaps anything.
+  stageUpdate: async () => {
+    const isNewer = (a: string, b: string): boolean => {
+      const pa = a.split(".").map((n) => parseInt(n, 10) || 0);
+      const pb = b.split(".").map((n) => parseInt(n, 10) || 0);
+      for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+        const x = pa[i] ?? 0;
+        const y = pb[i] ?? 0;
+        if (x !== y) return x > y;
+      }
+      return false;
+    };
+    const res = await fetch("https://api.github.com/repos/startekenterprises-ai/gus/releases/latest", {
+      headers: { accept: "application/vnd.github+json", "user-agent": "gus-control-plane" },
+    });
+    if (!res.ok) return `Couldn't reach GitHub releases (HTTP ${res.status}). Nothing staged.`;
+    const rel = (await res.json()) as {
+      tag_name?: string;
+      assets?: { name: string; browser_download_url: string }[];
+    };
+    const version = (rel.tag_name ?? "").replace(/^v/, "");
+    if (!version) return "The latest release has no version tag. Nothing staged.";
+    if (!isNewer(version, GUS_VERSION)) {
+      return `Already current — this GUS is v${GUS_VERSION} and the latest release is v${version}. Nothing staged.`;
+    }
+    const dmg = rel.assets?.find((a) => a.name.endsWith(".dmg"));
+    const shaAsset = rel.assets?.find((a) => a.name.endsWith(".dmg.sha256"));
+    if (!dmg || !shaAsset) return `Release v${version} has no DMG + checksum attached yet. Nothing staged.`;
+    const shaRes = await fetch(shaAsset.browser_download_url);
+    if (!shaRes.ok) return `Couldn't fetch the release checksum (HTTP ${shaRes.status}). Nothing staged.`;
+    const sha256 = (await shaRes.text()).trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+    if (!/^[0-9a-f]{64}$/.test(sha256)) return "The release checksum file didn't contain a sha256. Nothing staged.";
+    writeFileSync(
+      `${stateDir}/pending-update.json`,
+      JSON.stringify(
+        { version, dmgUrl: dmg.browser_download_url, sha256, stagedBy: "control-plane", ts: Date.now() },
+        null,
+        2,
+      ) + "\n",
+    );
+    return (
+      `📦 Update staged: GUS v${version} (this GUS is v${GUS_VERSION}). ` +
+      `Install it from the GUS.app menu — "Install Staged Update" — it downloads, verifies the sha256, swaps, and relaunches. ` +
+      `Vault, policy, jobs and receipts are never touched by an update.`
+    );
+  },
+  versionText: () => {
+    const { pointer, runtimeVersion } = updater.versionInfo();
+    return (
+      `GUS control plane v${GUS_VERSION} · agent runtime v${runtimeVersion ?? "(not connected)"}` +
+      (pointer ? ` · slot ${pointer.slot} live (v${pointer.version})` : " · flat layout (no install slots)")
+    );
+  },
+});
+
+// Phase 4: onboarding service + skill installer + the operator
+// panel. The panel backend delegates EVERYTHING to the engines above
+// — approvals resolve through ChannelHost.resolveApproval (the same
+// hash-bound path as Telegram buttons), the kill switch is the
+// Governor's flag, secrets go vault.add() and are never read back.
+const onboarding = new Onboarding(stateDir, {
+  vault,
+  gate: shieldGate,
+  policy,
+  governor,
+  runFirstJob: () => host.runSystemJob("onboarding", DIGEST_PROMPT, "digest"),
+});
+// v0.13.0 (redo R1): the identity service — ONE GUS identity,
+// minted once into identity.json, with the provider seam on it
+// (identity.ts): no-login local by default, an optional local
+// password, and Google/Apple/SSO as seam stubs in this build.
+// The panel backend below is its only surface.
+const identityService = new IdentityService(stateDir);
+// The device registry (v0.12.0), re-homed in v0.13.0: devices are
+// credentials OF the identity — the registry stamps the identity
+// id on its file and on every record it enrolls — and the
+// pairing-grant flow is deleted (devices.ts; enrollment is a
+// local act now, and the redo's phone app will sign in with the
+// identity itself). The panel backend below is its only surface;
+// the registry file is re-read per authentication, so a
+// revocation lands on the very next request.
+const deviceRegistry = new DeviceRegistry(stateDir, identityService.identity().id);
+const skillInstaller = new SkillInstaller(stateDir);
+
+/** v0.14.0 (R2): the receipt→verify-URL extraction runs once
+ *  per appended gate line through the incremental log cache
+ *  (log-cache.ts); building the Map from the cached pairs is
+ *  pointer work, not a re-parse of the whole gate log — this
+ *  runs on every /api/jobs and /api/chat/history poll. */
+const gateVerifyCache = new JsonlLogCache<{ receiptId: string; verifyUrl: string }>();
+
+function shieldVerifyUrls(): Map<string, string> {
+  const entries = gateVerifyCache.read(`${stateDir}/gate.jsonl`, (raw) => {
+    const r = raw as { receipt?: { receiptId?: string; verifyUrl?: string } };
+    return r?.receipt?.receiptId && r.receipt.verifyUrl
+      ? { receiptId: r.receipt.receiptId, verifyUrl: r.receipt.verifyUrl }
+      : undefined;
+  });
+  const map = new Map<string, string>();
+  for (const e of entries) map.set(e.receiptId, e.verifyUrl);
+  return map;
+}
+
+/** The panel's job read model (shared by /api/jobs and the chat
+ *  history, so the two windows can never disagree about a job). */
+function toPanelJob(j: JobRecord, urls: Map<string, string>): PanelJobData {
+  return {
+    id: j.id,
+    kind: j.kind,
+    state: j.state,
+    createdAt: j.createdAt,
+    updatedAt: j.updatedAt,
+    costUsd: j.costUsd,
+    tokensIn: j.tokensIn,
+    tokensOut: j.tokensOut,
+    outcomeNote: j.outcomeNote,
+    receiptId: j.receiptId,
+    receiptVerifyUrl: j.receiptId?.startsWith("rcpt_")
+      ? (urls.get(j.receiptId) ?? `${shieldGate.client.baseUrl}/v/${j.receiptId}`)
+      : undefined,
+    shieldReceipts: (j.shieldReceiptIds ?? []).map((id) => ({
+      receiptId: id,
+      verifyUrl: urls.get(id),
+    })),
+  };
+}
+
+/** v0.9.1: the voice session state, mapped onto the panel
+ *  contract field for field (turns, latency, and the hearing
+ *  ledger included) — the one place the voice package's shape
+ *  becomes the panel's. */
+function toPanelVoiceSession(s: VoiceSessionStateData): PanelVoiceSessionData {
+  return {
+    ok: s.ok,
+    detail: s.detail,
+    active: s.active,
+    sessionId: s.sessionId,
+    phase: s.phase,
+    startedAt: s.startedAt,
+    elapsedMs: s.elapsedMs,
+    endedReason: s.endedReason,
+    bargeIn: s.bargeIn,
+    sttMode: s.sttMode,
+    ttsMode: s.ttsMode,
+    speechNotice: s.speechNotice,
+    turns: s.turns.map((t) => ({
+      index: t.index,
+      startedAt: t.startedAt,
+      transcript: t.transcript,
+      kind: t.kind,
+      detail: t.detail,
+      replyText: t.replyText,
+      interrupted: t.interrupted,
+      latency: t.latency,
+    })),
+    lastLatency: s.lastLatency,
+    hearing: s.hearing
+      ? {
+          chunksReceived: s.hearing.chunksReceived,
+          lastRms: s.hearing.lastRms,
+          maxRms: s.hearing.maxRms,
+          inUtteranceMs: s.hearing.inUtteranceMs,
+          utterancesCompleted: s.hearing.utterancesCompleted,
+        }
+      : undefined,
+    lastSession: s.lastSession ? toPanelVoiceSession(s.lastSession) : undefined,
+  };
+}
+
+const panelBackend: PanelBackend = {
+  status: () => {
+    const cfg = loadProviderConfig(stateDir);
+    const spend = governor.spendSummary();
+    const sp = policy.shieldPolicy();
+    return {
+      version: GUS_VERSION,
+      edition: resolveEntitlements(stateDir).edition,
+      identityId: identityService.identity().id,
+      identityProvider: identityService.identity().provider,
+      killed: governor.isKilled(),
+      shield: {
+        provisioned: shieldGate.provisioned(),
+        required: sp.required,
+        onUnavailable: sp.onUnavailable,
+        baseUrl: shieldGate.client.baseUrl,
+      },
+      provider: { id: cfg.provider, model: cfg.model },
+      pendingApprovals: approvals.pending().length,
+      spendTodayUsd: spend.todayUsd,
+      spendMonthUsd: spend.monthUsd,
+      settings: (() => {
+        const names = vault.listNames();
+        const keyNameByProvider: Record<string, string> = {
+          gemini: "gemini",
+          openai: "openai",
+          anthropic: "anthropic",
+        };
+        const keyName = keyNameByProvider[cfg.provider];
+        const caps = governor.config();
+        return {
+          providerKey: (keyName
+            ? names.includes(keyName)
+              ? "stored"
+              : "missing"
+            : "not-required") as "stored" | "missing" | "not-required",
+          telegramConfigured: names.includes("telegram-bot"),
+          caps: {
+            maxUsdPerTask: caps.maxUsdPerTask,
+            maxUsdPerDay: caps.maxUsdPerDay,
+            maxUsdPerMonth: caps.maxUsdPerMonth,
+          },
+          delegates: Object.values(loadDelegates(stateDir).conversations).reduce(
+            (n, c) => n + c.delegates.length,
+            0,
+          ),
+          macWorkDirs: policy.load().mac.workDirs.length,
+          approverPolicy: loadApproverPolicy(stateDir),
+          voice: (() => {
+            const vc = loadVoiceConfig(stateDir);
+            return { enabled: vc.enabled, configured: voiceConfigured(vc) };
+          })(),
+        };
+      })(),
+      governorMode: loadGovernorMode(stateDir),
+      budgetProfile: governor.budgetProfile(),
+      permissiveToday: (() => {
+        const dayStart = new Date();
+        dayStart.setHours(0, 0, 0, 0);
+        const all = readPermissiveActions(stateDir, dayStart.getTime());
+        return {
+          count: all.length,
+          recent: all.slice(-8).reverse().map((a) => ({ ts: a.ts, kind: a.kind, detail: a.detail })),
+        };
+      })(),
+    };
+  },
+  ledger: () => ({
+    entries: governor.recentEntries(200) as unknown as Record<string, unknown>[],
+    audit: governor.audit(),
+    summary: { ...governor.spendSummary(), caps: governor.config() as unknown as Record<string, unknown> },
+  }),
+  jobs: () => {
+    const urls = shieldVerifyUrls();
+    return jobs.list(50).map((j) => toPanelJob(j, urls));
+  },
+  approvals: () =>
+    approvals.pending().map((r) => ({
+      id: r.id,
+      jobId: r.jobId,
+      summary: r.summary,
+      reason: r.reason,
+      createdAt: r.createdAt,
+      expiresAt: r.expiresAt,
+    })),
+  // v0.7: the desktop sidebar's history — resolved records from the
+  // same engine, newest first. Read-only; nothing here can resolve,
+  // widen, or rebind (resolution stays resolveApproval above).
+  approvalsHistory: () =>
+    approvals.recentResolved(25).map((r) => ({
+      id: r.id,
+      jobId: r.jobId,
+      summary: r.summary,
+      reason: r.reason,
+      status: r.status,
+      createdAt: r.createdAt,
+      resolvedAt: r.resolvedAt,
+      resolvedBy: r.resolvedBy,
+    })),
+  resolveApproval: async (id, approve) => {
+    const req = approvals.get(id);
+    if (!req || req.status !== "pending") {
+      return { ok: false, detail: `Approval ${id} is not pending. Nothing was executed.` };
+    }
+    await host.resolveApproval(adapter.name, req.conversationId, id, approve, "panel");
+    const after = approvals.get(id);
+    return after && after.status !== "pending"
+      ? { ok: true, detail: approve ? "Approved — executing exactly that." : "Denied. Nothing ran." }
+      : { ok: false, detail: "The approval could not be resolved (kill switch on, or it just expired). Nothing was executed." };
+  },
+  setGovernorMode: async (mode) => {
+    if (mode !== "enforcing" && mode !== "permissive") {
+      return { ok: false, detail: `Unknown mode "${mode}" — expected "enforcing" or "permissive". Nothing changed.` };
+    }
+    writeGovernorMode(stateDir, mode, "panel");
+    return {
+      ok: true,
+      detail:
+        mode === "permissive"
+          ? "Governor mode: PERMISSIVE — blocks and parks are recorded, not enforced. Caps, kill switch, and scanning unchanged."
+          : "Governor mode: ENFORCING — Shield verdicts and approval parks bind.",
+    };
+  },
+  setBudgetProfile: async (profile) => {
+    if (!BUDGET_PROFILES.includes(profile as BudgetProfile)) {
+      return { ok: false, detail: `Unknown budget profile "${profile}" — expected one of ${BUDGET_PROFILES.join(", ")}. Nothing changed.` };
+    }
+    writeBudgetProfile(stateDir, profile as BudgetProfile, "panel");
+    const detail: Record<BudgetProfile, string> = {
+      standard: "Budget profile: STANDARD — the configured caps apply exactly.",
+      generous: "Budget profile: GENEROUS — every cap is 10× the configured base. Accounting and receipts unchanged.",
+      max: "Budget profile: MAX — every cap is 100× the configured base. Accounting and receipts unchanged.",
+      unlimited: "Budget profile: UNLIMITED — budget enforcement is off; approvals and the kill switch still bind, and every call is still counted and receipted.",
+    };
+    return { ok: true, detail: detail[profile as BudgetProfile] };
+  },
+  setApproverPolicy: async (p) => {
+    if (p.scope !== "bounded" && p.scope !== "all_except_floors") {
+      return { ok: false, detail: `Unknown delegation scope "${String(p.scope)}" — expected "bounded" or "all_except_floors". Nothing changed.` };
+    }
+    if (
+      typeof p.maxApprovalsPerHour !== "number" ||
+      !Number.isFinite(p.maxApprovalsPerHour) ||
+      p.maxApprovalsPerHour < 0 ||
+      p.maxApprovalsPerHour > 1000
+    ) {
+      return { ok: false, detail: "Max agent approvals per hour must be a number from 0 to 1000. Nothing changed." };
+    }
+    writeApproverPolicy(
+      stateDir,
+      {
+        gusApprovesDelegates: p.gusApprovesDelegates === true,
+        gusApprovesOwn: p.gusApprovesOwn === true,
+        delegatesMayApprove: p.delegatesMayApprove === true,
+        scope: p.scope,
+        maxApprovalsPerHour: Math.floor(p.maxApprovalsPerHour),
+      },
+      "panel",
+    );
+    const anyOn = p.gusApprovesDelegates || p.gusApprovesOwn || p.delegatesMayApprove;
+    return {
+      ok: true,
+      detail: anyOn
+        ? "Approval delegation saved. It applies only while the Governor is PERMISSIVE — in Enforcing, approvals stay with the operator. Floors (vault, deletes, installs, sends, git push, sudo-class shell, keychain) are never delegable."
+        : "Approval delegation saved — all paths off. Parks are the operator's (and in Permissive they proceed stamped, as before).",
+    };
+  },
+  // v0.8: the Shield gate's policy write for the desktop Settings
+  // window — required + fail mode into the operator's policy file
+  // (PolicyStore.writeShield, the same write the onboarding shield
+  // step performs after provisioning). No provisioning here, no
+  // endpoint change: the base URL is launch configuration
+  // (GUS_SHIELD_BASE_URL), and the settings UI says so.
+  setShieldPolicy: async (p) => {
+    if (p.onUnavailable !== "open" && p.onUnavailable !== "closed") {
+      return { ok: false, detail: `Unknown fail mode "${p.onUnavailable}" — expected "open" or "closed". Nothing changed.` };
+    }
+    policy.writeShield({ required: p.required === true, onUnavailable: p.onUnavailable });
+    return {
+      ok: true,
+      detail: p.required
+        ? `Agent-Shield gate is REQUIRED, fail-${p.onUnavailable}: ` +
+          (p.onUnavailable === "closed"
+            ? "if the Shield can't be reached, messages and actions are blocked."
+            : "if the Shield can't be reached, things proceed unscanned, flagged, with no receipt.")
+        : "Agent-Shield gate is NOT required — content reaches the model unscanned. Every other control (approvals, caps, receipts for what does run) is unchanged.",
+    };
+  },
+  // v0.8: the settings detail for the desktop Settings window —
+  // the Mac jail's contents and the named delegates, read from the
+  // same operator files the classifier and the bridge read. No
+  // write path: editing stays a file action in this release.
+  settingsDetail: () => {
+    const mac = policy.load().mac;
+    const cfg = loadDelegates(stateDir);
+    return {
+      macWorkDirs: mac.workDirs,
+      macShellAllowlist: mac.shellAllowlist,
+      delegates: Object.entries(cfg.conversations).map(([conversationId, c]) => ({
+        conversationId,
+        operatorId: c.operatorId,
+        delegates: c.delegates.map((d) => ({ name: d.name, senderId: d.senderId })),
+      })),
+      bridge: cfg.bridge,
+    };
+  },
+  setKilled: async (on) => {
+    if (on) {
+      const { settled } = host.killAll("panel");
+      return { ok: true, detail: `Kill switch ON — GUS is stopped. ${settled} unsettled job(s) settled failed-loudly.` };
+    }
+    host.resumeAll("panel");
+    return { ok: true, detail: "Kill switch OFF — GUS is live." };
+  },
+  vaultNames: () => vault.listNames(),
+  storeSecret: (name, value) => {
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)) {
+      return { ok: false, detail: "Secret names are lowercase letters, digits, dashes and underscores (max 64 chars)." };
+    }
+    if (!value) return { ok: false, detail: "The value is empty — nothing was stored." };
+    try {
+      vault.add(name, value);
+      return { ok: true, detail: `Stored "${name}" in the vault. The value is never shown again, anywhere.` };
+    } catch (e) {
+      return { ok: false, detail: `Could not store: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  },
+  onboarding: () => onboarding.view(),
+  onboardingShield: (payload) => onboarding.shield(payload.onUnavailable),
+  onboardingTelegram: async (payload) => onboarding.telegram(payload.token),
+  onboardingProvider: async (payload) => onboarding.provider(payload),
+  onboardingCaps: async (payload) => onboarding.caps(payload),
+  onboardingFirstJob: async () => onboarding.firstJob(),
+  skills: () => skillInstaller.listInstalled(),
+  installSkill: async (payload) => skillInstaller.install(payload.path ?? ""),
+  // v0.10 (Memory Slice A): the Memory card's backend — the context
+  // pack's status (files, pending candidates, warnings; hashes and
+  // sizes only) and a per-profile preview of the exact pack a job
+  // would receive. v0.13.0 (Slice B) adds the write loop directly
+  // below (memoryCandidates/promote/reject/remember/forget).
+  memoryStatus: () => {
+    const s = contextStore.status();
+    return {
+      enabled: s.enabled,
+      files: s.files,
+      pendingCandidates: s.pendingCandidates,
+      quarantinedSections: s.quarantinedSections,
+      warnings: s.warnings,
+      lastEventTs: s.lastEventTs,
+      config: {
+        maxPackChars: s.config.maxPackChars,
+        maxDigestChars: s.config.maxDigestChars,
+      },
+    };
+  },
+  memoryPreview: async (profile) => {
+    const p: ContextProfile = (CONTEXT_PROFILES as readonly string[]).includes(profile)
+      ? (profile as ContextProfile)
+      : "operator-full";
+    const r = await contextAssembler.preview(p);
+    return {
+      ok: r.ok,
+      detail: r.detail,
+      text: r.text,
+      manifest: r.manifest
+        ? {
+            profile: r.manifest.profile,
+            digest: r.manifest.digest,
+            sections: r.manifest.sections,
+            estTokens: r.manifest.estTokens,
+            scanReceiptIds: r.manifest.scanReceiptIds,
+            assembledAt: r.manifest.assembledAt,
+          }
+        : undefined,
+    };
+  },
+  // v0.13.0 (Memory Slice B): the Memory inbox + the panel twins
+  // of /remember and /forget — the SAME MemoryWriteService the
+  // channel commands use, so the semantics (screening, dated
+  // [operator] bullets, count-confirmed forgetting) cannot drift
+  // between surfaces.
+  memoryCandidates: () => memoryWrite.listCandidates(),
+  promoteCandidate: (id, text, targetFile) => {
+    const r = memoryWrite.promote(id, { text, targetFile });
+    return { ok: r.ok, detail: r.detail, identityCategory: r.identityCategory };
+  },
+  rejectCandidate: (id) => memoryWrite.reject(id),
+  memoryRemember: (text, target) => {
+    if (target !== "MEMORY.md" && target !== "OPERATOR.md") {
+      return {
+        ok: false,
+        detail: `Unknown memory target "${target}" — the panel writes to MEMORY.md or OPERATOR.md (preferences). Nothing was remembered.`,
+      };
+    }
+    return memoryWrite.remember(text, target);
+  },
+  memoryForget: (query, confirmCount) => {
+    if (confirmCount === undefined) {
+      const { matches } = memoryWrite.forgetSearch(query);
+      return {
+        ok: true,
+        detail:
+          matches.length === 0
+            ? `Nothing in memory matches "${query}".`
+            : `${matches.length} match(es) for "${query}" — confirm with the count to remove exactly these.`,
+        matches,
+      };
+    }
+    return memoryWrite.forgetApply(query, confirmCount);
+  },
+  // v0.12.0 (pivot Phase 1 / iPhone Step 1): devices +
+  // entitlements. v0.13.0 (redo R1): the pairing-grant/exchange
+  // methods are DELETED with the flow itself — devices are
+  // credentials of the identity now (enrolled locally, never by
+  // a remote grant), and the identity readout + its local
+  // settings join the surface. Revocation is the registry's own
+  // decision and lands on the very next request.
+  devices: () => deviceRegistry.list(),
+  revokeDevice: (id) => {
+    const found = deviceRegistry.list().find((d) => d.id === id);
+    if (!found) return { ok: false, detail: "No device with that id in the registry. Nothing was revoked." };
+    if (found.revoked) return { ok: false, detail: `${found.name} is already revoked. Nothing changed.` };
+    deviceRegistry.revoke(id);
+    return {
+      ok: true,
+      detail: `Revoked — ${found.name}'s credential stops working immediately. The record stays in the registry.`,
+    };
+  },
+  identity: () => {
+    const rec = identityService.identity();
+    return {
+      id: rec.id,
+      createdAt: rec.createdAt,
+      displayName: rec.displayName,
+      provider: rec.provider,
+      providers: identityService.providers(),
+    };
+  },
+  setIdentityPassword: (username, password) => identityService.setPassword(username, password),
+  setIdentityProvider: (kind) => {
+    const kinds = ["local", "local-password", "google", "apple", "sso"];
+    if (!kinds.includes(kind)) {
+      return { ok: false, detail: `Unknown identity provider "${kind}" — expected one of ${kinds.join(", ")}. Nothing changed.` };
+    }
+    return identityService.setActiveProvider(kind as "local" | "local-password" | "google" | "apple" | "sso");
+  },
+  // v0.14.5: the launch gate's surface — session status for
+  // the app's gate derivation, sign-in through the active
+  // provider, sign-out, and the first-run welcome marker.
+  identitySession: () => {
+    const s = identityService.sessionStatus();
+    return {
+      welcomedAt: s.welcomedAt,
+      provider: s.provider,
+      signedIn: s.session !== null,
+      ...(s.session ? { session: s.session } : {}),
+      launchGateEnabled: s.launchGateEnabled,
+    };
+  },
+  identityLogin: (username, password) => identityService.signIn({ username, password }),
+  identityLogout: () => identityService.signOut(),
+  identityWelcome: () => {
+    const rec = identityService.markWelcomed();
+    return { ok: true, detail: "First-run welcome recorded — the login screen won't show at launch again.", welcomedAt: rec.welcomedAt };
+  },
+  identityLaunchGate: (enabled) => {
+    identityService.setLaunchGateEnabled(enabled);
+    return {
+      ok: true,
+      detail: enabled
+        ? "Launch gate ON — the login screen applies at launch."
+        : "Launch gate OFF — the app opens straight in (auto-login). Your password, if set, is unchanged and the gate can be turned back on anytime.",
+    };
+  },
+  entitlements: () => {
+    const c = resolveEntitlements(stateDir);
+    return { edition: c.edition, features: c.features, expiresAt: c.expiresAt, keyId: c.keyId };
+  },
+  // v0.6: the Chat view — submission is the chat adapter emitting
+  // the ordinary channel event; history is the adapter's durable
+  // transcript plus this conversation's jobs from the same store
+  // /api/jobs reads.
+  submitChat: async (text) => panelChat.submit(text),
+  chatHistory: () => {
+    const urls = shieldVerifyUrls();
+    return {
+      conversationId: PANEL_CHAT_CONVERSATION,
+      messages: panelChat.history(),
+      jobs: jobs
+        .list(200)
+        .filter((j) => j.conversationId === PANEL_CHAT_CONVERSATION)
+        .reverse()
+        .map((j) => toPanelJob(j, urls)),
+    };
+  },
+  // v0.6: the Watch view — one on-demand observation of the Mac
+  // bridge per ask, throttled to ~1 fps inside WatchFrameSource
+  // (watch.ts). The frame is served by the panel and never
+  // written to disk; the model never sees it.
+  watchFrame: () => watchFrames.frame(),
+  watchTimeline: () => readWatchTimeline(stateDir, 60),
+  // v0.9: the voice channel — settings read/write on voice.json
+  // (the call service re-reads per call, so a save is live on the
+  // next call), and the push-to-talk exchange itself, delegated
+  // whole to the call service over the voice adapter. The backend
+  // adds no path: no transcript is minted here, no approval is
+  // resolved here — those happen inside the ChannelHost, reached
+  // through the adapter like every other channel's business.
+  voiceSettings: () => loadVoiceConfig(stateDir),
+  setVoiceSettings: async (s) => {
+    writeVoiceConfig(
+      stateDir,
+      {
+        enabled: s.enabled === true,
+        // v0.9.6: a save that doesn't mention an engine keeps the
+        // value on file, the bargeIn rule — the web panel doesn't
+        // send engines, and its saves must not silently flip a
+        // call back to built-in (or to an endpoint).
+        sttEngine:
+          s.sttEngine === "endpoint" || s.sttEngine === "local"
+            ? s.sttEngine
+            : loadVoiceConfig(stateDir).sttEngine,
+        sttBaseUrl: s.sttBaseUrl,
+        sttModel: s.sttModel,
+        ttsEngine:
+          s.ttsEngine === "endpoint" || s.ttsEngine === "local"
+            ? s.ttsEngine
+            : loadVoiceConfig(stateDir).ttsEngine,
+        ttsBaseUrl: s.ttsBaseUrl,
+        ttsModel: s.ttsModel,
+        ttsVoice: s.ttsVoice,
+        // v0.15.6: the enginesChosen marker — a save whose body
+        // actually carries engine values came from a surface
+        // presenting the pickers (the Mac app always sends both),
+        // so the stored engines become the operator's explicit
+        // choice and a picked "local" sticks. A save without
+        // engines (the web panel) preserves the marker on file,
+        // the same preserve-on-omit rule as the engines
+        // themselves.
+        enginesChosen:
+          s.sttEngine === "endpoint" ||
+          s.sttEngine === "local" ||
+          s.ttsEngine === "endpoint" ||
+          s.ttsEngine === "local"
+            ? true
+            : loadVoiceConfig(stateDir).enginesChosen === true,
+        // v0.9.1: a save that doesn't mention barge-in keeps the
+        // value on file rather than resetting it to the default.
+        bargeIn: typeof s.bargeIn === "boolean" ? s.bargeIn : loadVoiceConfig(stateDir).bargeIn,
+        // v0.9.9: same preserve-on-omit rule for the Shield-scan
+        // switch — a surface that doesn't send it must not
+        // silently re-enable (or disable) the scan.
+        shieldScan: typeof s.shieldScan === "boolean" ? s.shieldScan : loadVoiceConfig(stateDir).shieldScan,
+      },
+      "panel",
+    );
+    const saved = loadVoiceConfig(stateDir);
+    const ears =
+      saved.sttEngine === "local"
+        ? "transcription: built into the app"
+        : `transcription: ${saved.sttModel} at ${saved.sttBaseUrl}`;
+    const mouth =
+      saved.ttsEngine === "local"
+        ? "speech: built into the app"
+        : `speech: ${saved.ttsModel} (${saved.ttsVoice}) at ${saved.ttsBaseUrl}`;
+    // v0.9.9: the scan sentence follows the switch — the save
+    // confirmation must not claim a scan the operator just
+    // turned off, and must say plainly what off means.
+    // v0.9.10: the ON sentence names the fast scan — spoken
+    // turns get the Shield's deterministic fast mode, not the
+    // full semantic review typed messages get, and the note
+    // must not imply otherwise.
+    const scanNote = saved.shieldScan
+      ? "Spoken transcripts get the fast Shield scan (deterministic patterns; the full semantic review still guards typed messages), capped and receipted like typed messages"
+      : "Voice Shield scan is OFF: spoken turns become jobs WITHOUT the ingress scan (each skip is recorded in voice-turns.jsonl); caps, approvals, and receipts still apply";
+    return {
+      ok: true,
+      detail: saved.enabled
+        ? `Voice is ON — ${ears}; ${mouth}. Live on the next call. ${scanNote}; approvals by voice need an exact "confirm" or "yes, do it".`
+        : "Voice is OFF — the call endpoint will refuse until you enable it here. Settings saved.",
+    };
+  },
+  // v0.9.9: Test Connection — the detailed probe against the
+  // values the Settings form is showing, unsaved. Nothing is
+  // read from voice.json and nothing is written: the form's
+  // URL + model in, the probe's full answer out, with the
+  // one-sentence version composed here in plain language.
+  voiceTestConnection: async (kind, baseUrl, model) => {
+    const url = baseUrl.trim().replace(/\/+$/, "");
+    if (!/^https?:\/\/\S+$/.test(url)) {
+      return {
+        ok: false,
+        reachable: false,
+        latencyMs: 0,
+        models: [],
+        modelPresent: null,
+        detail: `That doesn't look like an endpoint URL — nothing was tested. Endpoints look like http://127.0.0.1:8000/v1.`,
+      };
+    }
+    const probe = await probeEndpointDetailed(fetch, url, model.trim() || undefined, 5_000);
+    const what = kind === "tts" ? "speech (TTS)" : "transcription (STT)";
+    if (!probe.reachable) {
+      return {
+        ok: false,
+        reachable: false,
+        latencyMs: probe.latencyMs,
+        models: [],
+        modelPresent: null,
+        detail: `Not reachable — the ${what} endpoint at ${url} didn't answer within 5 seconds. Check the service is running and the URL is right; nothing was saved or changed.`,
+      };
+    }
+    if (probe.modelPresent === true) {
+      return {
+        ok: true,
+        reachable: true,
+        latencyMs: probe.latencyMs,
+        models: probe.models,
+        modelPresent: true,
+        detail: `Reachable in ${probe.latencyMs} ms — and "${model.trim()}" is in its model list. This ${what} endpoint should work.`,
+      };
+    }
+    if (probe.modelPresent === false) {
+      const listed = probe.models.length > 0 ? probe.models.slice(0, 8).join(", ") : "(none)";
+      return {
+        ok: true,
+        reachable: true,
+        latencyMs: probe.latencyMs,
+        models: probe.models,
+        modelPresent: false,
+        detail: `Reachable in ${probe.latencyMs} ms, but "${model.trim()}" is NOT in its model list — it offers: ${listed}. Fix the model name before you save.`,
+      };
+    }
+    return {
+      ok: true,
+      reachable: true,
+      latencyMs: probe.latencyMs,
+      models: probe.models,
+      modelPresent: null,
+      detail: `Reachable in ${probe.latencyMs} ms. It answered, but not with a readable model list, so the model name couldn't be checked — the endpoint is up; the model is unverified.`,
+    };
+  },
+  // v0.9.9: Test mic and speaker, endpoint half — synthesize
+  // the test sentence with the form's current (unsaved) TTS
+  // values and hand the audio back for playback. A failure is
+  // the service's own error text, never a silent no-op.
+  voiceTestSpeech: async (baseUrl, model, voice) => {
+    const url = baseUrl.trim().replace(/\/+$/, "");
+    if (!/^https?:\/\/\S+$/.test(url)) {
+      return { ok: false, detail: "That doesn't look like an endpoint URL — nothing was synthesized." };
+    }
+    try {
+      const { audio, contentType } = await synthesize(
+        fetch,
+        { baseUrl: url, model: model.trim() || "kokoro", voice: voice.trim() || "af_heart" },
+        "This is the GUS speaker test. If you can hear me, your speech endpoint works.",
+      );
+      return {
+        ok: true,
+        detail: "Synthesized by the endpoint — playing it now.",
+        audioBase64: Buffer.from(audio).toString("base64"),
+        audioContentType: contentType,
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        detail: e instanceof SpeechServiceError ? e.message : `Speech synthesis failed: ${String(e)}`,
+      };
+    }
+  },
+  voiceCall: async (audio, contentType) => {
+    const result = await voiceService.handleAudio(audio, contentType);
+    return {
+      ok: result.ok,
+      kind: result.kind,
+      detail: result.detail,
+      transcript: result.transcript,
+      replyText: result.replyText,
+      audioBase64: result.audioBase64,
+      audioContentType: result.audioContentType,
+    };
+  },
+  // v0.9.1: the live call, delegated whole to the session
+  // service. The state crosses field for field (the voice
+  // package's state shape IS the panel contract, mapped here so
+  // the packages stay decoupled); audio in/out and the
+  // interrupt are the service's own results, passed through.
+  voiceSessionStart: async () => toPanelVoiceSession(await voiceSessions.start()),
+  voiceSessionAudio: (sessionId, audio) => voiceSessions.pushAudio(sessionId, audio),
+  voiceSessionTranscript: (sessionId, text) => voiceSessions.submitTranscript(sessionId, text),
+  voiceSessionState: (sessionId) => toPanelVoiceSession(voiceSessions.state(sessionId)),
+  voiceSessionNextAudio: (sessionId, afterSeq) => voiceSessions.nextAudio(sessionId, afterSeq),
+  voiceSessionInterrupt: (sessionId) => voiceSessions.interrupt(sessionId),
+  voiceSessionEnd: (sessionId) => toPanelVoiceSession(voiceSessions.end(sessionId)),
+};
+
+// The operator token: a 0600 file in control-plane state, minted on
+// first boot. The value is never printed — the operator opens the
+// panel with the token file (or an SSH-tunneled ?t= link made from it).
+const panelTokenPath = `${stateDir}/panel-token`;
+let panelToken = "";
+try {
+  if (existsSync(panelTokenPath)) panelToken = readFileSync(panelTokenPath, "utf8").trim();
+} catch { /* fall through to minting */ }
+if (!panelToken) {
+  panelToken = randomBytes(24).toString("hex");
+  writeFileSync(panelTokenPath, panelToken + "\n", { mode: 0o600 });
+}
+const panelPort = Number(process.env.GUS_PANEL_PORT ?? "8731") || 8731;
+const panel = new PanelServer(panelBackend, {
+  token: panelToken,
+  host: process.env.GUS_PANEL_HOST ?? "127.0.0.1",
+  port: panelPort,
+  // v0.12.0: paired-device credentials authenticate through the
+  // registry (re-read per call — revocation is immediate). The
+  // server confines them to the companion's surface.
+  deviceAuth: (credential) => deviceRegistry.authenticate(credential) !== null,
+  onError: (e) =>
+    appendFileSync(
+      `${stateDir}/runtime-log.jsonl`,
+      JSON.stringify({ ts: Date.now(), level: "warn", text: `panel could not bind: ${e.message} (control plane continues without it)` }) + "\n",
+    ),
+});
+await panel.start();
+appendFileSync(
+  `${stateDir}/runtime-log.jsonl`,
+  JSON.stringify({
+    ts: Date.now(),
+    level: "info",
+    text: `panel listening on ${process.env.GUS_PANEL_HOST ?? "127.0.0.1"}:${panel.port ?? panelPort} (operator token: ${panelTokenPath})`,
+  }) + "\n",
+);
+
+await comm.start();
+await host.start();
+// Phase 5: the Job Runner boot sweep. Jobs a previous incarnation left
+// queued/running have no driver in this one — settle them failed-loudly
+// with receipts instead of leaving them hanging (spec §1.5: no silent
+// failure). Update jobs are swept too UNLESS an update record is still
+// in flight: promotion works by exiting this process, so a live record
+// means bootReconcile (below) owns that job and settles it from the
+// record — confirmed, rolled back, or aborted.
+const updRec = updater.readRecord();
+const updateInFlight =
+  updRec !== null &&
+  ["waiting-idle", "verifying", "staging", "canary", "promoting"].includes(updRec.status);
+const swept = jobs.sweepOrphanedJobs({ includeUpdateJobs: !updateInFlight });
+for (const rec of swept) {
+  appendFileSync(
+    `${stateDir}/runtime-log.jsonl`,
+    JSON.stringify({
+      ts: Date.now(),
+      level: "warn",
+      text: `boot sweep: job ${rec.id} (${rec.kind}) left unsettled by a previous incarnation — settled failed-loudly, receipt ${rec.receiptId}`,
+    }) + "\n",
+  );
+  void host
+    .notifyOperator(
+      rec.conversationId,
+      `⚠️ GUS restarted and a job didn't survive it: the ${rec.kind} job from ${new Date(rec.createdAt).toLocaleString()} was settled as FAILED with a receipt (id ${rec.receiptId ?? "—"}) rather than left hanging. Nothing from it ran after the restart.`,
+    )
+    .catch(() => {});
+}
+// Settle anything a previous incarnation left in flight — above all a
+// promotion this process was booted to confirm (updater.ts).
+void updater.bootReconcile(GUS_VERSION);
+// Spec §5 kill-criteria instrumentation: the anonymous install
+// heartbeat. OFF unless the operator opted in (GUS_HEARTBEAT=1 with a
+// counter URL); the payload is { version, mode } and nothing else.
+startHeartbeat();
+// GUS-lead / Nova-fallback design (2026-11-16) Phase 0: the local
+// liveness beat — <state>/liveness.json rewritten every 15 minutes so
+// Nova's watchdog can tell whether this GUS can take a job now. $0:
+// control-plane instrumentation only, no model call, no cap spend.
+startLivenessBeat(stateDir, {
+  governorMode: () => loadGovernorMode(stateDir),
+  budgetProfile: () => governor.budgetProfile(),
+  daySpentUsd: () => governor.spendSummary().todayUsd,
+  dayCapUsd: () => governor.effectiveConfig().maxUsdPerDay ?? null,
+  jobs: () => jobs.list(1000),
+});
+appendFileSync(
+  `${stateDir}/runtime-log.jsonl`,
+  JSON.stringify({ ts: Date.now(), level: "info", text: `control plane up; channel=${adapter.name} transport=${channelKind} killed=${governor.isKilled()}` }) + "\n",
+);
+console.log(`gus control plane up (channel=${channelKind}, killed=${governor.isKilled()})`);
+
+process.on("SIGTERM", () => process.exit(0));
+process.on("SIGINT", () => process.exit(0));

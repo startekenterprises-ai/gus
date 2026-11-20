@@ -1,0 +1,1 @@
+{"dependencies":{"@gus/shared":"0.0.1"},"exports":{".":{"default":"./dist/index.js","types":"./dist/index.d.ts"}},"license":"Apache-2.0","name":"@gus/voice","private":true,"type":"module","version":"0.0.1"}
