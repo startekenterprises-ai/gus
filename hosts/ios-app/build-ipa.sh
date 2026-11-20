@@ -17,7 +17,13 @@
 #      the project's ExportOptions.plist (method release-testing:
 #      an ad-hoc build for the operator's registered devices —
 #      NOT an App Store / TestFlight upload).
-#   4. Emits the deterministic pair the publish tool requires —
+#   4. Verifies the loose app icon actually rode along in the
+#      exported .ipa (v0.17.0) — the file present at the bundle
+#      root, a plausible size for the photographic art, and the
+#      CFBundleIconFiles wiring in the bundled Info.plist —
+#      failing loudly otherwise. A placeholder icon never
+#      ships silently again.
+#   5. Emits the deterministic pair the publish tool requires —
 #      <project>/dist/GUS-<version>.ipa and its .sha256 sibling —
 #      ready for github_publish_release {tag, ipaPath, shaPath}.
 #
@@ -80,15 +86,38 @@ trap 'rm -rf "$WORK"' EXIT
 ARCHIVE="$WORK/$SCHEME.xcarchive"
 EXPORT_DIR="$WORK/export"
 
-# --- 1.5 app icon (v0.14.5) -------------------------------------------
+# --- 1.5 app icon (v0.14.5; loose files since v0.17.0) ------------------
 # The icon master rides the repo as base64 text (the push path is
-# text-only — the same pattern as the Mac app's .b64 assets);
-# decode it into the appiconset the asset catalog compiles. The
-# decoded PNG is a build artifact (gitignored), never a source.
+# text-only — the same pattern as the Mac app's .b64 assets).
+# Decode it once, here. The asset catalog still gets its
+# AppIcon-1024.png (its Contents.json names the file and actool
+# fails without it, and the Avatar imageset needs the catalog),
+# but the icon the PHONE renders no longer comes from the
+# catalog: the catalog-compiled icon shipped as the system
+# placeholder on the operator's phone even though the master,
+# the Info.plist CFBundleIconName, and the rendition names all
+# checked out (v0.16.3 — the root cause inside actool was not
+# worth more time). Instead the app ships loose icon PNGs, the
+# classic pre-catalog wiring and the same shape as the Mac's
+# .icns path: App/Info.plist names them in CFBundleIconFiles,
+# the synchronized App group copies them to the bundle root,
+# and section 4 below verifies they landed in the .ipa.
+# Every decoded/generated PNG is a build artifact (gitignored),
+# never a source.
 ICON_B64="$PROJECT_DIR/App/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png.b64"
 if [ -f "$ICON_B64" ]; then
-  base64 -d < "$ICON_B64" > "$PROJECT_DIR/App/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png" \
+  ICON_MASTER="$WORK/icon-1024.png"
+  base64 -d < "$ICON_B64" > "$ICON_MASTER" \
     || fail "decoding the app icon from $ICON_B64 failed."
+  cp "$ICON_MASTER" "$PROJECT_DIR/App/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png" \
+    || fail "staging the catalog icon from the decoded master failed."
+  for spec in "180:AppIcon60x60@3x.png" "120:AppIcon60x60@2x.png" "167:AppIcon83.5x83.5@2x.png" "152:AppIcon76x76@2x.png"; do
+    px="${spec%%:*}"; name="${spec##*:}"
+    sips -z "$px" "$px" "$ICON_MASTER" --out "$PROJECT_DIR/App/$name" >/dev/null \
+      || fail "sips failed building the loose icon $name"
+  done
+  cp "$ICON_MASTER" "$PROJECT_DIR/App/AppIcon1024.png" \
+    || fail "staging the loose AppIcon1024.png failed."
 fi
 
 # --- 1.6 call-screen avatar (v0.15.5) ----------------------------------
@@ -133,7 +162,28 @@ set -- "$EXPORT_DIR"/*.ipa
 [ -f "$1" ] || fail "the export produced no .ipa in $EXPORT_DIR — refusing to emit an empty pair."
 [ "$#" -eq 1 ] || fail "the export produced $# .ipa files — expected exactly one; refusing to guess which is the release."
 
-# --- 4. emit the pair ---------------------------------------------------
+# --- 4. verify the loose icon rode along (v0.17.0) -----------------------
+# The failure this guards against is silent: a build that
+# compiles, signs, and installs — with a placeholder where the
+# icon belongs. Unzip the exported .ipa and demand the phone's
+# icon file at a plausible size for photographic art, plus the
+# CFBundleIconFiles wiring in the bundled Info.plist. Anything
+# less fails the build here, by name, before the pair is
+# emitted — a bad build leaves nothing publishable behind.
+VERIFY_DIR="$WORK/verify"
+mkdir -p "$VERIFY_DIR"
+unzip -o -q "$1" -d "$VERIFY_DIR" \
+  || fail "could not unzip the exported .ipa to verify the icon — refusing to emit an unverified pair."
+APP_IN_IPA="$VERIFY_DIR/Payload/$SCHEME.app"
+ICON_IN_IPA="$APP_IN_IPA/AppIcon60x60@3x.png"
+[ -f "$ICON_IN_IPA" ] || fail "the exported app has no AppIcon60x60@3x.png at its root — the loose-icon wiring (App/Info.plist CFBundleIconFiles + the PNGs generated in step 1.5) did not reach the bundle. Refusing to ship a placeholder icon."
+ICON_BYTES=$(stat -f %z "$ICON_IN_IPA")
+[ "$ICON_BYTES" -ge 20480 ] || fail "AppIcon60x60@3x.png in the exported app is $ICON_BYTES bytes — implausibly small for the photographic icon art (a placeholder is not); refusing to ship it."
+plutil -extract CFBundleIcons.CFBundlePrimaryIcon.CFBundleIconFiles xml1 -o - "$APP_IN_IPA/Info.plist" 2>/dev/null | grep -q "AppIcon60x60" \
+  || fail "the exported app's Info.plist does not name AppIcon60x60 in CFBundleIconFiles — the physical Info.plist wiring did not reach the bundle."
+echo "build-ipa: icon verified in the exported .ipa — AppIcon60x60@3x.png ($ICON_BYTES bytes) + CFBundleIconFiles wiring."
+
+# --- 5. emit the pair ---------------------------------------------------
 mkdir -p "$OUT_DIR"
 IPA="$OUT_DIR/GUS-$VERSION.ipa"
 cp "$1" "$IPA"

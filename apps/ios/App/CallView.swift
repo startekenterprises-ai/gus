@@ -35,9 +35,21 @@ struct CallView: View {
                                listening: inCall && call.corePhase == "listening")
                     .padding(.top, 12)
 
+                // Layout discipline (v0.17.0): every text on
+                // this screen is width-flexible — it wraps or
+                // shrinks inside the screen's margins, never
+                // hard-clips at the edges. The 0.16 screens
+                // let the status line and the button row lay
+                // out wider than the phone and spill off both
+                // sides; nothing here may size itself past
+                // the container again.
                 Text(statusText)
                     .font(.headline)
                     .multilineTextAlignment(.center)
+                    .lineLimit(3)
+                    .minimumScaleFactor(0.75)
+                    .frame(maxWidth: .infinity)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 Text(call.callMode == .onDevice
                      ? "On-device — the brain and voice live on this iPhone."
@@ -45,18 +57,30 @@ struct CallView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.8)
+                    .frame(maxWidth: .infinity)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 if let notice = call.speechNotice {
                     Text(notice)
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
+                        .lineLimit(3)
+                        .minimumScaleFactor(0.8)
+                        .frame(maxWidth: .infinity)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if let error = call.errorText {
                     Text(error)
                         .font(.caption)
                         .foregroundColor(.orange)
                         .multilineTextAlignment(.center)
+                        .lineLimit(3)
+                        .minimumScaleFactor(0.8)
+                        .frame(maxWidth: .infinity)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 if !call.liveTranscript.isEmpty {
@@ -65,6 +89,10 @@ struct CallView: View {
                         .italic()
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
+                        .lineLimit(4)
+                        .minimumScaleFactor(0.8)
+                        .frame(maxWidth: .infinity)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 List(call.turns) { turn in
@@ -89,13 +117,20 @@ struct CallView: View {
                 Spacer()
 
                 if inCall {
-                    HStack(spacing: 24) {
+                    // The three controls share the row's width
+                    // equally (v0.17.0): flexible labels, tight
+                    // spacing — the fixed 90pt minimums plus
+                    // 24pt gaps could exceed the screen and
+                    // spill off both edges.
+                    HStack(spacing: 12) {
                         Button {
                             call.setSpeaker(!call.isSpeakerOn)
                         } label: {
                             Label("Speaker",
                                   systemImage: call.isSpeakerOn ? "speaker.wave.2.fill" : "speaker.slash.fill")
-                                .frame(minWidth: 90)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
+                                .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.large)
@@ -105,7 +140,9 @@ struct CallView: View {
                         } label: {
                             Label(call.isMuted ? "Unmute" : "Mute",
                                   systemImage: call.isMuted ? "mic.slash.fill" : "mic.fill")
-                                .frame(minWidth: 90)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
+                                .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.large)
@@ -114,7 +151,9 @@ struct CallView: View {
                             call.endCall()
                         } label: {
                             Label("End", systemImage: "phone.down.fill")
-                                .frame(minWidth: 90)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
+                                .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.large)
@@ -124,6 +163,8 @@ struct CallView: View {
                         call.startCall()
                     } label: {
                         Label("Call GUS", systemImage: "phone.fill")
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
                             .frame(minWidth: 160)
                     }
                     .buttonStyle(.borderedProminent)
@@ -186,20 +227,29 @@ private struct AvatarFaceView: View {
 
     private let side: CGFloat = 120
     // The square window on the face inside the full-body
-    // art, as fractions of the image (measured 2026-11-20):
-    // the head spans roughly x 0.33–0.69, y 0.05–0.37.
-    private let cropOriginX: CGFloat = 0.305
-    private let cropOriginY: CGFloat = 0.015
-    private let cropSide: CGFloat = 0.40
+    // art, as fractions of the image. Re-measured from the
+    // pixels 2026-11-20 (v0.17.0): the head actually spans
+    // x 0.339–0.637 (center 0.489), top y 0.056, chin
+    // ~0.35 — the first calibration overstated the width
+    // (0.33–0.69), so the old, wider window left the face
+    // floating on a white disc inside the circle. This
+    // window is TIGHTER than the head on every side, so
+    // the plush fills the circle edge to edge (full-bleed)
+    // and no white shows. Verified against a rendered
+    // simulation of this exact crop + circular clip.
+    private let cropOriginX: CGFloat = 0.344
+    private let cropOriginY: CGFloat = 0.055
+    private let cropSide: CGFloat = 0.29
     // The mouth's center and width inside that window:
-    // the smile's dark opening, measured from the art and
-    // verified against a rendered simulation of this exact
-    // crop (2026-11-20) — the ellipse sits ON the opening,
-    // so closed reads as the smile and open reads as the
-    // mouth opening inside it.
-    private let mouthCenterX: CGFloat = 0.49
-    private let mouthCenterY: CGFloat = 0.655
-    private let mouthWidth: CGFloat = 0.17
+    // the smile's dark opening sits at (0.49, 0.277) of
+    // the full image and spans ~0.067 of it — mapped into
+    // window fractions below, and the simulation confirms
+    // the ellipse sits ON the opening, so closed reads as
+    // the smile and open reads as the mouth opening
+    // inside it.
+    private let mouthCenterX: CGFloat = 0.503
+    private let mouthCenterY: CGFloat = 0.766
+    private let mouthWidth: CGFloat = 0.23
 
     var body: some View {
         ZStack {

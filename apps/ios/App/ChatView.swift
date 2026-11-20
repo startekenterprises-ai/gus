@@ -46,6 +46,11 @@ struct ChatView: View {
                      : "Core — replies come from your GUS core.")
                     .font(.caption)
                     .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.8)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 16)
                     .padding(.top, 8)
 
                 ScrollViewReader { proxy in
@@ -203,12 +208,18 @@ struct ChatView: View {
                         if blockedUser || blockedReply {
                             Image(systemName: "shield.slash.fill").foregroundColor(.red)
                             Text(blockedUser ? "Shield stopped your message" : "Shield stopped part of the reply")
+                                .lineLimit(2)
+                                .minimumScaleFactor(0.85)
                         } else if flagged {
                             Image(systemName: "exclamationmark.shield.fill").foregroundColor(.orange)
                             Text("Shield flagged this exchange — allowed under your posture")
+                                .lineLimit(2)
+                                .minimumScaleFactor(0.85)
                         } else {
                             Image(systemName: "checkmark.shield.fill").foregroundColor(.green)
                             Text("Shield checked this exchange — clean")
+                                .lineLimit(2)
+                                .minimumScaleFactor(0.85)
                         }
                         Image(systemName: expandedExchanges.contains(exchangeID) ? "chevron.up" : "chevron.down")
                             .font(.caption2)
@@ -296,6 +307,8 @@ struct ChatView: View {
                     Text("Photo attached — it routes to your Mac.")
                         .font(.caption)
                         .foregroundColor(.secondary)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.8)
                     Spacer()
                     Button("Remove") { model.clearPhoto() }
                         .font(.callout)

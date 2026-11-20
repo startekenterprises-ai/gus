@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+	GUS iOS — the app's real Info.plist (v0.17.0).
+
+	Until v0.16.3 this plist was generated from INFOPLIST_KEY_*
+	build settings (GENERATE_INFOPLIST_FILE), and the app icon
+	came from the asset catalog (ASSETCATALOG_COMPILER_
+	APPICON_NAME) — a combination that compiled cleanly yet
+	shipped an icon the phone rendered as the system
+	placeholder. The icon now ships as loose PNG files (the
+	classic pre-catalog wiring, the same shape as the Mac's
+	.icns path): build-ipa.sh generates them from the .b64
+	master into this folder at build time, and CFBundleIcons
+	below names them. A physical plist is what lets
+	CFBundleIconFiles be said at all — the generated-plist
+	settings cannot express the nested dict.
+
+	Every other key reproduces, value for value, the plist
+	the generator produced for v0.16.3 (read out of the
+	shipped .ipa), so nothing else about the app changes.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>GUS</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIcons</key>
+	<dict>
+		<key>CFBundlePrimaryIcon</key>
+		<dict>
+			<key>CFBundleIconFiles</key>
+			<array>
+				<string>AppIcon60x60</string>
+				<string>AppIcon1024</string>
+			</array>
+		</dict>
+	</dict>
+	<key>CFBundleIcons~ipad</key>
+	<dict>
+		<key>CFBundlePrimaryIcon</key>
+		<dict>
+			<key>CFBundleIconFiles</key>
+			<array>
+				<string>AppIcon76x76</string>
+				<string>AppIcon83.5x83.5</string>
+				<string>AppIcon1024</string>
+			</array>
+		</dict>
+	</dict>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>GUS listens while you are on a call with it — that is the call. The microphone is live only during a call you started.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>GUS turns your speech into text during calls so it can answer you. Recognition runs on this iPhone whenever the system allows it.</string>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<true/>
+		<key>UISceneConfigurations</key>
+		<dict/>
+	</dict>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+</dict>
+</plist>

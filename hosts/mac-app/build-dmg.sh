@@ -92,14 +92,17 @@ sed -e "s/__VERSION__/$VERSION/g" -e "s/__BUILD__/$BUILD/g" \
 # shipped the steel owl emblem (candidate #2); v0.14.6 the
 # eagle shield (candidate #3); the rotation rule (a new
 # candidate every build until one looks great) brings the
-# scanner ring. The same emblem ships
-# as the iOS app icon (apps/companion's Assets.xcassets).
-# The 1024px
-# master bakes the rounded corners in (transparent outside the
-# tile, standard icon margins) so the shipped icon reads rounded
-# everywhere. The master rides in the repo as base64 text (the
-# push path is text-only); decode it, resize with sips, and let
-# iconutil build the .icns.
+# scanner ring. v0.17.0 replaced the master: the previous one
+# was the full-bleed Nova avatar art itself, so the Dock icon
+# read square (an older note here claimed rounded corners
+# were baked into it — they were not; the art ran edge to
+# edge with opaque corners). The current master is that same
+# avatar art composited onto Apple's icon template — an
+# 824px rounded tile centered in the 1024px canvas,
+# transparent outside the tile — so the shipped icon reads
+# rounded everywhere. The master rides in the repo as base64
+# text (the push path is text-only); decode it, resize with
+# sips, and let iconutil build the .icns.
 ICONSET=$(mktemp -d)/AppIcon.iconset
 mkdir -p "$ICONSET"
 base64 -d < "$SCRIPT_DIR/Resources/AppIcon-1024.png.b64" > "$(dirname "$ICONSET")/icon-1024.png"

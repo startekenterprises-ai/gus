@@ -28,7 +28,12 @@ shield-key*
 # regenerated on every run and reviewed before any public use)
 drill/
 
-# decoded at build time by hosts/ios-app/build-ipa.sh from its .b64 master
+# decoded/generated at build time by hosts/ios-app/build-ipa.sh from the .b64 master
 apps/companion/iOS/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png
 apps/ios/App/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png
 apps/ios/App/Assets.xcassets/Avatar.imageset/Avatar.png
+apps/ios/App/AppIcon60x60@2x.png
+apps/ios/App/AppIcon60x60@3x.png
+apps/ios/App/AppIcon76x76@2x.png
+apps/ios/App/AppIcon83.5x83.5@2x.png
+apps/ios/App/AppIcon1024.png
