@@ -99,7 +99,7 @@ EXPORT_DIR="$WORK/export"
 # checked out (v0.16.3 — the root cause inside actool was not
 # worth more time). Instead the app ships loose icon PNGs, the
 # classic pre-catalog wiring and the same shape as the Mac's
-# .icns path: App/Info.plist names them in CFBundleIconFiles,
+# .icns path: the app Info.plist (apps/ios/Info.plist) names them in CFBundleIconFiles,
 # the synchronized App group copies them to the bundle root,
 # and section 4 below verifies they landed in the .ipa.
 # Every decoded/generated PNG is a build artifact (gitignored),
@@ -176,7 +176,7 @@ unzip -o -q "$1" -d "$VERIFY_DIR" \
   || fail "could not unzip the exported .ipa to verify the icon — refusing to emit an unverified pair."
 APP_IN_IPA="$VERIFY_DIR/Payload/$SCHEME.app"
 ICON_IN_IPA="$APP_IN_IPA/AppIcon60x60@3x.png"
-[ -f "$ICON_IN_IPA" ] || fail "the exported app has no AppIcon60x60@3x.png at its root — the loose-icon wiring (App/Info.plist CFBundleIconFiles + the PNGs generated in step 1.5) did not reach the bundle. Refusing to ship a placeholder icon."
+[ -f "$ICON_IN_IPA" ] || fail "the exported app has no AppIcon60x60@3x.png at its root — the loose-icon wiring (Info.plist CFBundleIconFiles + the PNGs generated in step 1.5) did not reach the bundle. Refusing to ship a placeholder icon."
 ICON_BYTES=$(stat -f %z "$ICON_IN_IPA")
 [ "$ICON_BYTES" -ge 20480 ] || fail "AppIcon60x60@3x.png in the exported app is $ICON_BYTES bytes — implausibly small for the photographic icon art (a placeholder is not); refusing to ship it."
 plutil -extract CFBundleIcons.CFBundlePrimaryIcon.CFBundleIconFiles xml1 -o - "$APP_IN_IPA/Info.plist" 2>/dev/null | grep -q "AppIcon60x60" \

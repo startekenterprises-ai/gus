@@ -11,10 +11,18 @@
 	placeholder. The icon now ships as loose PNG files (the
 	classic pre-catalog wiring, the same shape as the Mac's
 	.icns path): build-ipa.sh generates them from the .b64
-	master into this folder at build time, and CFBundleIcons
+	master into the App folder at build time, and CFBundleIcons
 	below names them. A physical plist is what lets
 	CFBundleIconFiles be said at all — the generated-plist
 	settings cannot express the nested dict.
+
+	v0.17.3: this file lives at apps/ios/Info.plist, NOT inside
+	App/. Inside the folder the file-system-synchronized App
+	group also copied it as a bundle resource, and the copy
+	collided with the processed plist ("Multiple commands
+	produce …/GUS.app/Info.plist") — the v0.17.2 archive
+	failed on exactly that (2026-11-20). INFOPLIST_FILE points
+	here; nothing may move it back into App/.
 
 	Every other key reproduces, value for value, the plist
 	the generator produced for v0.16.3 (read out of the
