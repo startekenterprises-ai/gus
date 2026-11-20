@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  GUS runtime (the agent) — launchd agent template (Phase 7, Mac
+  resident). Rendered by install.sh next to the control-plane plist.
+
+  The runtime holds NO secrets and has NO policy path: it talks to
+  the control plane over the comm socket and can only ask. Its
+  workspace is the runtime jail root — note this is the SANDBOX
+  workspace, distinct from the Mac pack's operator-approved work
+  directories (policy.json mac.workDirs), which the control plane
+  drives through the host adapter.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.startekenterprises.gus.runtime</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE_BIN__</string>
+    <string>__REPO_DIR__/packages/runtime/dist/main.js</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO_DIR__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    <key>GUS_COMM_SOCKET</key>
+    <string>__COMM_DIR__/gus.sock</string>
+    <key>GUS_WORKSPACE</key>
+    <string>__WORKSPACE_DIR__</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>__STATE_DIR__/logs/runtime.log</string>
+  <key>StandardErrorPath</key>
+  <string>__STATE_DIR__/logs/runtime.log</string>
+</dict>
+</plist>

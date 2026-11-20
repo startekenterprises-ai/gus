@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Export options for scripted iOS builds (v0.14.2) — the exact
+  equivalent of the operator's Organizer flow: Distribute App →
+  Release Testing. Consumed by hosts/ios-app/build-ipa.sh via
+  `xcodebuild -exportArchive -exportOptionsPlist`.
+
+  method "release-testing" produces an ad-hoc-signed .ipa for the
+  operator's own registered devices — the AirDrop install pattern,
+  NOT an App Store / TestFlight upload. signingStyle "automatic"
+  with the team below matches the project's automatic signing
+  (the operator's team, set in the project in 2026-11).
+-->
+<plist version="1.0">
+<dict>
+	<key>method</key>
+	<string>release-testing</string>
+	<key>teamID</key>
+	<string>XCRAH44MU2</string>
+	<key>signingStyle</key>
+	<string>automatic</string>
+	<key>stripSwiftSymbols</key>
+	<true/>
+	<key>compileBitcode</key>
+	<false/>
+	<key>provisioningProfiles</key>
+	<dict/>
+</dict>
+</plist>

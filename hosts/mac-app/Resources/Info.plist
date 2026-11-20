@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  GUS.app bundle description (Phase 8; Desktop 1 in v0.7).
+
+  build-dmg.sh copies this into GUS.app/Contents/Info.plist,
+  substituting __VERSION__ (from the repo package.json) and
+  __BUILD__ (the short git hash). No LSUIElement: since Desktop 1
+  the app is a real desktop application — Dock presence and a main
+  window at launch — that ALSO keeps its menu-bar status item.
+-->
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>GUS uses the microphone only while you hold a voice call: the recording goes to the speech service on your own machine, and the transcript is treated exactly like a typed message.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>GUS transcribes your voice calls on this Mac.</string>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleDisplayName</key>
+  <string>GUS</string>
+  <key>CFBundleExecutable</key>
+  <string>GUS</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.startekenterprises.gus</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>GUS</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>__VERSION__</string>
+  <key>CFBundleVersion</key>
+  <string>__BUILD__</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>14.0</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>NSPrincipalClass</key>
+  <string>NSApplication</string>
+</dict>
+</plist>

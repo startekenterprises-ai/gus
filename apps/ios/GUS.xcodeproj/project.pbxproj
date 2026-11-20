@@ -1,0 +1,299 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXFileReference section */
+		BB0000000000000000000008 /* GUS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = GUS.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		BB0000000000000000000002 /* App */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = App;
+			sourceTree = "<group>";
+		};
+		BB0000000000000000000003 /* Shared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Shared;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		BB0000000000000000000016 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		BB000000000000000000000A = {
+			isa = PBXGroup;
+			children = (
+				BB0000000000000000000002 /* App */,
+				BB0000000000000000000003 /* Shared */,
+				BB000000000000000000000B /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		BB000000000000000000000B /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				BB0000000000000000000008 /* GUS.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		BB0000000000000000000005 /* GUS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BB0000000000000000000021 /* Build configuration list for PBXNativeTarget "GUS" */;
+			buildPhases = (
+				BB0000000000000000000018 /* Sources */,
+				BB0000000000000000000016 /* Frameworks */,
+				BB0000000000000000000019 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				BB0000000000000000000002 /* App */,
+				BB0000000000000000000003 /* Shared */,
+			);
+			name = GUS;
+			packageProductDependencies = (
+				BB00000000000000000000D3 /* FluidAudio */,
+				BB00000000000000000000D4 /* LLM */,
+				BB00000000000000000000E2 /* FluidAudioFull */,
+				BB00000000000000000000F2 /* ShieldKit */,
+			);
+			productName = GUS;
+			productReference = BB0000000000000000000008 /* GUS.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		BB0000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2600;
+				LastUpgradeCheck = 2600;
+				TargetAttributes = {
+					BB0000000000000000000005 = {
+						CreatedOnToolsVersion = 26.2;
+					};
+				};
+			};
+			buildConfigurationList = BB0000000000000000000024 /* Build configuration list for PBXProject "GUS" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = BB000000000000000000000A;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				BB00000000000000000000D1 /* XCRemoteSwiftPackageReference "FluidAudio" */,
+				BB00000000000000000000D2 /* XCRemoteSwiftPackageReference "LLM" */,
+				BB00000000000000000000E1 /* XCLocalSwiftPackageReference "FluidAudioFull" */,
+				BB00000000000000000000F1 /* XCLocalSwiftPackageReference "ShieldKit" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = BB000000000000000000000B /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				BB0000000000000000000005 /* GUS */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		BB0000000000000000000019 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		BB0000000000000000000018 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		BB0000000000000000000031 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		BB0000000000000000000032 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		BB0000000000000000000033 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = XCRAH44MU2;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = GUS;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "GUS listens while you are on a call with it — that is the call. The microphone is live only during a call you started.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "GUS turns your speech into text during calls so it can answer you. Recognition runs on this iPhone whenever the system allows it.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.16.3;
+				PRODUCT_BUNDLE_IDENTIFIER = com.startekenterprises.gus;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		BB0000000000000000000034 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = XCRAH44MU2;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = GUS;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "GUS listens while you are on a call with it — that is the call. The microphone is live only during a call you started.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "GUS turns your speech into text during calls so it can answer you. Recognition runs on this iPhone whenever the system allows it.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.16.3;
+				PRODUCT_BUNDLE_IDENTIFIER = com.startekenterprises.gus;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		BB00000000000000000000D1 /* XCRemoteSwiftPackageReference "FluidAudio" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/FluidInference/FluidAudio";
+			requirement = {
+				kind = exactVersion;
+				version = 0.18.4;
+			};
+			traits = (
+				NemoTextProcessing,
+				TTS,
+				Diarizer,
+			);
+		};
+		BB00000000000000000000D2 /* XCRemoteSwiftPackageReference "LLM" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/eastriverlee/LLM.swift";
+			requirement = {
+				kind = exactVersion;
+				version = 3.0.3;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		BB00000000000000000000E1 /* XCLocalSwiftPackageReference "FluidAudioFull" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/FluidAudioFull;
+		};
+		BB00000000000000000000F1 /* XCLocalSwiftPackageReference "ShieldKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/ShieldKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		BB00000000000000000000D3 /* FluidAudio */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = BB00000000000000000000D1 /* XCRemoteSwiftPackageReference "FluidAudio" */;
+			productName = FluidAudio;
+		};
+		BB00000000000000000000E2 /* FluidAudioFull */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = BB00000000000000000000E1 /* XCLocalSwiftPackageReference "FluidAudioFull" */;
+			productName = FluidAudioFull;
+		};
+		BB00000000000000000000F2 /* ShieldKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = BB00000000000000000000F1 /* XCLocalSwiftPackageReference "ShieldKit" */;
+			productName = ShieldKit;
+		};
+		BB00000000000000000000D4 /* LLM */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = BB00000000000000000000D2 /* XCRemoteSwiftPackageReference "LLM" */;
+			productName = LLM;
+		};
+/* End XCSwiftPackageProductDependency section */
+
+/* Begin XCConfigurationList section */
+		BB0000000000000000000021 /* Build configuration list for PBXNativeTarget "GUS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BB0000000000000000000033 /* Debug */,
+				BB0000000000000000000034 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		BB0000000000000000000024 /* Build configuration list for PBXProject "GUS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BB0000000000000000000031 /* Debug */,
+				BB0000000000000000000032 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = BB0000000000000000000001 /* Project object */;
+}

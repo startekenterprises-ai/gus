@@ -1,0 +1,746 @@
+import Foundation
+
+/// The desktop app's one channel to GUS: the local operator panel
+/// (127.0.0.1:8731), authenticated with the same Bearer token the
+/// web panel uses — read from ~/.gus/state/panel-token, the 0600
+/// file the control plane mints at first boot. The app holds no
+/// authority of its own: every read and action here is a panel API
+/// call, and the panel delegates to the same engines the channels
+/// use. No new ports, no second credential.
+///
+/// The Decodable shapes below mirror packages/panel/src/types.ts
+/// field for field. Unknown keys are ignored by the decoder, so a
+/// panel that grows fields never breaks this client.
+
+/// v0.14.0: the payload structs the desktop model polls carry
+/// Equatable so a refresh can publish ONLY on a real change —
+/// an unchanged poll no longer invalidates every view on the
+/// 2.5 s beat (see DesktopModel's refresh functions).
+struct PanelStatus: Decodable, Equatable {
+    var version: String
+    var killed: Bool
+    var shield: Shield
+    var provider: Provider
+    var pendingApprovals: Int
+    var spendTodayUsd: Double
+    var spendMonthUsd: Double
+    var governorMode: String
+    /// v0.14.6: the budget profile in force. Optional: a
+    /// control plane older than the profile omits it, and the
+    /// Protection home treats nil as "standard".
+    var budgetProfile: String?
+    var permissiveToday: PermissiveToday
+    var settings: Settings
+
+    struct PermissiveToday: Decodable, Equatable {
+        var count: Int
+        var recent: [LetThrough]
+        struct LetThrough: Decodable, Equatable {
+            var ts: Double
+            var kind: String
+            var detail: String
+        }
+    }
+
+    struct Shield: Decodable, Equatable {
+        var provisioned: Bool
+        var required: Bool
+        var onUnavailable: String
+        var baseUrl: String
+    }
+    struct Provider: Decodable, Equatable {
+        var id: String
+        var model: String
+    }
+    struct Settings: Decodable, Equatable {
+        var providerKey: String // "stored" | "missing" | "not-required"
+        var telegramConfigured: Bool
+        var caps: Caps
+        var delegates: Int
+        var macWorkDirs: Int
+        var approverPolicy: ApproverPolicy
+        var voice: Voice
+    }
+    /// v0.9: the voice channel on file — presence only, like the
+    /// rest of the readout (the URLs live behind /api/voice/settings).
+    struct Voice: Decodable, Equatable {
+        var enabled: Bool
+        var configured: Bool
+    }
+    struct Caps: Decodable, Equatable {
+        var maxUsdPerTask: Double?
+        var maxUsdPerDay: Double?
+        var maxUsdPerMonth: Double?
+    }
+    struct ApproverPolicy: Decodable, Equatable {
+        var gusApprovesDelegates: Bool
+        var gusApprovesOwn: Bool
+        var delegatesMayApprove: Bool
+        var scope: String
+        var maxApprovalsPerHour: Int
+    }
+}
+
+struct PanelJob: Decodable, Identifiable, Equatable {
+    var id: String
+    var kind: String
+    var state: String
+    var createdAt: Double // unix ms
+    var updatedAt: Double // unix ms
+    var costUsd: Double
+    var tokensIn: Int
+    var tokensOut: Int
+    var outcomeNote: String?
+    var receiptId: String?
+}
+
+struct PanelChatMessage: Decodable, Equatable {
+    var ts: Double // unix ms
+    var direction: String // "in" (operator) | "out" (GUS)
+    var text: String
+}
+
+struct PanelChatHistory: Decodable, Equatable {
+    var conversationId: String
+    var messages: [PanelChatMessage]
+    var jobs: [PanelJob]
+}
+
+/// One line of the Watch timeline (GET /api/watch/timeline) —
+/// the durable event + gate logs merged, newest first. Since
+/// v0.11.0 the panel also derives category / narration /
+/// flagged from the same records (see PanelTimelineEntryData in
+/// packages/panel/src/types.ts): the desktop chat's secure log
+/// renders `narration`, filters on `category`, and marks
+/// `flagged` permissive let-throughs with the one discreet line.
+/// The derived fields are optional here: an older control plane
+/// sends none of them, and the log then falls back to the raw
+/// kind + detail rather than inventing a narration.
+struct PanelTimelineEntry: Decodable, Identifiable, Equatable {
+    var ts: Double // unix ms
+    var source: String // "events" | "gate"
+    var kind: String
+    var detail: String
+    var jobId: String?
+    var receiptId: String?
+    var category: String? // "scan" | "approval" | "action"
+    var narration: String?
+    var flagged: Bool?
+    var id: String { "\(ts)-\(source)-\(kind)-\(detail.hashValue)" }
+
+    /// The filter-chip bucket. A panel without the derived
+    /// fields gets the same bucketing the reader would have
+    /// done, from source + kind alone.
+    var categoryKey: String {
+        if let category { return category }
+        if source == "gate" { return "scan" }
+        if kind.hasPrefix("approval") { return "approval" }
+        if kind.hasPrefix("shield_") || kind == "permissive_ingress" { return "scan" }
+        return "action"
+    }
+
+    var isFlagged: Bool { flagged ?? false }
+
+    /// The line the secure log shows: the panel's plain-language
+    /// narration when it sent one, else the recorded detail (or
+    /// the kind, humanized) — never an invented sentence.
+    var line: String {
+        if let narration, !narration.isEmpty { return narration }
+        if !detail.isEmpty { return detail }
+        return kind.replacingOccurrences(of: "_", with: " ")
+    }
+}
+
+struct PanelApproval: Decodable, Identifiable, Equatable {
+    var id: String
+    var jobId: String
+    var summary: String
+    var reason: String
+    var createdAt: Double // unix ms
+    var expiresAt: Double // unix ms
+}
+
+struct PanelApprovalHistoryEntry: Decodable, Identifiable, Equatable {
+    var id: String
+    var jobId: String
+    var summary: String
+    var reason: String
+    var status: String // approved | denied | expired | consumed
+    var createdAt: Double // unix ms
+    var resolvedAt: Double? // unix ms
+    var resolvedBy: String?
+}
+
+struct PanelActionResult: Decodable {
+    var ok: Bool
+    var detail: String
+}
+
+/// One enrolled device (GET /api/devices, v0.12.0) — mirrors
+/// PanelDeviceData in packages/panel/src/types.ts. Records
+/// only: no credential or digest ever crosses this contract.
+struct PanelDevice: Decodable, Identifiable {
+    var id: String
+    var name: String
+    var platform: String
+    var createdAt: Double // unix ms
+    var lastSeenAt: Double // unix ms
+    var revoked: Bool
+}
+
+/// The ONE GUS identity (GET /api/identity, v0.13.0) — mirrors
+/// PanelIdentityData in packages/panel/src/types.ts field for
+/// field: the record itself plus every provider's configured
+/// state. Never a credential: the local password's hash stays
+/// in the control plane's credentials file, and the hosted
+/// providers (Google/Apple/SSO) are seam stubs in this build.
+/// v0.14.0: the Devices & identity settings pane renders it.
+struct PanelIdentity: Decodable, Equatable {
+    var id: String
+    var createdAt: Double // unix ms
+    var displayName: String?
+    /// The active provider kind: "local" | "local-password" |
+    /// "google" | "apple" | "sso".
+    var provider: String
+    var providers: [Provider]
+
+    struct Provider: Decodable, Equatable {
+        var kind: String
+        var configured: Bool
+    }
+}
+
+/// The launch gate's readout (GET /api/identity/session,
+/// v0.14.5) — mirrors PanelIdentitySessionData in
+/// packages/panel/src/types.ts field for field: whether the
+/// first-run login screen is still owed (welcomedAt absent),
+/// the active provider, and whether a live session lets this
+/// launch skip the gate. The session token never crosses this
+/// contract — provider + creation time only.
+struct PanelIdentitySession: Decodable, Equatable {
+    var welcomedAt: Double? // unix ms
+    var provider: String
+    var signedIn: Bool
+    var session: Session?
+    /// v0.14.6: the auto-login posture. Optional: an older
+    /// control plane omits it, and the gate treats nil as
+    /// enabled (the shipped default).
+    var launchGateEnabled: Bool?
+
+    struct Session: Decodable, Equatable {
+        var provider: String
+        var createdAt: Double // unix ms
+    }
+}
+
+/// The context pack's status (GET /api/memory/status, v0.10
+/// Memory Slice A) — mirrors PanelMemoryStatusData in
+/// packages/panel/src/types.ts field for field: the files
+/// under context/, the pending memory-candidate count, any
+/// secret-guard quarantines, and warnings. Hashes and sizes
+/// only — file content never crosses this contract. An
+/// unwired backend answers 501 with a {detail} body, which
+/// fails this decode; the model then simply has no memory
+/// status to show, rather than an invented one.
+struct PanelMemoryStatus: Decodable, Equatable {
+    var enabled: Bool
+    var files: [MemoryFile]
+    var pendingCandidates: Int
+    var quarantinedSections: [Quarantine]
+    var warnings: [String]
+    var lastEventTs: Double?
+    var config: Config
+
+    struct MemoryFile: Decodable, Equatable {
+        var name: String
+        var exists: Bool
+        var bytes: Int
+        var sha256: String?
+    }
+    struct Quarantine: Decodable, Equatable {
+        var section: String
+        var patternClasses: [String]
+    }
+    struct Config: Decodable, Equatable {
+        var maxPackChars: Int
+        var maxDigestChars: Int
+    }
+}
+
+/// The voice channel's settings (GET /api/voice/settings, v0.9):
+/// the operator's local speech services — an OpenAI-compatible
+/// transcription endpoint (faster-whisper) and speech endpoint
+/// (Kokoro). Plain config; there are no secrets in this shape.
+/// v0.9.1 adds bargeIn (optional here: an older panel that
+/// doesn't send it decodes as nil, and the call treats nil as
+/// the config default, on).
+struct PanelVoiceSettings: Decodable, Equatable {
+    var enabled: Bool
+    var sttBaseUrl: String
+    var sttModel: String
+    var ttsBaseUrl: String
+    var ttsModel: String
+    var ttsVoice: String
+    var bargeIn: Bool?
+    /// v0.9.6: the speech engines — "local" (built into this
+    /// app) or "endpoint" (the URLs above). Optional here: an
+    /// older control plane doesn't send them, and Settings
+    /// treats nil as the shipped default, "local".
+    var sttEngine: String?
+    var ttsEngine: String?
+    /// v0.9.9: the voice Shield-scan switch. Optional here: an
+    /// older control plane doesn't send it, and Settings treats
+    /// nil as the shipped default, ON.
+    var shieldScan: Bool?
+}
+
+/// v0.9.9: one Test Connection answer (POST
+/// /api/voice/test-connection) — the detailed probe of the
+/// endpoint the Settings form is showing, unsaved: reachable,
+/// the round-trip time, the models it lists, and whether the
+/// configured model is among them (nil = the endpoint answered
+/// without a readable list, so presence is unverifiable —
+/// never rounded up). `detail` is the same answer in one
+/// plain sentence, composed by the control plane.
+struct PanelVoiceEndpointTest: Decodable {
+    var ok: Bool
+    var reachable: Bool
+    var latencyMs: Double
+    var models: [String]
+    var modelPresent: Bool?
+    var detail: String
+}
+
+/// v0.9.9: the endpoint half of Test mic and speaker (POST
+/// /api/voice/test-speech) — one test sentence synthesized by
+/// the form's current TTS values, returned as playable audio.
+/// On failure ok is false and the detail names the reason; the
+/// audio fields are simply absent.
+struct PanelVoiceTestSpeech: Decodable {
+    var ok: Bool
+    var detail: String
+    var audioBase64: String?
+    var audioContentType: String?
+}
+
+/// One push-to-talk exchange (POST /api/voice/call, v0.9). On a
+/// speech-synthesis failure ok is false and the detail says why,
+/// but the reply text still arrives — the chat shows what GUS
+/// said and the notice says why it wasn't spoken.
+struct PanelVoiceCallResult: Decodable {
+    var ok: Bool
+    var kind: String
+    var detail: String
+    var transcript: String?
+    var replyText: String?
+    var audioBase64: String?
+    var audioContentType: String?
+}
+
+/// One live-call turn's stage timings (v0.9.1): utterance end →
+/// transcript (sttMs) → reply (jobMs) → first spoken sentence
+/// (ttsFirstMs). Milliseconds, measured in the control plane.
+struct PanelVoiceTurnLatency: Decodable {
+    var utteranceEndAt: Double
+    var sttMs: Double
+    var jobMs: Double
+    var ttsFirstMs: Double?
+    var totalMs: Double
+}
+
+/// One settled turn of a live call (v0.9.1), as the session
+/// state's transcript carries it.
+struct PanelVoiceSessionTurn: Decodable, Identifiable {
+    var index: Int
+    var startedAt: Double // unix ms
+    var transcript: String?
+    var kind: String
+    var detail: String
+    var replyText: String?
+    var interrupted: Bool
+    var latency: PanelVoiceTurnLatency?
+    var id: Int { index }
+}
+
+/// The live call's hearing ledger (v0.9.2): what the session's
+/// ears are receiving, in the VAD's own energy numbers — chunks
+/// in, last/peak level, the open utterance's age (0 when none
+/// is open), utterances completed. Optional on the session: an
+/// older control plane doesn't send it, and the in-call strip
+/// hides the hearing line rather than inventing numbers.
+struct PanelVoiceSessionHearing: Decodable {
+    var chunksReceived: Int
+    var lastRms: Double
+    var maxRms: Double
+    var inUtteranceMs: Double
+    var utterancesCompleted: Int
+}
+
+/// The live call's state (v0.9.1) — what the app polls while a
+/// call runs: phase (listening | thinking | speaking | ended),
+/// the transcript so far, the last turn's latency, and after an
+/// ending the endedReason (operator | idle-timeout |
+/// max-length | kill-phrase | disabled).
+struct PanelVoiceSession: Decodable {
+    var ok: Bool
+    var detail: String
+    var active: Bool
+    var sessionId: String?
+    var phase: String?
+    var startedAt: Double?
+    var elapsedMs: Double?
+    var endedReason: String?
+    var bargeIn: Bool?
+    var turns: [PanelVoiceSessionTurn]
+    var lastLatency: PanelVoiceTurnLatency?
+    var hearing: PanelVoiceSessionHearing?
+    /// v0.9.6: the call's resolved speech modes — the control
+    /// plane probed any chosen endpoint at call start, so these
+    /// are what the call is actually using. The model runs its
+    /// Speech-framework recognizer when sttMode is "local" and
+    /// speaks text segments itself when ttsMode is "local".
+    /// speechNotice carries the fallback notice ("Speech service
+    /// unreachable — using built-in voice for this call.") when
+    /// a mode fell back. Optional: an older control plane sends
+    /// none of these, and the call then behaves exactly as
+    /// before — endpoint ears, endpoint mouth.
+    var sttMode: String?
+    var ttsMode: String?
+    var speechNotice: String?
+    /// v0.9.11: the call's Shield mode for spoken turns —
+    /// "fast" (the Shield-scan switch is on; voice scans run
+    /// the gate's fast mode) or "off" (the switch is off;
+    /// spoken turns skip the ingress scan). The in-call strip
+    /// renders it as a chip next to Mute, so the operator can
+    /// SEE the state mid-call instead of digging in Settings
+    /// to check which way the switch sits. Optional: an older
+    /// control plane sends none, and the chip doesn't render.
+    var shieldMode: String?
+}
+
+/// One spoken segment of a live call's reply (v0.9.1): a single
+/// sentence's audio, fetched in seq order. ok with a nil seq
+/// means nothing is ready yet.
+struct PanelVoiceAudioSegment: Decodable {
+    var ok: Bool
+    var detail: String
+    var seq: Int?
+    var turnIndex: Int?
+    var sentenceIndex: Int?
+    var audioBase64: String?
+    var audioContentType: String?
+    /// v0.9.6: a speak-text segment (built-in TTS) — present
+    /// instead of audioBase64; the app speaks it with
+    /// AVSpeechSynthesizer. A segment carries one or the other.
+    var text: String?
+}
+
+/// The onboarding read model (GET /api/onboarding) — the wizard's
+/// step state, shared by the web setup panel and (v0.8) the app's
+/// first-run setup flow and Settings section. `currentProvider` is
+/// optional in the payload until a provider step has been saved.
+struct PanelOnboarding: Decodable, Equatable {
+    var steps: Steps
+    var suggestedCaps: SuggestedCaps
+    var currentProvider: CurrentProvider?
+
+    struct Steps: Decodable, Equatable {
+        var shield: Step
+        var telegram: Step
+        var provider: Step
+        var caps: Step
+        var firstJob: Step
+    }
+    struct Step: Decodable, Equatable {
+        var done: Bool
+        var detail: String?
+    }
+    struct SuggestedCaps: Decodable, Equatable {
+        var maxUsdPerTask: Double
+        var maxUsdPerDay: Double
+        var maxUsdPerMonth: Double
+    }
+    struct CurrentProvider: Decodable, Equatable {
+        var provider: String
+        var model: String
+        var baseUrl: String?
+    }
+}
+
+/// One entry of the help registry (GET /api/help) — the SAME
+/// registry (packages/panel/src/help.ts) the web panel's pop-ups
+/// and /help page render from. The app fetches it; no help copy is
+/// duplicated in Swift, so the surfaces cannot drift apart.
+struct PanelHelpEntry: Decodable, Identifiable {
+    var id: String
+    var title: String
+    var tip: String
+    var body: String
+}
+
+struct PanelHelpResponse: Decodable {
+    var entries: [PanelHelpEntry]
+}
+
+/// The settings detail (GET /api/settings-detail, v0.8): what the
+/// status summary only counts — the Mac jail's contents and the
+/// named delegates. Read-only in this release.
+struct PanelSettingsDetail: Decodable {
+    var macWorkDirs: [String]
+    var macShellAllowlist: [String]
+    var delegates: [DelegateConversation]
+    var bridge: Bridge?
+
+    struct DelegateConversation: Decodable {
+        var conversationId: String
+        var operatorId: String
+        var delegates: [DelegateEntry]
+    }
+    struct DelegateEntry: Decodable {
+        var name: String
+        var senderId: String
+    }
+    struct Bridge: Decodable {
+        var conversationId: String
+        var senderId: String
+    }
+}
+
+final class PanelClient {
+    private let baseURL = URL(string: "http://127.0.0.1:8731")!
+
+    /// Read fresh on every call: cheap, and it picks up a re-minted
+    /// token without an app restart.
+    private var token: String {
+        let path = NSHomeDirectory() + "/.gus/state/panel-token"
+        let raw = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+        return raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func request(path: String, method: String, jsonBody: [String: Any]? = nil) -> URLRequest {
+        var req = URLRequest(url: baseURL.appendingPathComponent(path))
+        req.httpMethod = method
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        if let jsonBody {
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try? JSONSerialization.data(withJSONObject: jsonBody)
+        }
+        return req
+    }
+
+    func get<T: Decodable>(_ path: String, as type: T.Type, completion: @escaping (Result<T, Error>) -> Void) {
+        URLSession.shared.dataTask(with: request(path: path, method: "GET")) { data, response, error in
+            if let error {
+                completion(.failure(error))
+                return
+            }
+            guard let data else {
+                completion(.failure(NSError(domain: "gus.panel", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "the panel answered with no data"])))
+                return
+            }
+            if let http = response as? HTTPURLResponse, http.statusCode == 401 {
+                completion(.failure(NSError(domain: "gus.panel", code: 401,
+                    userInfo: [NSLocalizedDescriptionKey: "the panel refused this app's token (401)"])))
+                return
+            }
+            do {
+                completion(.success(try JSONDecoder().decode(T.self, from: data)))
+            } catch {
+                completion(.failure(error))
+            }
+        }.resume()
+    }
+
+    /// An authenticated panel URL for opening in the browser (the
+    /// panel plants its cookie from a valid ?t= link, so this is
+    /// how in-app "open the web panel / help page" links work).
+    func panelURL(_ path: String) -> URL {
+        var comps = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false)
+        comps?.queryItems = [URLQueryItem(name: "t", value: token)]
+        return comps?.url ?? baseURL
+    }
+
+    /// POST an action. The panel answers every action — success,
+    /// refusal, conflict — with a {ok, detail} body, so the body is
+    /// decoded regardless of the HTTP status.
+    func post(_ path: String, jsonBody: [String: Any]? = nil, completion: @escaping (Result<PanelActionResult, Error>) -> Void) {
+        URLSession.shared.dataTask(with: request(path: path, method: "POST", jsonBody: jsonBody)) { data, _, error in
+            if let error {
+                completion(.failure(error))
+                return
+            }
+            guard let data else {
+                completion(.failure(NSError(domain: "gus.panel", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "the panel answered with no data"])))
+                return
+            }
+            do {
+                completion(.success(try JSONDecoder().decode(PanelActionResult.self, from: data)))
+            } catch {
+                completion(.failure(error))
+            }
+        }.resume()
+    }
+    /// POST a voice call: the raw recording as the body (its
+    /// content type rides the header — that is the panel route's
+    /// contract), the exchange as the decoded answer. A spoken
+    /// reply can take as long as the job behind it, so this call
+    /// gets a long timeout instead of URLSession's 60s default.
+    func postVoiceCall(audio: Data, contentType: String, completion: @escaping (Result<PanelVoiceCallResult, Error>) -> Void) {
+        var req = request(path: "/api/voice/call", method: "POST")
+        req.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        req.httpBody = audio
+        req.timeoutInterval = 180
+        URLSession.shared.dataTask(with: req) { data, _, error in
+            if let error {
+                completion(.failure(error))
+                return
+            }
+            guard let data else {
+                completion(.failure(NSError(domain: "gus.panel", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "the panel answered with no data"])))
+                return
+            }
+            do {
+                completion(.success(try JSONDecoder().decode(PanelVoiceCallResult.self, from: data)))
+            } catch {
+                completion(.failure(error))
+            }
+        }.resume()
+    }
+
+    // MARK: Live voice sessions (v0.9.1)
+
+    /// A panel URL with query items — the session routes carry
+    /// the session id on the query string (the audio route's
+    /// body is raw PCM; it can't carry anything else).
+    private func url(_ path: String, query: [URLQueryItem]) -> URL {
+        var comps = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false)
+        comps?.queryItems = query
+        return comps?.url ?? baseURL
+    }
+
+    private func request(url: URL, method: String) -> URLRequest {
+        var req = URLRequest(url: url)
+        req.httpMethod = method
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        return req
+    }
+
+    /// One request, one decoded shape, the body decoded
+    /// regardless of HTTP status — the session routes answer
+    /// refusals with the state shape too, and a refusal is data.
+    private func perform<T: Decodable>(_ req: URLRequest, as type: T.Type, completion: @escaping (Result<T, Error>) -> Void) {
+        URLSession.shared.dataTask(with: req) { data, _, error in
+            if let error {
+                completion(.failure(error))
+                return
+            }
+            guard let data else {
+                completion(.failure(NSError(domain: "gus.panel", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "the panel answered with no data"])))
+                return
+            }
+            do {
+                completion(.success(try JSONDecoder().decode(T.self, from: data)))
+            } catch {
+                completion(.failure(error))
+            }
+        }.resume()
+    }
+
+    /// Open the live call. The answer is the fresh session's
+    /// state — or the refusal, in the same shape.
+    func startVoiceSession(completion: @escaping (Result<PanelVoiceSession, Error>) -> Void) {
+        perform(request(path: "/api/voice/session/start", method: "POST", jsonBody: [:]),
+                as: PanelVoiceSession.self, completion: completion)
+    }
+
+    /// The session poll: phase, transcript, latency, endings.
+    func voiceSessionState(sessionId: String, completion: @escaping (Result<PanelVoiceSession, Error>) -> Void) {
+        perform(request(url: url("/api/voice/session/state", query: [URLQueryItem(name: "session", value: sessionId)]), method: "GET"),
+                as: PanelVoiceSession.self, completion: completion)
+    }
+
+    /// The next spoken segment after `afterSeq`, if one is ready.
+    func voiceSessionNextAudio(sessionId: String, afterSeq: Int, completion: @escaping (Result<PanelVoiceAudioSegment, Error>) -> Void) {
+        perform(request(url: url("/api/voice/session/next-audio", query: [
+                    URLQueryItem(name: "session", value: sessionId),
+                    URLQueryItem(name: "after", value: String(afterSeq)),
+                ]), method: "GET"),
+                as: PanelVoiceAudioSegment.self, completion: completion)
+    }
+
+    /// One streamed mic chunk: raw PCM16 (16 kHz mono) as the
+    /// body, the session id on the query string.
+    func postVoiceSessionAudio(sessionId: String, pcm: Data, completion: @escaping (Result<PanelActionResult, Error>) -> Void) {
+        var req = request(url: url("/api/voice/session/audio", query: [URLQueryItem(name: "session", value: sessionId)]), method: "POST")
+        req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        req.httpBody = pcm
+        perform(req, as: PanelActionResult.self, completion: completion)
+    }
+
+    /// v0.9.6: one final transcript from this app's built-in
+    /// recognizer, for a call whose resolved STT mode is local.
+    /// The words become a normal session turn in the control
+    /// plane — the same pipeline a transcribed utterance takes.
+    func postVoiceSessionTranscript(sessionId: String, text: String, completion: @escaping (Result<PanelActionResult, Error>) -> Void) {
+        perform(request(path: "/api/voice/session/transcript", method: "POST", jsonBody: ["sessionId": sessionId, "text": text]),
+                as: PanelActionResult.self, completion: completion)
+    }
+
+    // MARK: Voice tests (v0.9.9)
+
+    /// Test Connection: probe the endpoint the Settings form
+    /// is showing (kind "stt" | "tts", base URL + model — the
+    /// form's CURRENT values, unsaved; the route stores
+    /// nothing). The answer is data either way: unreachable is
+    /// a result with ok false, not a transport failure.
+    func testVoiceConnection(kind: String, baseUrl: String, model: String, completion: @escaping (Result<PanelVoiceEndpointTest, Error>) -> Void) {
+        perform(request(path: "/api/voice/test-connection", method: "POST", jsonBody: ["kind": kind, "baseUrl": baseUrl, "model": model]),
+                as: PanelVoiceEndpointTest.self, completion: completion)
+    }
+
+    /// Test mic and speaker, endpoint half: synthesize one
+    /// test sentence with the form's current TTS values and
+    /// return the audio for playback.
+    func testVoiceSpeech(baseUrl: String, model: String, voice: String, completion: @escaping (Result<PanelVoiceTestSpeech, Error>) -> Void) {
+        perform(request(path: "/api/voice/test-speech", method: "POST", jsonBody: ["baseUrl": baseUrl, "model": model, "voice": voice]),
+                as: PanelVoiceTestSpeech.self, completion: completion)
+    }
+
+    /// Barge-in: cut the current reply's speech. Speech only —
+    /// the panel route cannot stop a job or move an approval.
+    func interruptVoiceSession(sessionId: String, completion: @escaping (Result<PanelActionResult, Error>) -> Void) {
+        perform(request(path: "/api/voice/session/interrupt", method: "POST", jsonBody: ["sessionId": sessionId]),
+                as: PanelActionResult.self, completion: completion)
+    }
+
+    /// Hang up. The answer is the ended session's final state.
+    func endVoiceSession(sessionId: String, completion: @escaping (Result<PanelVoiceSession, Error>) -> Void) {
+        perform(request(path: "/api/voice/session/end", method: "POST", jsonBody: ["sessionId": sessionId]),
+                as: PanelVoiceSession.self, completion: completion)
+    }
+}
+
+/// Small display helpers shared by the desktop views. Panel
+/// timestamps are unix milliseconds; costs are dollars, always
+/// shown as dollars (the Governor's unit — never percentages).
+enum GusFormat {
+    static func time(_ unixMs: Double) -> String {
+        let f = DateFormatter()
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return f.string(from: Date(timeIntervalSince1970: unixMs / 1000))
+    }
+
+    static func usd(_ value: Double) -> String {
+        String(format: "$%.2f", value)
+    }
+
+    static func usdCap(_ value: Double?) -> String {
+        guard let value else { return "no cap on file" }
+        return usd(value)
+    }
+}

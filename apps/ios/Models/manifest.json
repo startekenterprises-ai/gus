@@ -1,0 +1,593 @@
+{
+ "version": 1,
+ "updated": "2026-11-20",
+ "notes": "Model delivery manifest for the GUS iOS app (v0.15.0 chunk 2, R4 M1). Weights are NEVER committed to git; the app downloads them on first launch into Application Support and verifies sha256 before use. Two delivery classes: 'downloads' are fetched and verified by the app's own ModelStore (Shared/ModelManifest.swift embeds the same entries; test/unit/ios-ondevice-models.test.ts keeps the two in sync). 'sdkManaged' assets are fetched and hash-verified by the pinned FluidAudio SDK against its own pinned manifest; they are inventoried here for the record.",
+ "downloads": [
+  {
+   "id": "brain-qwen3-4b-instruct-2507-q4km",
+   "role": "on-device LLM (the call's brain in on-device mode)",
+   "fileName": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+   "url": "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+   "bytes": 2497281120,
+   "sha256": "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597",
+   "license": "Apache-2.0 (Qwen3)",
+   "runtime": "llama.cpp via LLM.swift 3.0.3",
+   "required": true
+  },
+  {
+   "id": "brain-qwen3-4b-instruct-2507-abliterated-q4km",
+   "role": "OPTIONAL alternative on-device LLM — abliterated (refusal-removed, uncensored-style) build of the same Qwen3-4B-Instruct-2507: the library's first advanced CHOICE of character (Glenn, 2026-11-20). Inert until model selection lands (next chunk): nothing downloads or loads it in v0.15.4. Pins verified against the Hugging Face API (siblings/lfs) on 2026-11-20.",
+   "fileName": "Huihui-Qwen3-4B-Instruct-2507-abliterated.Q4_K_M.gguf",
+   "url": "https://huggingface.co/mradermacher/Huihui-Qwen3-4B-Instruct-2507-abliterated-GGUF/resolve/main/Huihui-Qwen3-4B-Instruct-2507-abliterated.Q4_K_M.gguf",
+   "bytes": 2497281312,
+   "sha256": "b1324e2f1bd2e0610d591f54f93e38d90b187f69d1f215f4cace349eade678d7",
+   "license": "Apache-2.0 (Qwen3; abliteration by huihui-ai, GGUF conversion by mradermacher)",
+   "runtime": "llama.cpp via LLM.swift 3.0.3",
+   "required": false
+  }
+ ],
+ "sdkManaged": [
+  {
+   "id": "voice-kokoro-82m-coreml",
+   "role": "on-device TTS (Kokoro-82M, CoreML conversion) + English G2P frontend (BART G2P + Misaki lexicon cache)",
+   "managedBy": "FluidAudio 0.18.4 (SPM, exact pin) \u2014 KokoroAneManager downloads into Application Support and verifies every file against the SDK's pinned content hashes before first synthesis",
+   "repository": "FluidInference/kokoro-82m-coreml",
+   "repositoryRevisionObserved": "51c072023b254cd02368102ab88bcfbff6cad4cd",
+   "directory": "ANE/ (legacy seven-stage chain) + repo-root G2P assets",
+   "defaultVoice": "af_heart",
+   "license": "Apache-2.0 (Kokoro-82M weights: hexgrad/Kokoro-82M)",
+   "totalBytes": 293562350,
+   "files": [
+    {
+     "path": "ANE/.DS_Store",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/.DS_Store",
+     "bytes": 10244
+    },
+    {
+     "path": "ANE/KokoroAlbert.mlmodelc/analytics/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroAlbert.mlmodelc/analytics/coremldata.bin",
+     "bytes": 243,
+     "sha256": "14a61873d8759a38b79c93f9021ae865f408f56301209a0168dbfc2283265ccd"
+    },
+    {
+     "path": "ANE/KokoroAlbert.mlmodelc/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroAlbert.mlmodelc/coremldata.bin",
+     "bytes": 433,
+     "sha256": "70b6d2f8429229f6800dda9480341669f7ac0eabf05a82934d8632ab2b4b63a6"
+    },
+    {
+     "path": "ANE/KokoroAlbert.mlmodelc/metadata.json",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroAlbert.mlmodelc/metadata.json",
+     "bytes": 2480
+    },
+    {
+     "path": "ANE/KokoroAlbert.mlmodelc/model.mil",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroAlbert.mlmodelc/model.mil",
+     "bytes": 101485
+    },
+    {
+     "path": "ANE/KokoroAlbert.mlmodelc/weights/weight.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroAlbert.mlmodelc/weights/weight.bin",
+     "bytes": 5718848,
+     "sha256": "36089a39359b800d3e2c60e5e8ac9217d8f2d1010a8b9273192290e621f1fabc"
+    },
+    {
+     "path": "ANE/KokoroAlbert.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroAlbert.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+     "bytes": 92156,
+     "sha256": "1efeed89cf916ee5fd38a7b4aef8d79a6444eef6b5521514c5ab34e7164f36a2"
+    },
+    {
+     "path": "ANE/KokoroAlbert.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroAlbert.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+     "bytes": 5718848,
+     "sha256": "36089a39359b800d3e2c60e5e8ac9217d8f2d1010a8b9273192290e621f1fabc"
+    },
+    {
+     "path": "ANE/KokoroAlbert.mlpackage/Manifest.json",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroAlbert.mlpackage/Manifest.json",
+     "bytes": 617
+    },
+    {
+     "path": "ANE/KokoroAlignment.mlmodelc/analytics/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroAlignment.mlmodelc/analytics/coremldata.bin",
+     "bytes": 243,
+     "sha256": "f6074d1039a9151d0f97dc6ec9ee0cd9c7b865f1af646d718ab38b659fa84f3f"
+    },
+    {
+     "path": "ANE/KokoroAlignment.mlmodelc/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroAlignment.mlmodelc/coremldata.bin",
+     "bytes": 484,
+     "sha256": "9a0fb4a536f665a052914d7f17b0e6ac80a3614f702e4be87ac0302c1143a4ea"
+    },
+    {
+     "path": "ANE/KokoroAlignment.mlmodelc/metadata.json",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroAlignment.mlmodelc/metadata.json",
+     "bytes": 3021
+    },
+    {
+     "path": "ANE/KokoroAlignment.mlmodelc/model.mil",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroAlignment.mlmodelc/model.mil",
+     "bytes": 8194
+    },
+    {
+     "path": "ANE/KokoroAlignment.mlmodelc/weights/weight.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroAlignment.mlmodelc/weights/weight.bin",
+     "bytes": 4128,
+     "sha256": "2e7d69128b59d615fc3d3cf85637a687235fc086b1eb136359adb11a61615f6b"
+    },
+    {
+     "path": "ANE/KokoroAlignment.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroAlignment.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+     "bytes": 6971,
+     "sha256": "2d87764d55eb2bdf4ea9ced45b63ff51b4a0e139d5440b2d52c03076f06d8512"
+    },
+    {
+     "path": "ANE/KokoroAlignment.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroAlignment.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+     "bytes": 4128,
+     "sha256": "2e7d69128b59d615fc3d3cf85637a687235fc086b1eb136359adb11a61615f6b"
+    },
+    {
+     "path": "ANE/KokoroAlignment.mlpackage/Manifest.json",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroAlignment.mlpackage/Manifest.json",
+     "bytes": 617
+    },
+    {
+     "path": "ANE/KokoroNoise.mlmodelc/analytics/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroNoise.mlmodelc/analytics/coremldata.bin",
+     "bytes": 243,
+     "sha256": "de1b584b3959d91905a458b20fc3fb6bd26b68d1eac0b4576aeccd1a7235b133"
+    },
+    {
+     "path": "ANE/KokoroNoise.mlmodelc/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroNoise.mlmodelc/coremldata.bin",
+     "bytes": 440,
+     "sha256": "6e675b07b45f7586222870758a1edfc7f5b87cd639c06acdb7191db09783283f"
+    },
+    {
+     "path": "ANE/KokoroNoise.mlmodelc/metadata.json",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroNoise.mlmodelc/metadata.json",
+     "bytes": 3020
+    },
+    {
+     "path": "ANE/KokoroNoise.mlmodelc/model.mil",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroNoise.mlmodelc/model.mil",
+     "bytes": 91698
+    },
+    {
+     "path": "ANE/KokoroNoise.mlmodelc/weights/weight.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroNoise.mlmodelc/weights/weight.bin",
+     "bytes": 4580160,
+     "sha256": "5da4ccb85b789bdf0ac634cf817171c428853c39d8bc81f29b864f0eba3aa0d0"
+    },
+    {
+     "path": "ANE/KokoroNoise.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroNoise.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+     "bytes": 74960,
+     "sha256": "4dc335ccbae3edddbc6fc00509ab1265a6362514bfb2a4aadac60bc38616e0c9"
+    },
+    {
+     "path": "ANE/KokoroNoise.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroNoise.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+     "bytes": 4580160,
+     "sha256": "5da4ccb85b789bdf0ac634cf817171c428853c39d8bc81f29b864f0eba3aa0d0"
+    },
+    {
+     "path": "ANE/KokoroNoise.mlpackage/Manifest.json",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroNoise.mlpackage/Manifest.json",
+     "bytes": 617
+    },
+    {
+     "path": "ANE/KokoroNoise_v2.mlmodelc/analytics/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroNoise_v2.mlmodelc/analytics/coremldata.bin",
+     "bytes": 243,
+     "sha256": "53af6bf61482f6002bdb6e3a62f30774cde6e96411aebd888222a34b369f3d04"
+    },
+    {
+     "path": "ANE/KokoroNoise_v2.mlmodelc/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroNoise_v2.mlmodelc/coremldata.bin",
+     "bytes": 440,
+     "sha256": "9911047f924b41f8b92811c32c50b7c718bd7b0c14842b3bc1b66b9ffe341a19"
+    },
+    {
+     "path": "ANE/KokoroNoise_v2.mlmodelc/metadata.json",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroNoise_v2.mlmodelc/metadata.json",
+     "bytes": 3020
+    },
+    {
+     "path": "ANE/KokoroNoise_v2.mlmodelc/model.mil",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroNoise_v2.mlmodelc/model.mil",
+     "bytes": 93152
+    },
+    {
+     "path": "ANE/KokoroNoise_v2.mlmodelc/weights/weight.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroNoise_v2.mlmodelc/weights/weight.bin",
+     "bytes": 4580160,
+     "sha256": "1102fc2d31dfcfe3de3978a4c78b65202ff8b0a4d55a9304213bd4e8bda66bc2"
+    },
+    {
+     "path": "ANE/KokoroNoise_v2.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroNoise_v2.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+     "bytes": 76250,
+     "sha256": "894168c950938e0b776f010b4278b1aae65aa1ce3dd8bdfa4c4170ca80362d0d"
+    },
+    {
+     "path": "ANE/KokoroNoise_v2.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroNoise_v2.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+     "bytes": 4580160,
+     "sha256": "1102fc2d31dfcfe3de3978a4c78b65202ff8b0a4d55a9304213bd4e8bda66bc2"
+    },
+    {
+     "path": "ANE/KokoroNoise_v2.mlpackage/Manifest.json",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroNoise_v2.mlpackage/Manifest.json",
+     "bytes": 617
+    },
+    {
+     "path": "ANE/KokoroPostAlbert.mlmodelc/analytics/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroPostAlbert.mlmodelc/analytics/coremldata.bin",
+     "bytes": 243,
+     "sha256": "6640044c875505382edbc361cdd56f3f1c30f082953e0f9473a31ae3f71e6c43"
+    },
+    {
+     "path": "ANE/KokoroPostAlbert.mlmodelc/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroPostAlbert.mlmodelc/coremldata.bin",
+     "bytes": 556,
+     "sha256": "86de3ab0c1e8c6f8842b57bc24695a5099590c49b864e3fa2737b1fb5b15ba3b"
+    },
+    {
+     "path": "ANE/KokoroPostAlbert.mlmodelc/metadata.json",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroPostAlbert.mlmodelc/metadata.json",
+     "bytes": 4171
+    },
+    {
+     "path": "ANE/KokoroPostAlbert.mlmodelc/model.mil",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroPostAlbert.mlmodelc/model.mil",
+     "bytes": 60047
+    },
+    {
+     "path": "ANE/KokoroPostAlbert.mlmodelc/weights/weight.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroPostAlbert.mlmodelc/weights/weight.bin",
+     "bytes": 13806464,
+     "sha256": "e4f300a23cc2e05d38680d9fc94681cc722d445076d1d248f83255122ba091c8"
+    },
+    {
+     "path": "ANE/KokoroPostAlbert.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroPostAlbert.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+     "bytes": 49183,
+     "sha256": "5b1ec258a17ca6419da5c90c66e147a7c3699ea3ed620c4b0db715f6b3f5aa26"
+    },
+    {
+     "path": "ANE/KokoroPostAlbert.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroPostAlbert.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+     "bytes": 13806464,
+     "sha256": "e4f300a23cc2e05d38680d9fc94681cc722d445076d1d248f83255122ba091c8"
+    },
+    {
+     "path": "ANE/KokoroPostAlbert.mlpackage/Manifest.json",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroPostAlbert.mlpackage/Manifest.json",
+     "bytes": 617
+    },
+    {
+     "path": "ANE/KokoroProsody.mlmodelc/analytics/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroProsody.mlmodelc/analytics/coremldata.bin",
+     "bytes": 243,
+     "sha256": "7708aab83deabd72539512acd850447fa955187608d9710a828943aa8498c6b8"
+    },
+    {
+     "path": "ANE/KokoroProsody.mlmodelc/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroProsody.mlmodelc/coremldata.bin",
+     "bytes": 421,
+     "sha256": "d65d87f246a6546c0fb7af6efe020106c38604e5c2b9ca00a78561c115dda33e"
+    },
+    {
+     "path": "ANE/KokoroProsody.mlmodelc/metadata.json",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroProsody.mlmodelc/metadata.json",
+     "bytes": 2721
+    },
+    {
+     "path": "ANE/KokoroProsody.mlmodelc/model.mil",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroProsody.mlmodelc/model.mil",
+     "bytes": 79705
+    },
+    {
+     "path": "ANE/KokoroProsody.mlmodelc/weights/weight.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroProsody.mlmodelc/weights/weight.bin",
+     "bytes": 8454272,
+     "sha256": "d3c2670eb0c528802f0815d917dcb77bf17faf063bd2bc09cfd0970e2bc1444c"
+    },
+    {
+     "path": "ANE/KokoroProsody.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroProsody.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+     "bytes": 65722,
+     "sha256": "c62c8cd4be4ca01127bba3a122bf74828d25d1ac0a6def342a501467f9d30e90"
+    },
+    {
+     "path": "ANE/KokoroProsody.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroProsody.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+     "bytes": 8454272,
+     "sha256": "d3c2670eb0c528802f0815d917dcb77bf17faf063bd2bc09cfd0970e2bc1444c"
+    },
+    {
+     "path": "ANE/KokoroProsody.mlpackage/Manifest.json",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroProsody.mlpackage/Manifest.json",
+     "bytes": 617
+    },
+    {
+     "path": "ANE/KokoroProsody_v2.mlmodelc/analytics/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroProsody_v2.mlmodelc/analytics/coremldata.bin",
+     "bytes": 243,
+     "sha256": "804d7d2e9a8fed345cedb57da61bd27fdd95db22a070cfa7d42ccd4f8e80a443"
+    },
+    {
+     "path": "ANE/KokoroProsody_v2.mlmodelc/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroProsody_v2.mlmodelc/coremldata.bin",
+     "bytes": 421,
+     "sha256": "db8776a4896f690fd254cdb68a4551c168411c9b3fb98219630215bc3c357986"
+    },
+    {
+     "path": "ANE/KokoroProsody_v2.mlmodelc/model.mil",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroProsody_v2.mlmodelc/model.mil",
+     "bytes": 73353
+    },
+    {
+     "path": "ANE/KokoroProsody_v2.mlmodelc/weights/weight.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroProsody_v2.mlmodelc/weights/weight.bin",
+     "bytes": 8513664,
+     "sha256": "70eea4cd2523992fa1fea840e31ab6f4fdd69c1598e220985a2ae6ea5da1e944"
+    },
+    {
+     "path": "ANE/KokoroTail.mlmodelc/analytics/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroTail.mlmodelc/analytics/coremldata.bin",
+     "bytes": 243,
+     "sha256": "7dd3d6b8cfbcdcac37b46f6eb1312b842b972dc75f7cb9968f349fedfc0d77db"
+    },
+    {
+     "path": "ANE/KokoroTail.mlmodelc/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroTail.mlmodelc/coremldata.bin",
+     "bytes": 392,
+     "sha256": "f28f17e4217d7ec1bed48bff4c65287169daa9198315f6fffb00a1483831f5d3"
+    },
+    {
+     "path": "ANE/KokoroTail.mlmodelc/metadata.json",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroTail.mlmodelc/metadata.json",
+     "bytes": 1872
+    },
+    {
+     "path": "ANE/KokoroTail.mlmodelc/model.mil",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroTail.mlmodelc/model.mil",
+     "bytes": 7014
+    },
+    {
+     "path": "ANE/KokoroTail.mlmodelc/weights/weight.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroTail.mlmodelc/weights/weight.bin",
+     "bytes": 81088,
+     "sha256": "2d4877b5d2725a9f017653e391638bee1262d1877a080bce09726aae128fecb2"
+    },
+    {
+     "path": "ANE/KokoroTail.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroTail.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+     "bytes": 5964,
+     "sha256": "fe5148db90101ae32f7efef7b4500ef670694dc65515c68c8ee7cd2821238a1c"
+    },
+    {
+     "path": "ANE/KokoroTail.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroTail.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+     "bytes": 81088,
+     "sha256": "2d4877b5d2725a9f017653e391638bee1262d1877a080bce09726aae128fecb2"
+    },
+    {
+     "path": "ANE/KokoroTail.mlpackage/Manifest.json",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroTail.mlpackage/Manifest.json",
+     "bytes": 617
+    },
+    {
+     "path": "ANE/KokoroTail_v2.mlmodelc/analytics/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroTail_v2.mlmodelc/analytics/coremldata.bin",
+     "bytes": 243,
+     "sha256": "a06e4b91c2b8a8be3ff701558a5f1f6484921f948202663fe6df78f248d42222"
+    },
+    {
+     "path": "ANE/KokoroTail_v2.mlmodelc/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroTail_v2.mlmodelc/coremldata.bin",
+     "bytes": 392,
+     "sha256": "527271f6df56cc308a5f89374c92108aef7b837ab15f0ba4900d555588dbd905"
+    },
+    {
+     "path": "ANE/KokoroTail_v2.mlmodelc/metadata.json",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroTail_v2.mlmodelc/metadata.json",
+     "bytes": 1872
+    },
+    {
+     "path": "ANE/KokoroTail_v2.mlmodelc/model.mil",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroTail_v2.mlmodelc/model.mil",
+     "bytes": 7014
+    },
+    {
+     "path": "ANE/KokoroTail_v2.mlmodelc/weights/weight.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroTail_v2.mlmodelc/weights/weight.bin",
+     "bytes": 81088,
+     "sha256": "8ede31ec20df7d86a124287ac12d13507651e2a693e9d4f35f0e7f92cba422c7"
+    },
+    {
+     "path": "ANE/KokoroVocoder.mlmodelc/analytics/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroVocoder.mlmodelc/analytics/coremldata.bin",
+     "bytes": 243,
+     "sha256": "1cc4f1e6436597c6d458a845570d9d0ace458813ff90f225d08e0e713496b463"
+    },
+    {
+     "path": "ANE/KokoroVocoder.mlmodelc/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroVocoder.mlmodelc/coremldata.bin",
+     "bytes": 626,
+     "sha256": "71bac80d2f2f077fefc0d66cdc39c0faaa96540b3a6149093ef29de01b1f8764"
+    },
+    {
+     "path": "ANE/KokoroVocoder.mlmodelc/metadata.json",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroVocoder.mlmodelc/metadata.json",
+     "bytes": 4331
+    },
+    {
+     "path": "ANE/KokoroVocoder.mlmodelc/model.mil",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroVocoder.mlmodelc/model.mil",
+     "bytes": 309000
+    },
+    {
+     "path": "ANE/KokoroVocoder.mlmodelc/weights/weight.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroVocoder.mlmodelc/weights/weight.bin",
+     "bytes": 48889920,
+     "sha256": "6d1f96eb50218ab687b12d6d862d2ae854c12b7165c3cd9b6b5cef261ef02ff1"
+    },
+    {
+     "path": "ANE/KokoroVocoder.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroVocoder.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+     "bytes": 255741,
+     "sha256": "18481f9531abd0d01cf6fe6b8837b98263e8a63d87db56324d49ed57cc5c75fa"
+    },
+    {
+     "path": "ANE/KokoroVocoder.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroVocoder.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+     "bytes": 48889920,
+     "sha256": "6d1f96eb50218ab687b12d6d862d2ae854c12b7165c3cd9b6b5cef261ef02ff1"
+    },
+    {
+     "path": "ANE/KokoroVocoder.mlpackage/Manifest.json",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroVocoder.mlpackage/Manifest.json",
+     "bytes": 617
+    },
+    {
+     "path": "ANE/KokoroVocoder_v2.mlmodelc/analytics/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroVocoder_v2.mlmodelc/analytics/coremldata.bin",
+     "bytes": 243,
+     "sha256": "adef3747bd00e98eb1835a6d4f5d3255f0e7b8a4fb2c9978fd25f23f164f489b"
+    },
+    {
+     "path": "ANE/KokoroVocoder_v2.mlmodelc/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroVocoder_v2.mlmodelc/coremldata.bin",
+     "bytes": 628,
+     "sha256": "25bfff2648761222286f9030cd961a617ab877e5e46d7d609645db2496c5e447"
+    },
+    {
+     "path": "ANE/KokoroVocoder_v2.mlmodelc/metadata.json",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroVocoder_v2.mlmodelc/metadata.json",
+     "bytes": 4416
+    },
+    {
+     "path": "ANE/KokoroVocoder_v2.mlmodelc/model.mil",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroVocoder_v2.mlmodelc/model.mil",
+     "bytes": 277524
+    },
+    {
+     "path": "ANE/KokoroVocoder_v2.mlmodelc/weights/weight.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroVocoder_v2.mlmodelc/weights/weight.bin",
+     "bytes": 49084224,
+     "sha256": "0a923a2f471764073d584ac9eea41b74f6e92ad39a746b3222121a2aed0eb3aa"
+    },
+    {
+     "path": "ANE/KokoroVocoder_v2.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroVocoder_v2.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+     "bytes": 223928,
+     "sha256": "b98a31bf9d0aacdd6782d9fd2d19da3da19411c25dbf7930ffac0655f7673ab2"
+    },
+    {
+     "path": "ANE/KokoroVocoder_v2.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroVocoder_v2.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+     "bytes": 49084224,
+     "sha256": "0a923a2f471764073d584ac9eea41b74f6e92ad39a746b3222121a2aed0eb3aa"
+    },
+    {
+     "path": "ANE/KokoroVocoder_v2.mlpackage/Manifest.json",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/KokoroVocoder_v2.mlpackage/Manifest.json",
+     "bytes": 617
+    },
+    {
+     "path": "ANE/LICENSE",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/LICENSE",
+     "bytes": 11339
+    },
+    {
+     "path": "ANE/README.md",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/README.md",
+     "bytes": 4813
+    },
+    {
+     "path": "ANE/af_heart.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/af_heart.bin",
+     "bytes": 522240,
+     "sha256": "d583ccff3cdca2f7fae535cb998ac07e9fcb90f09737b9a41fa2734ec44a8f0b"
+    },
+    {
+     "path": "ANE/vocab.json",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/ANE/vocab.json",
+     "bytes": 1416
+    },
+    {
+     "path": "G2PDecoder.mlmodelc/analytics/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/G2PDecoder.mlmodelc/analytics/coremldata.bin",
+     "bytes": 243,
+     "sha256": "dbf1767747fdc188222d467a45b04608b396c76c71db3abb18a5fb3680ef9827"
+    },
+    {
+     "path": "G2PDecoder.mlmodelc/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/G2PDecoder.mlmodelc/coremldata.bin",
+     "bytes": 545,
+     "sha256": "607e960f19b4d9a30317a5a11869fcce84b300a909fcab2cc756c0d98e2dacd9"
+    },
+    {
+     "path": "G2PDecoder.mlmodelc/metadata.json",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/G2PDecoder.mlmodelc/metadata.json",
+     "bytes": 3064
+    },
+    {
+     "path": "G2PDecoder.mlmodelc/model.mil",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/G2PDecoder.mlmodelc/model.mil",
+     "bytes": 19737
+    },
+    {
+     "path": "G2PDecoder.mlmodelc/weights/weight.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/G2PDecoder.mlmodelc/weights/weight.bin",
+     "bytes": 828030,
+     "sha256": "cbaeb4e743359f607ab161af0c6d8a817462fdaec622ee788ef8ef952c5f8214"
+    },
+    {
+     "path": "G2PEncoder.mlmodelc/analytics/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/G2PEncoder.mlmodelc/analytics/coremldata.bin",
+     "bytes": 243,
+     "sha256": "cf7fbd7e7a65529b2d2bf3941e458a0ab6dff7a298bf48e205a1727c81c26a99"
+    },
+    {
+     "path": "G2PEncoder.mlmodelc/coremldata.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/G2PEncoder.mlmodelc/coremldata.bin",
+     "bytes": 398,
+     "sha256": "0f14d46ca9fd06c68b4717294575b2b99449e67d40b7a2c56f926bf05cd90b11"
+    },
+    {
+     "path": "G2PEncoder.mlmodelc/metadata.json",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/G2PEncoder.mlmodelc/metadata.json",
+     "bytes": 2034
+    },
+    {
+     "path": "G2PEncoder.mlmodelc/model.mil",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/G2PEncoder.mlmodelc/model.mil",
+     "bytes": 20392
+    },
+    {
+     "path": "G2PEncoder.mlmodelc/weights/weight.bin",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/G2PEncoder.mlmodelc/weights/weight.bin",
+     "bytes": 694592,
+     "sha256": "6926bcd2827d21fec82839487b987e06f85fd8a6a5bb896bc4f6062461d014ec"
+    },
+    {
+     "path": "g2p_vocab.json",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/g2p_vocab.json",
+     "bytes": 1665
+    },
+    {
+     "path": "us_lexicon_cache.json",
+     "url": "https://huggingface.co/FluidInference/kokoro-82m-coreml/resolve/main/us_lexicon_cache.json",
+     "bytes": 10444631,
+     "sha256": "6b36ba313202227d6914ad32cd684a0304bd2757e9ec4158ea7bc36ec40e224e"
+    }
+   ]
+  }
+ ]
+}
