@@ -1,0 +1,34 @@
+# dependencies & build output
+node_modules/
+dist/
+dist-bundle/
+dist-test/
+*.tsbuildinfo
+
+# local environment & runtime state — never committed
+.env
+.env.*
+!.env.example
+.gus-state/
+state/
+
+# credentials & key material — never committed, in any directory
+*.key
+*.pem
+*-key.txt
+key-out*.txt
+*recordings*.json
+vault.json
+vault.key
+receipt-stub.key
+update-privkey*
+shield-key*
+
+# drill runtime + evidence (drills write state here; evidence is
+# regenerated on every run and reviewed before any public use)
+drill/
+
+# decoded at build time by hosts/ios-app/build-ipa.sh from its .b64 master
+apps/companion/iOS/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png
+apps/ios/App/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png
+apps/ios/App/Assets.xcassets/Avatar.imageset/Avatar.png

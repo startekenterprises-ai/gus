@@ -1,0 +1,82 @@
+# Release DMG — build the macOS app on a tagged release and attach
+# it (plus its sha256) to the GitHub Release.
+#
+# Why this exists (v0.4): "wake up to new features" requires the
+# install to be one click, and one click requires a DMG that nobody
+# had to build by hand at a desk. Tagging vX.Y.Z is the whole
+# release act:
+#
+#   1. The unit suite runs first — an untested DMG never ships
+#      (the promise-suite rule: a release that needs a test skipped
+#      cannot ship applies here too).
+#   2. build-dmg.sh does the identical build a maintainer's Mac
+#      does: npm build, Swift release build, ad-hoc codesign,
+#      hdiutil. Ad-hoc signing is the honest v1 posture (see
+#      docs/mac-app.md) — first launch on a new Mac is
+#      right-click → Open until notarization lands.
+#   3. The DMG and its .sha256 are attached to the Release for the
+#      tag. The in-app updater verifies the download against the
+#      .sha256 before it mounts anything.
+#
+# The workflow can also be dispatched manually against any ref;
+# the release is created for the tag named in the input (or the
+# ref when it is a tag).
+
+name: release-dmg
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create (e.g. v0.4.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  dmg:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Unit suite (a release that fails it does not ship)
+        run: npm test
+
+      - name: Build the DMG
+        run: ./hosts/mac-app/build-dmg.sh
+
+      - name: Checksum
+        id: dmg
+        run: |
+          DMG=$(ls hosts/mac-app/dist/GUS-*.dmg | head -1)
+          echo "path=$DMG" >> "$GITHUB_OUTPUT"
+          shasum -a 256 "$DMG" | awk '{print $1}' > "$DMG.sha256"
+          echo "sha_file=$DMG.sha256" >> "$GITHUB_OUTPUT"
+          cat "$DMG.sha256"
+
+      - name: Create the release and attach the DMG
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${{ steps.dmg.outputs.path }}" "${{ steps.dmg.outputs.sha_file }}" --clobber
+          else
+            gh release create "$TAG" \
+              --title "GUS $TAG" \
+              --notes "Automated release build. The DMG is ad-hoc signed (see docs/mac-app.md): first launch on a new Mac is right-click → Open. Verify downloads with the attached .sha256." \
+              "${{ steps.dmg.outputs.path }}" "${{ steps.dmg.outputs.sha_file }}"
+          fi
