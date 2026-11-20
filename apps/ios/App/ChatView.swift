@@ -21,6 +21,11 @@ import UIKit
 /// this build the photo stays in this chat, marked as not
 /// sent — nothing pretends it was delivered.
 struct ChatView: View {
+    /// Extra bottom room that clears the floating tab
+    /// bar's pill (v0.17.4) — the Call screen's figure,
+    /// from the same 0.17.3 screenshot.
+    private static let tabBarClearance: CGFloat = 72
+
     @StateObject private var model = ChatModel()
     @State private var expandedExchanges: Set<UUID> = []
     @FocusState private var composerFocused: Bool
@@ -343,7 +348,18 @@ struct ChatView: View {
                     .foregroundColor(.secondary)
             }
         }
-        .padding(12)
+        .padding(.horizontal, 12)
+        .padding(.top, 12)
+        // Tab-bar clearance (v0.17.4): the composer is a
+        // fixed control at the bottom of a tab, the same
+        // spot the floating tab bar covered on the Call
+        // screen in 0.17.3 — the message view above it is
+        // a ScrollView, which takes the scroll clearance
+        // for itself and leaves the composer under the
+        // pill. Clear the pill while the keyboard is down;
+        // while it is up, the keyboard owns the bottom of
+        // the screen and the composer rides it as before.
+        .padding(.bottom, composerFocused ? 12 : 12 + Self.tabBarClearance)
     }
 }
 

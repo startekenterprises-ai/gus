@@ -8,6 +8,13 @@ import SwiftUI
 /// is doing — listening, thinking, speaking — the live
 /// transcript as you speak, and the turns so far.
 struct CallView: View {
+    /// Extra bottom room that clears the floating tab
+    /// bar's pill while it is visible (v0.17.4) — sized
+    /// from the 0.17.3 screenshot, where the standard
+    /// 20 pt bottom padding still left the call button's
+    /// bottom edge behind the pill.
+    private static let tabBarClearance: CGFloat = 72
+
     @StateObject private var call = CallSession()
 
     private var inCall: Bool { call.phase == .live || call.phase == .connecting }
@@ -172,6 +179,18 @@ struct CallView: View {
                 }
             }
             .padding(20)
+            // Tab-bar clearance (v0.17.4): the floating tab
+            // bar overlays the bottom of this screen while it
+            // is visible, and the turns List claims the layout
+            // space the clearance would otherwise come from —
+            // in 0.17.3 the pre-call "Call GUS" button sat
+            // with its bottom hidden behind the tab-bar pill
+            // (operator's screenshot, 2026-11-20). While the
+            // bar is up (not in a call), add enough bottom
+            // room to clear the pill with margin. In a call
+            // the bar hides (below) and the layout is exactly
+            // as before — the in-call controls do not move.
+            .padding(.bottom, inCall ? 0 : Self.tabBarClearance)
             .navigationTitle("Call")
             .navigationBarTitleDisplayMode(.inline)
             // The tab bar hides while a call is live

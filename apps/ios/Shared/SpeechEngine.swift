@@ -80,12 +80,16 @@ protocol SpeechEngine: AnyObject {
     /// that was cut before it made sound.
     var onPlaybackStarted: (() -> Void)? { get set }
     /// Begin synthesizing a sentence before its turn to play
-    /// (v0.17.1 synthesize-ahead): the samples wait in the
-    /// engine until speak() asks for this exact text, which
-    /// then starts playing with no synthesis wait. Preparing
-    /// never makes sound on its own, and a sentence the call
-    /// session has not cleared to speak is never prepared —
-    /// the session scans first, exactly as it always has.
+    /// (v0.17.1 synthesize-ahead; the lineup deepened to two
+    /// in v0.17.4): the samples wait in the engine until
+    /// speak() asks for this exact text, which then starts
+    /// playing with no synthesis wait. The session may line
+    /// up the next TWO sentences behind the one playing —
+    /// each prepare() call is one lineup entry, in speaking
+    /// order. Preparing never makes sound on its own, and a
+    /// sentence the call session has not cleared to speak is
+    /// never prepared — the session scans first, exactly as
+    /// it always has.
     func prepare(_ text: String)
     /// Speak one sentence; onFinished fires exactly once —
     /// when the sentence ends OR is cut by stopSpeaking().
@@ -117,12 +121,15 @@ final class KokoroSpeechEngine: SpeechEngine {
     /// and playing — see the protocol note.
     var onPlaybackStarted: (() -> Void)?
 
-    // Synthesize-ahead slot (v0.17.1): at most one prepared
-    // utterance, keyed by its exact text. speak() consumes
-    // it only for that text; stopSpeaking() discards it, so
-    // a barged-in lineup can never make sound afterwards.
-    private var prepareTask: Task<PreparedSpeech, Error>?
-    private var preparedText: String?
+    // Synthesize-ahead lineup (v0.17.1, two deep since
+    // v0.17.4): up to two prepared utterances waiting behind
+    // the one playing, each keyed by its exact text, in the
+    // order the session lined them up. speak() consumes the
+    // oldest entry for its text; stopSpeaking() discards
+    // them all, so a barged-in lineup can never make sound
+    // afterwards.
+    private var preparedLineup: [(text: String, task: Task<PreparedSpeech, Error>)] = []
+    private let preparedLineupLimit = 2
 
     /// The avatar's level, straight from the player: the
     /// player owns the samples, so it owns the level.
@@ -139,27 +146,28 @@ final class KokoroSpeechEngine: SpeechEngine {
     var isAvailable: Bool { KokoroRuntime.shared.isReady }
     var isSpeaking: Bool { player.isPlaying || synthTask != nil }
 
-    /// Start synthesizing `text` into the ahead slot (see
-    /// the protocol note). A repeat call for the text already
-    /// lined up is a no-op; a different text replaces the
-    /// slot. Synthesis still passes the runtime's
+    /// Start synthesizing `text` into the ahead lineup (see
+    /// the protocol note). Each call adds one entry — the
+    /// session lines each sentence up exactly once, in
+    /// speaking order — and a call past the lineup's depth
+    /// is ignored: two sentences behind the one playing is
+    /// the whole lineup. Synthesis still passes the runtime's
     /// one-at-a-time gate, so a lineup never asks the manager
-    /// for two utterances at once — it runs while the
-    /// previous sentence PLAYS, which is the whole point:
-    /// playback used to wait out this exact latency in
-    /// silence between every pair of sentences.
+    /// for two utterances at once — the entries synthesize
+    /// in order while earlier sentences PLAY, which is the
+    /// whole point: playback used to wait out this exact
+    /// latency in silence between every pair of sentences.
     func prepare(_ text: String) {
         lock.lock()
-        if preparedText == text, prepareTask != nil {
+        guard preparedLineup.count < preparedLineupLimit else {
             lock.unlock()
             return
         }
-        prepareTask?.cancel()
-        preparedText = text
-        prepareTask = Task {
+        let task = Task {
             let result = try await KokoroRuntime.shared.synthesize(text)
             return PreparedSpeech(samples: result.samples, sampleRate: result.sampleRate)
         }
+        preparedLineup.append((text: text, task: task))
         lock.unlock()
     }
 
@@ -168,15 +176,16 @@ final class KokoroSpeechEngine: SpeechEngine {
         generation += 1
         let gen = generation
         pendingFinish = onFinished
-        // Consume the synthesize-ahead slot when it holds
-        // this exact sentence: its samples are ready, or its
-        // synthesis is still in flight and this task joins it
-        // instead of synthesizing the same words twice.
+        // Consume the synthesize-ahead lineup's oldest entry
+        // for this exact sentence when one is waiting: its
+        // samples are ready, or its synthesis is still in
+        // flight and this task joins it instead of
+        // synthesizing the same words twice. Entries for
+        // other sentences stay lined up behind this one.
         var preparation: Task<PreparedSpeech, Error>?
-        if preparedText == text {
-            preparation = prepareTask
-            prepareTask = nil
-            preparedText = nil
+        if let index = preparedLineup.firstIndex(where: { $0.text == text }) {
+            preparation = preparedLineup[index].task
+            preparedLineup.remove(at: index)
         }
         lock.unlock()
 
@@ -212,11 +221,13 @@ final class KokoroSpeechEngine: SpeechEngine {
         lock.lock()
         generation += 1
         let gen = generation
-        let stalePreparation = prepareTask
-        prepareTask = nil
-        preparedText = nil
+        let staleLineup = preparedLineup
+        preparedLineup = []
         lock.unlock()
-        stalePreparation?.cancel()
+        // The whole lineup dies with the speech (barge-in):
+        // every prepared or in-flight synthesis is cancelled,
+        // so nothing lined up can make sound afterwards.
+        for entry in staleLineup { entry.task.cancel() }
         synthTask?.cancel()
         synthTask = nil
         player.stop()
