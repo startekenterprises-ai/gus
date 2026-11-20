@@ -50,6 +50,13 @@
  *    <state>/receipts.jsonl, with the receipt's content hash bound
  *    to the manifest. These are tamper-evident local receipts, NOT
  *    Agent-Shield Protocol receipts; nothing here claims otherwise.
+ *  - Tap-through (chunk 4): a settled batch's full record — every
+ *    entry's exact message ID, rule, and captured prior label set,
+ *    under the batch's job and receipt IDs — is readable back
+ *    through cleanupBatchRecord below, surfaced by
+ *    `gmail-admin cleanup show --batch <id>` and the panel's
+ *    read-only GET /api/gmail-cleanup/batches/<id>. Read-only:
+ *    neither surface can mutate anything.
  */
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -226,7 +233,10 @@ export function cleanupRuleMatches(rule: GmailCleanupRule, msg: GmailMessageSumm
 
 export type CleanupExclusion = "starred" | "important" | "unread-recent" | "never-sender" | "known-correspondent";
 
-function neverSenderMatches(from: string, list: string[]): boolean {
+/** Exported for the chunk-4 proposals scan (gmail-cleanup-
+ *  proposals.ts), which applies the same never-archive test to
+ *  messages no rule matched. */
+export function neverSenderMatches(from: string, list: string[]): boolean {
   const domain = from.split("@")[1] ?? "";
   return list.some((entry) => entry === from || entry.replace(/^@/, "") === domain);
 }
@@ -389,6 +399,129 @@ export class GmailCleanupManifestStore {
     const m = this.read<CleanupRunManifest>(this.runPath(batchId));
     return m && m.kind === "gmail-cleanup-run" && m.batchId === batchId ? m : null;
   }
+}
+
+// ------------------------------------------------- tap-through (chunk 4)
+
+/**
+ * One batch's full record — everything the morning report's batch
+ * + receipt line stands for, resolved back to its evidence: the
+ * run manifest's entries verbatim (exact message IDs, the rule
+ * that took each one, the prior label set its archive captured,
+ * the per-entry outcome), the batch's job and receipt IDs, and —
+ * when the dry-run manifest is still on disk — the selection
+ * context (what was scanned, left alone, excluded, withheld).
+ * Built ONLY from the manifest store: a batch with no run
+ * manifest has no record (null), and a missing dry-run manifest
+ * reads as plan: null, reported as such rather than reconstructed.
+ */
+export interface CleanupBatchRecord {
+  batchId: string;
+  jobId: string;
+  receiptId?: string;
+  undoJobId?: string;
+  undoReceiptId?: string;
+  status: CleanupRunManifest["status"];
+  startedAt: number;
+  finishedAt?: number;
+  undoneAt?: number;
+  ruleFileHash: string;
+  cap: number;
+  counts: { total: number; done: number; failed: number; skippedStale: number; undone: number };
+  plan: {
+    createdAt: number;
+    scanned: number;
+    noRule: number;
+    excluded: Record<CleanupExclusion, number>;
+    withheld: number;
+    overCap: number;
+    byRule: Record<string, number>;
+    shieldUnscanned: boolean;
+  } | null;
+  entries: CleanupRunEntry[];
+}
+
+export function cleanupBatchRecord(store: GmailCleanupManifestStore, batchId: string): CleanupBatchRecord | null {
+  const run = store.loadRun(batchId);
+  if (!run) return null;
+  const plan = store.loadDryRun(batchId);
+  return {
+    batchId: run.batchId,
+    jobId: run.jobId,
+    ...(run.receiptId ? { receiptId: run.receiptId } : {}),
+    ...(run.undoJobId ? { undoJobId: run.undoJobId } : {}),
+    ...(run.undoReceiptId ? { undoReceiptId: run.undoReceiptId } : {}),
+    status: run.status,
+    startedAt: run.startedAt,
+    ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
+    ...(run.undoneAt !== undefined ? { undoneAt: run.undoneAt } : {}),
+    ruleFileHash: run.ruleFileHash,
+    cap: run.cap,
+    counts: {
+      total: run.entries.length,
+      done: run.entries.filter((e) => e.state === "done").length,
+      failed: run.entries.filter((e) => e.state === "failed").length,
+      skippedStale: run.entries.filter((e) => e.state === "skipped-stale").length,
+      undone: run.entries.filter((e) => e.undone).length,
+    },
+    plan: plan
+      ? {
+          createdAt: plan.createdAt,
+          scanned: plan.scanned,
+          noRule: plan.noRule,
+          excluded: plan.excluded,
+          withheld: plan.withheld,
+          overCap: plan.overCap,
+          byRule: plan.byRule,
+          shieldUnscanned: plan.shieldUnscanned,
+        }
+      : null,
+    entries: run.entries,
+  };
+}
+
+/** The `cleanup show` rendering of a batch record. Deterministic:
+ *  manifest order, ISO timestamps, no locale anywhere — the same
+ *  record always prints the same text. */
+export function formatCleanupBatchRecord(record: CleanupBatchRecord): string[] {
+  const iso = (ts: number): string => new Date(ts).toISOString();
+  const lines: string[] = [];
+  lines.push(`gmail cleanup batch ${record.batchId}`);
+  lines.push(`job: ${record.jobId}`);
+  lines.push(`receipt: ${record.receiptId ?? "(none issued)"}`);
+  lines.push(`status: ${record.status}`);
+  lines.push(`started: ${iso(record.startedAt)}`);
+  lines.push(`finished: ${record.finishedAt !== undefined ? iso(record.finishedAt) : "(not settled)"}`);
+  lines.push(`rule file hash: ${record.ruleFileHash}`);
+  lines.push(`nightly cap: ${record.cap}`);
+  if (record.plan) {
+    const ex = record.plan.excluded;
+    const excludedTotal = Object.values(ex).reduce((a, b) => a + b, 0);
+    lines.push(
+      `selection: scanned ${record.plan.scanned} inbox messages; ${record.plan.noRule} matched no rule; ` +
+        `${excludedTotal} excluded (starred ${ex.starred}, important ${ex.important}, unread<${UNREAD_RECENT_DAYS}d ${ex["unread-recent"]}, ` +
+        `never-sender ${ex["never-sender"]}, known correspondent ${ex["known-correspondent"]})` +
+        (record.plan.withheld ? `; ${record.plan.withheld} withheld by the Shield gate` : "") +
+        (record.plan.overCap ? `; ${record.plan.overCap} over the cap` : "") +
+        (record.plan.shieldUnscanned ? "; snippets crossed unscanned (no Shield scanner was wired)" : ""),
+    );
+  } else {
+    lines.push("selection: (the dry-run manifest for this batch is not on disk — the run manifest below is the full record)");
+  }
+  const c = record.counts;
+  lines.push(`outcome: ${c.done} archived, ${c.failed} failed, ${c.skippedStale} skipped-stale, ${c.undone} restored by undo — ${c.total} entries`);
+  lines.push("entries:");
+  if (record.entries.length === 0) lines.push("  (none)");
+  for (const e of record.entries) {
+    lines.push(
+      `  ${e.id} | ${e.rule} | ${e.from} | ${e.subject} | ${e.date} | labels before: ${e.priorLabelIds.join(", ") || "(none)"} | ${e.state}` +
+        `${e.undone ? " (undone)" : ""}${e.detail ? ` — ${e.detail}` : ""}`,
+    );
+  }
+  if (record.undoneAt !== undefined) {
+    lines.push(`undo: job ${record.undoJobId ?? "(unknown)"} • receipt ${record.undoReceiptId ?? "(none issued)"} • at ${iso(record.undoneAt)}`);
+  }
+  return lines;
 }
 
 // ------------------------------------------------------------------ engine
@@ -755,6 +888,26 @@ function schedulerStatusLine(stateDir: string): string {
   }
 }
 
+/** Display-only read of the chunk-4 proposals file for the status
+ *  surface. The authoritative store lives in gmail-cleanup-
+ *  proposals.ts (which imports this module — the read here stays
+ *  local to avoid the cycle, the schedulerStatusLine precedent);
+ *  any problem reading the file surfaces as a pointer to the
+ *  proposals surface, never as a guessed count. */
+function pendingProposalsLine(stateDir: string): string {
+  const path = join(stateDir, "gmail-cleanup-proposals.json");
+  if (!existsSync(path)) {
+    return "cleanup rule proposals: none pending — proposals appear after a cleanup cycle observes unmatched bulk senders";
+  }
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8")) as { proposals?: { status?: unknown }[] };
+    const pending = Array.isArray(raw.proposals) ? raw.proposals.filter((p) => p?.status === "pending").length : 0;
+    return `cleanup rule proposals: ${pending} pending — review with: gmail-admin cleanup proposals list`;
+  } catch {
+    return `cleanup rule proposals: the proposals file at ${path} is unreadable — see: gmail-admin cleanup proposals list`;
+  }
+}
+
 function formatPlan(plan: CleanupPlan): string[] {
   const lines: string[] = [];
   lines.push(`would archive ${plan.entries.length}, by rule:`);
@@ -778,13 +931,15 @@ function formatPlan(plan: CleanupPlan): string[] {
 
 /**
  * The cleanup operator surface, reached as
- * `node main.js gmail-admin cleanup <status|dry-run|archive|undo>`.
+ * `node main.js gmail-admin cleanup <status|dry-run|archive|undo|show>`.
  * (`gmail-admin cleanup schedule <...>` is the chunk-3 arming
- * surface; main.ts routes it to gmail-cleanup-scheduler.ts.)
+ * surface and `gmail-admin cleanup proposals <...>` the chunk-4
+ * proposals surface; main.ts routes those two to
+ * gmail-cleanup-scheduler.ts and gmail-cleanup-proposals.ts.)
  * Deliberately operator-only: nothing in the agent's tool surface
- * routes here. archive/undo take an explicit --batch <id> naming a
- * manifest — there is no "archive whatever matches now" command,
- * by design.
+ * routes here. archive/undo/show take an explicit --batch <id>
+ * naming a manifest — there is no "archive whatever matches now"
+ * command, by design.
  */
 export async function runGmailCleanupAdmin(argv: string[], deps: GmailCleanupAdminDeps): Promise<number> {
   const [cmd, ...rest] = argv;
@@ -822,6 +977,23 @@ export async function runGmailCleanupAdmin(argv: string[], deps: GmailCleanupAdm
           `cleanup rules: ${existed ? `${rules.rules.length} rule(s) in ${rulesPath}` : `no rule file at ${rulesPath} — the empty default applies (nothing would be archived)`}; nightly cap ${effectiveCleanupCap(rules)} (hard cap ${GMAIL_CLEANUP_HARD_CAP})`,
         );
         console.log(schedulerStatusLine(stateDir));
+        console.log(pendingProposalsLine(stateDir));
+        return 0;
+      }
+      case "show": {
+        // Chunk 4 tap-through: a pure manifest-store read — no
+        // engine, no transport, no mailbox contact at all.
+        const batchId = flag("--batch");
+        if (!batchId) {
+          console.error("usage: gmail-admin cleanup show --batch <batchId>");
+          return 2;
+        }
+        const record = cleanupBatchRecord(store, batchId);
+        if (!record) {
+          console.error(`gmail cleanup: no run manifest for batch "${batchId}" — a batch record exists only once a dry run has been archived`);
+          return 1;
+        }
+        for (const line of formatCleanupBatchRecord(record)) console.log(line);
         return 0;
       }
       case "dry-run": {
@@ -877,7 +1049,7 @@ export async function runGmailCleanupAdmin(argv: string[], deps: GmailCleanupAdm
         return run.status === "undone" ? 0 : 1;
       }
       default:
-        console.error("usage: gmail-admin cleanup <status|dry-run|archive --batch <id>|undo --batch <id>|schedule <status|enable|disable>>");
+        console.error("usage: gmail-admin cleanup <status|dry-run|archive --batch <id>|undo --batch <id>|show --batch <id>|schedule <status|enable|disable>|proposals <list|generate|accept <id>|reject <id>>>");
         return 2;
     }
   } catch (e) {

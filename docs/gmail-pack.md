@@ -117,7 +117,7 @@ It never enters the agent's context. Getting those three values:
    or expired refresh token shows up here instead of failing
    silently later) — never a credential value.
 
-## The cleanup layer (MVP chunks 1–3)
+## The cleanup layer (MVP chunks 1–4)
 
 On top of the pack sits a deterministic cleanup engine
 (`packages/control-plane/src/gmail-cleanup.ts`) for the overnight
@@ -152,13 +152,18 @@ Operator surface:
 
 ```sh
 node main.js gmail-admin status                     # pack state + OAuth health (live token exchange)
-node main.js gmail-admin cleanup status             # the same health probe + rule-file/cap summary + scheduler armed state
+node main.js gmail-admin cleanup status             # the same health probe + rule-file/cap summary + scheduler armed state + pending proposal count
 node main.js gmail-admin cleanup dry-run            # "would archive N, by rule" + manifest; changes nothing
 node main.js gmail-admin cleanup archive --batch <batchId>   # execute exactly that dry run's manifest
 node main.js gmail-admin cleanup undo --batch <batchId>      # restore the batch's exact prior label sets
+node main.js gmail-admin cleanup show --batch <batchId>      # the batch's full record (tap-through; read-only)
 node main.js gmail-admin cleanup schedule enable --conversation <telegram chat id>   # arm the overnight run
 node main.js gmail-admin cleanup schedule status    # armed state, run/report times, last run + report dates
 node main.js gmail-admin cleanup schedule disable   # disarm (config kept)
+node main.js gmail-admin cleanup proposals list     # pending rule proposals with their evidence
+node main.js gmail-admin cleanup proposals generate # rescan unmatched senders for proposals (read-only)
+node main.js gmail-admin cleanup proposals accept <id>   # append the proposed rule to the rule file (validated first)
+node main.js gmail-admin cleanup proposals reject <id>   # resolve as no — final, never re-proposed
 ```
 
 The overnight scheduler (chunk 3,
@@ -181,7 +186,57 @@ id, its receipt id, and the undo command for the batch. A Mac
 that slept through a window catches up at its first tick after
 wake; a failed cycle (pack not set up, selection error) still
 reports at report time — plainly, as a failure, with "nothing was
-archived" — instead of staying silent.
+archived" — instead of staying silent. After a cycle settles it
+also refreshes the rule proposals (chunk 4, below) from the
+senders it left unmatched — a log line notes how many are
+pending; the report text itself is unchanged.
+
+### Tap-through (chunk 4)
+
+Every line of the morning report resolves to its evidence. The
+report's batch id + receipt id name a **batch record**: the run
+manifest's entries verbatim (exact message IDs, the rule that
+took each one, the prior label set its archive captured, the
+per-entry outcome), the batch's job and receipt ids, and the
+dry-run selection context when that manifest is still on disk.
+Two read-only surfaces serve the same record, both built from
+the manifest store and nothing else:
+
+- `gmail-admin cleanup show --batch <batchId>` prints it.
+- `GET /api/gmail-cleanup/batches/<batchId>` on the panel
+  returns it as JSON for the panel/iPhone to render. GET only —
+  any other method on that path is a 404 — and operator-token
+  only: the record enumerates mail metadata, so it is *not* on
+  the paired-device surface. An unwired backend answers 501; an
+  unknown batch answers 404.
+
+### Rule proposals (chunk 4)
+
+After a cycle (or on `cleanup proposals generate`), a
+deterministic, metadata-only scan tallies inbox senders that
+**no rule matched**. A sender is proposed only on a strong bulk
+signal: at least 3 unmatched messages, at least half carrying
+one of Gmail's own bulk category labels (Promotions / Social /
+Updates / Forums). The selection protections apply before
+counting — starred, IMPORTANT, unread, never-archive senders,
+and known correspondents are never proposed — and there are no
+model calls: the heuristic is counts and labels, like the
+selector. A proposal is a record in
+`<state>/gmail-cleanup-proposals.json` holding the full proposed
+rule (`proposed: <sender>` — archive from that sender) plus its
+evidence (counts, date range, sample subjects).
+
+A proposal **never takes effect on its own**: no cycle, dry
+run, or archive consults the proposals file. `proposals accept
+<id>` appends the rule to the rule file — but only after the
+resulting file passes the same `loadCleanupRules` validation
+the engine loads with, checked on a temp file, so a bad accept
+leaves the real file byte-identical and the proposal pending.
+Accepting changes the rule file's hash, so earlier dry-run
+manifests stop matching it (chunk 2's rule) — dry-run again
+before archiving. `proposals reject <id>` is final: the record
+stays as the audit trail and the sender is never proposed
+again.
 
 ## Revoking
 

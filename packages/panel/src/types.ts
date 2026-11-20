@@ -627,6 +627,58 @@ export type PanelWatchFrameResult =
   | { ok: true; contentType: string; bytes: Uint8Array }
   | { ok: false; detail: string };
 
+/** v0.17.8 (Gmail cleanup chunk 4): one cleanup batch's full
+ *  record — the tap-through behind the morning report's batch +
+ *  receipt line. Mirrors CleanupBatchRecord in the control plane
+ *  (the manifest store is the source; this is the wire shape the
+ *  panel/iPhone renders from). Read-only by construction: the
+ *  record enumerates what a settled run did — exact message IDs,
+ *  the rule per ID, the prior label set each archive captured —
+ *  and offers no operation on any of it. The receipt named here
+ *  is the gate's local-stub HMAC receipt, hash-bound to the
+ *  manifest — tamper-evident, not an Agent-Shield Protocol
+ *  receipt. */
+export interface PanelGmailCleanupEntryData {
+  id: string;
+  threadId: string;
+  from: string;
+  subject: string;
+  date: string;
+  priorLabelIds: string[];
+  rule: string;
+  state: "pending" | "done" | "skipped-stale" | "failed";
+  detail?: string;
+  undone?: boolean;
+}
+
+export interface PanelGmailCleanupBatchData {
+  batchId: string;
+  jobId: string;
+  receiptId?: string;
+  undoJobId?: string;
+  undoReceiptId?: string;
+  status: "running" | "verified-done" | "failed-loudly" | "undone";
+  startedAt: number;
+  finishedAt?: number;
+  undoneAt?: number;
+  ruleFileHash: string;
+  cap: number;
+  counts: { total: number; done: number; failed: number; skippedStale: number; undone: number };
+  /** The dry-run selection context, when that manifest is still
+   *  on disk; null when it isn't (the run record stands alone). */
+  plan: {
+    createdAt: number;
+    scanned: number;
+    noRule: number;
+    excluded: Record<string, number>;
+    withheld: number;
+    overCap: number;
+    byRule: Record<string, number>;
+    shieldUnscanned: boolean;
+  } | null;
+  entries: PanelGmailCleanupEntryData[];
+}
+
 export interface PanelBackend {
   status(): PanelStatusData;
   ledger(): PanelLedgerData;
@@ -794,4 +846,12 @@ export interface PanelBackend {
   voiceSessionNextAudio(sessionId: string, afterSeq: number): PanelVoiceAudioSegmentData;
   voiceSessionInterrupt(sessionId: string): PanelActionResult;
   voiceSessionEnd(sessionId: string): PanelVoiceSessionData;
+  /** v0.17.8 (Gmail cleanup chunk 4): a cleanup batch's full
+   *  record (PanelGmailCleanupBatchData), read from the cleanup
+   *  manifest store. Optional on the backend (the memoryStatus
+   *  pattern): a backend that doesn't wire it gets the server's
+   *  plain "not wired" answer, never a fake record. Returns null
+   *  when no run manifest exists for the batch (the route answers
+   *  404). Read-only — there is no write twin of this method. */
+  gmailCleanupBatch?(batchId: string): PanelGmailCleanupBatchData | null;
 }

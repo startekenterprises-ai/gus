@@ -411,6 +411,25 @@ export class PanelServer {
     if (method === "GET" && path === "/api/status") return json(200, this.backend.status());
     if (method === "GET" && path === "/api/ledger") return json(200, this.backend.ledger());
     if (method === "GET" && path === "/api/jobs") return json(200, this.backend.jobs());
+    // v0.17.8 (Gmail cleanup chunk 4): one cleanup batch's full
+    // record — the tap-through behind the morning report's batch
+    // + receipt line. GET only: any other method on this path
+    // falls through to the 404 below, so this surface cannot
+    // mutate anything. Operator-token tier only (deliberately
+    // NOT on the device surface): the record enumerates the
+    // operator's mail metadata, which a phone credential does
+    // not reach. An unwired backend answers 501, never a fake
+    // record; an unknown batch answers 404.
+    const cleanupBatchMatch = path.match(/^\/api\/gmail-cleanup\/batches\/([^/]+)$/);
+    if (method === "GET" && cleanupBatchMatch) {
+      if (!this.backend.gmailCleanupBatch) {
+        return json(501, { ok: false, detail: "Gmail cleanup batch records aren't wired in this deployment." });
+      }
+      const batchId = decodeURIComponent(cleanupBatchMatch[1]);
+      const batch = this.backend.gmailCleanupBatch(batchId);
+      if (!batch) return json(404, { ok: false, detail: `no gmail cleanup batch "${batchId}"` });
+      return json(200, batch);
+    }
     if (method === "GET" && path === "/api/approvals") return json(200, this.backend.approvals());
     // v0.7: resolution history for the desktop Approvals sidebar —
     // read-only, same token gate as every route above.

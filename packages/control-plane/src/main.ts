@@ -32,7 +32,9 @@
  * likewise; the pack's OAuth credential is the vault secret
  * "gmail-oauth" (docs/gmail-pack.md), its learned directory is
  * <state>/gmail-directory.json. The cleanup layer adds
- * gmail-admin cleanup <status|dry-run|archive|undo> (gmail-cleanup.ts).
+ * gmail-admin cleanup <status|dry-run|archive|undo|show> (gmail-cleanup.ts),
+ * cleanup schedule <status|enable|disable> (gmail-cleanup-scheduler.ts),
+ * and cleanup proposals <list|generate|accept|reject> (gmail-cleanup-proposals.ts).
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
@@ -60,7 +62,8 @@ import { Updater } from "./updater.js";
 import { runVaultAdmin } from "./vault-admin.js";
 import { loadProviderConfig, resolveProvider } from "./providers.js";
 import { GmailDirectory, GmailService, HttpGmailTransport, runGmailAdmin } from "./gmail.js";
-import { runGmailCleanupAdmin } from "./gmail-cleanup.js";
+import { cleanupBatchRecord, GmailCleanupManifestStore, runGmailCleanupAdmin } from "./gmail-cleanup.js";
+import { runGmailCleanupProposalsAdmin } from "./gmail-cleanup-proposals.js";
 import { runGmailCleanupScheduleAdmin, startGmailCleanupScheduler } from "./gmail-cleanup-scheduler.js";
 import { GitHubPublishService } from "./github.js";
 import { MacService } from "./mac.js";
@@ -130,7 +133,7 @@ const gmailDirectory = new GmailDirectory(`${stateDir}/gmail-directory.json`);
 if (process.argv[2] === "gmail-admin") {
   const rest = process.argv.slice(3);
   // The cleanup layer (gmail-cleanup.ts) is an operator surface of
-  // the same pack: `gmail-admin cleanup <status|dry-run|archive|undo>`.
+  // the same pack: `gmail-admin cleanup <status|dry-run|archive|undo|show>`.
   // It needs the state dir (rule file + manifest store), so it is
   // routed here rather than inside runGmailAdmin.
   if (rest[0] === "cleanup") {
@@ -139,6 +142,21 @@ if (process.argv[2] === "gmail-admin") {
     // ever reads/writes its own config file in the state dir.
     if (rest[1] === "schedule") {
       process.exit(await runGmailCleanupScheduleAdmin(rest.slice(2), { stateDir }));
+    }
+    // The chunk-4 proposals surface (`gmail-admin cleanup
+    // proposals <list|generate|accept <id>|reject <id>>`) lives
+    // with the proposals module; it reads the mailbox (generate)
+    // and writes only the proposals file and — on an explicit
+    // accept — the operator's rule file.
+    if (rest[1] === "proposals") {
+      process.exit(
+        await runGmailCleanupProposalsAdmin(rest.slice(2), {
+          vault,
+          directory: gmailDirectory,
+          stateDir,
+          transport: new HttpGmailTransport(vault),
+        }),
+      );
     }
     process.exit(
       await runGmailCleanupAdmin(rest.slice(1), {
@@ -886,6 +904,13 @@ const panelBackend: PanelBackend = {
         : undefined,
     };
   },
+  // v0.17.8 (Gmail cleanup chunk 4): the batch tap-through — the
+  // morning report's batch + receipt line resolves to the batch's
+  // full record, read from the cleanup manifest store and nothing
+  // else. The panel route is GET-only; there is no write path
+  // here, and the store read is the whole implementation.
+  gmailCleanupBatch: (batchId) =>
+    cleanupBatchRecord(new GmailCleanupManifestStore(`${stateDir}/gmail-cleanup`), batchId),
   // v0.13.0 (Memory Slice B): the Memory inbox + the panel twins
   // of /remember and /forget — the SAME MemoryWriteService the
   // channel commands use, so the semantics (screening, dated

@@ -14,6 +14,11 @@
  *    same way the approver-policy route normalizes its payload.
  *    Provisioning is NOT this route's job — it stays with the
  *    onboarding shield step.
+ *  - GET /api/gmail-cleanup/batches/<id> (v0.17.8, cleanup chunk
+ *    4) serves one cleanup batch's full record — the tap-through
+ *    behind the morning report. Read-only: writes on the path
+ *    404 without reaching the backend; an unwired backend
+ *    answers 501; an unknown batch answers 404.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -21,12 +26,39 @@ import { HELP_ENTRIES } from "../../packages/panel/src/help.js";
 import { PanelServer } from "../../packages/panel/src/server.js";
 import type {
   PanelBackend,
+  PanelGmailCleanupBatchData,
   PanelShieldPolicyData,
 } from "../../packages/panel/src/types.js";
 
-function stubBackend(calls: string[]): PanelBackend {
+/** The chunk-4 cleanup batch fixture the stub backend serves. */
+const CLEANUP_BATCH_FIXTURE: PanelGmailCleanupBatchData = {
+  batchId: "cleanup-fixture-1",
+  jobId: "gmail-cleanup-cleanup-fixture-1",
+  receiptId: "rcpt_fixture",
+  status: "verified-done",
+  startedAt: 1795185000000,
+  finishedAt: 1795185060000,
+  ruleFileHash: "fixturehash",
+  cap: 200,
+  counts: { total: 1, done: 1, failed: 0, skippedStale: 0, undone: 0 },
+  plan: null,
+  entries: [
+    {
+      id: "m1",
+      threadId: "t1",
+      from: "deals@shop.example",
+      subject: "Big sale",
+      date: "Thu, 01 Oct 2026 10:00:00 GMT",
+      priorLabelIds: ["INBOX", "CATEGORY_PROMOTIONS"],
+      rule: "promos>30d",
+      state: "done",
+    },
+  ],
+};
+
+function stubBackend(calls: string[], opts?: { wireCleanupBatch?: boolean }): PanelBackend {
   const action = async () => ({ ok: true, detail: "ok" });
-  return {
+  const backend: PanelBackend = {
     status: () => ({
       version: "0.9.0",
       killed: false,
@@ -122,11 +154,21 @@ function stubBackend(calls: string[]): PanelBackend {
     voiceSessionInterrupt: () => ({ ok: false, detail: "voice sessions are not wired in this stub" }),
     voiceSessionEnd: () => ({ ok: false, active: false, detail: "voice sessions are not wired in this stub", turns: [] }),
   };
+  if (opts?.wireCleanupBatch !== false) {
+    backend.gmailCleanupBatch = (batchId: string) => {
+      calls.push(`cleanupBatch:${batchId}`);
+      return batchId === CLEANUP_BATCH_FIXTURE.batchId ? CLEANUP_BATCH_FIXTURE : null;
+    };
+  }
+  return backend;
 }
 
-async function withPanel(fn: (base: string, calls: string[]) => Promise<void>): Promise<void> {
+async function withPanel(
+  fn: (base: string, calls: string[]) => Promise<void>,
+  opts?: { wireCleanupBatch?: boolean },
+): Promise<void> {
   const calls: string[] = [];
-  const panel = new PanelServer(stubBackend(calls), { token: "test-token-123", port: 0 });
+  const panel = new PanelServer(stubBackend(calls, opts), { token: "test-token-123", port: 0 });
   await panel.start();
   try {
     await fn(`http://127.0.0.1:${panel.port}`, calls);
@@ -213,4 +255,51 @@ test("POST /api/shield-policy: token-gated; normalized payload reaches the backe
     assert.equal(res2.status, 200);
     assert.deepEqual(calls, ["shield:false:open", "shield:false:"]);
   });
+});
+
+test("GET /api/gmail-cleanup/batches/<id>: token-gated; returns the batch record; unknown batch 404s", async () => {
+  await withPanel(async (base, calls) => {
+    const noAuth = await fetch(`${base}/api/gmail-cleanup/batches/cleanup-fixture-1`);
+    assert.equal(noAuth.status, 401);
+    assert.deepEqual(calls, [], "an unauthenticated call must never reach the backend");
+
+    const res = await fetch(`${base}/api/gmail-cleanup/batches/cleanup-fixture-1`, { headers: AUTH });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as PanelGmailCleanupBatchData;
+    assert.deepEqual(body, CLEANUP_BATCH_FIXTURE);
+    assert.deepEqual(calls, ["cleanupBatch:cleanup-fixture-1"]);
+
+    const missing = await fetch(`${base}/api/gmail-cleanup/batches/nope`, { headers: AUTH });
+    assert.equal(missing.status, 404);
+    const missingBody = (await missing.json()) as { ok: boolean; detail: string };
+    assert.equal(missingBody.ok, false);
+    assert.match(missingBody.detail, /no gmail cleanup batch "nope"/);
+  });
+});
+
+test("the cleanup batch route is read-only: writes are refused and never reach the backend", async () => {
+  await withPanel(async (base, calls) => {
+    for (const method of ["POST", "PUT", "DELETE", "PATCH"]) {
+      const res = await fetch(`${base}/api/gmail-cleanup/batches/cleanup-fixture-1`, {
+        method,
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: method === "DELETE" ? undefined : JSON.stringify({ state: "undone" }),
+      });
+      assert.equal(res.status, 404, `${method} on the batch path must not exist`);
+    }
+    assert.deepEqual(calls, [], "no write attempt reached the backend");
+  });
+});
+
+test("GET /api/gmail-cleanup/batches/<id>: an unwired backend answers 501, never a fake record", async () => {
+  await withPanel(
+    async (base) => {
+      const res = await fetch(`${base}/api/gmail-cleanup/batches/cleanup-fixture-1`, { headers: AUTH });
+      assert.equal(res.status, 501);
+      const body = (await res.json()) as { ok: boolean; detail: string };
+      assert.equal(body.ok, false);
+      assert.match(body.detail, /aren't wired/);
+    },
+    { wireCleanupBatch: false },
+  );
 });

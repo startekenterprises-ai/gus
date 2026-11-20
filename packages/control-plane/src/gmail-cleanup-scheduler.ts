@@ -22,6 +22,11 @@
  *     cycle reports its failure plainly at report time instead of
  *     staying silent.
  *
+ * Chunk 4 adds one rider to the cycle: after it settles, rule
+ * proposals are generated from the senders it left unmatched
+ * (gmail-cleanup-proposals.ts) — data for the operator to accept
+ * or reject, never applied by the cycle itself.
+ *
  * DEFAULT OFF. The config file (<state>/gmail-cleanup-scheduler
  * .json) ships absent, which means disabled; the timer ticks and
  * does nothing. Arming is an explicit operator action —
@@ -50,6 +55,11 @@ import {
   type CleanupRunManifest,
   type CleanupTransport,
 } from "./gmail-cleanup.js";
+import {
+  cleanupProposalsPath,
+  generateCleanupProposals,
+  GmailCleanupProposalStore,
+} from "./gmail-cleanup-proposals.js";
 import {
   HttpGmailTransport,
   GMAIL_OAUTH_SECRET,
@@ -351,6 +361,26 @@ export async function runGmailCleanupCycle(deps: GmailCleanupSchedulerDeps): Pro
     logPath: join(stateDir, "receipts.jsonl"),
   };
   const run = await engine.archive(plan.batchId, store, { rules, hash }, receipts);
+  // Chunk 4: rule proposals from what the cycle left unmatched.
+  // Best-effort by design — the batch has already settled and
+  // receipted, so a proposal failure logs loudly but never fails
+  // the cycle; and a proposal itself changes nothing until the
+  // operator accepts it (gmail-cleanup-proposals.ts).
+  try {
+    const pending = await generateCleanupProposals(
+      transport,
+      rules,
+      new GmailCleanupProposalStore(cleanupProposalsPath(stateDir)),
+      { directory: deps.directory, shield: deps.shield, now: deps.now },
+    );
+    if (pending.length > 0) {
+      deps.log?.(
+        `gmail cleanup scheduler: ${pending.length} cleanup rule proposal(s) pending — review with: gmail-admin cleanup proposals list`,
+      );
+    }
+  } catch (e) {
+    deps.log?.(`gmail cleanup scheduler: rule proposal generation failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
   return { batchId: plan.batchId, run };
 }
 
