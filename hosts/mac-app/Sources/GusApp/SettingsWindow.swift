@@ -122,7 +122,10 @@ final class SettingsModel: ObservableObject {
     /// Empty when the control plane reports no bundled
     /// engine. Refreshed on its own (refreshVoiceSettings)
     /// so a download's progress lands without touching the
-    /// operator's unsaved form edits.
+    /// operator's unsaved form edits. v0.17.5: the pane's
+    /// Kokoro line is always visible — this sentence fills
+    /// it when Kokoro is the saved engine; otherwise the
+    /// line states plainly that Kokoro is off.
     @Published var voiceBundledStatus = ""
     /// v0.17.2: the bundled engine's loopback base URL, kept
     /// alongside its status so the speaker test below can ask
@@ -130,6 +133,12 @@ final class SettingsModel: ObservableObject {
     /// when Built-in Kokoro is the picked engine.
     @Published var voiceBundledBaseUrl = ""
     private var voiceSeeded = false
+    /// v0.17.5: the engine pair as last seeded from / saved to
+    /// the panel — the baseline the Voice pane's save-on-select
+    /// compares a picker change against, so the one-time seed
+    /// itself never fires a save (and never marks enginesChosen
+    /// for a form the operator hasn't touched).
+    private var voiceEnginesSaved: (stt: String, tts: String)?
 
     // Devices & identity (v0.12.0 — pivot Phase 1 / iPhone
     // Step 1): the registry the panel keeps (GET /api/devices).
@@ -263,6 +272,7 @@ final class SettingsModel: ObservableObject {
                 self.voiceBargeIn = v.bargeIn ?? true
                 self.voiceSttEngine = v.sttEngine ?? "local"
                 self.voiceTtsEngine = v.ttsEngine ?? "local"
+                self.voiceEnginesSaved = (self.voiceSttEngine, self.voiceTtsEngine)
                 self.voiceSttUrl = v.sttBaseUrl
                 self.voiceSttModel = v.sttModel
                 self.voiceTtsUrl = v.ttsBaseUrl
@@ -461,6 +471,26 @@ final class SettingsModel: ObservableObject {
             "ttsModel": voiceTtsModel.trimmingCharacters(in: .whitespacesAndNewlines),
             "ttsVoice": voiceTtsVoice.trimmingCharacters(in: .whitespacesAndNewlines),
         ])
+        voiceEnginesSaved = (voiceSttEngine, voiceTtsEngine)
+    }
+
+    /// v0.17.5: save-on-select for the engine pickers — the
+    /// Voice pane calls this when either picker changes. An
+    /// engine pick is a decision, not a draft: it goes through
+    /// the same saveVoice() the Save button uses, so it lands
+    /// on the next call (and picking Built-in Kokoro starts its
+    /// model download at once) without the operator hunting
+    /// for a Save button below the fold — the v0.17.2–0.17.4
+    /// trap, where a pick that was never saved read as a broken
+    /// engine. The seeded baseline keeps the initial settings
+    /// read from firing a save of its own, and the bundled
+    /// status is re-read so the pane's Kokoro line follows the
+    /// pick (Downloading… / Ready / Unavailable).
+    func saveVoiceOnEngineChange() {
+        guard let saved = voiceEnginesSaved,
+              saved.stt != voiceSttEngine || saved.tts != voiceTtsEngine else { return }
+        saveVoice()
+        refreshVoiceSettings()
     }
 
     // MARK: Voice tests (v0.9.9)

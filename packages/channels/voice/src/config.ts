@@ -44,6 +44,12 @@
  * at call start and falls back to built-in for that call when
  * it doesn't answer.
  *
+ * v0.17.5: the TTS default flips once more — to the bundled
+ * Kokoro engine (see the VoiceEngine note). Fresh installs and
+ * un-chosen files now default the mouth to "bundled"; the ears
+ * are unchanged, and every chosen engine is still honored
+ * exactly as written.
+ *
  * The one ambiguity the flat file cannot resolve on its own:
  * a stored "local" written BEFORE v0.15.6 might be a deliberate
  * pick or merely the round-tripped default above. So from
@@ -64,14 +70,24 @@ import { join } from "node:path";
  *
  *  v0.17.2: a third value, TTS only — "bundled": the Kokoro
  *  engine GUS carries itself (@gus/kokoro-local), supervised by
- *  the control plane and reached at its loopback base URL. It is
- *  never a default and never the product of the configured-URL
- *  fallback below: a stored "bundled" can only have come from
- *  the operator picking "Built-in Kokoro" in Settings, so it is
- *  honored as written, like a stored "endpoint". The STT side
- *  has no bundled engine (the bundled package is a mouth, not
- *  ears): a "bundled" in the STT slot resolves exactly like any
- *  other unrecognized value does today. */
+ *  the control plane and reached at its loopback base URL. A
+ *  stored "bundled" can only have come from the operator picking
+ *  "Built-in Kokoro" in Settings, so it is honored as written,
+ *  like a stored "endpoint".
+ *
+ *  v0.17.5: "bundled" is also the shipped TTS default — a fresh
+ *  install (no voice.json, or nothing on file that counts as a
+ *  choice) speaks with the bundled Kokoro out of the box; the
+ *  operator's iMac test proved it (first audio in ~1.5 s, good
+ *  quality). It is still never the product of the configured-URL
+ *  rule below — a configured URL still defaults that side to
+ *  "endpoint" — and it never overrides a choice: a stored
+ *  "endpoint" is honored, and a stored "local" carrying the
+ *  enginesChosen marker is honored; only the un-chosen fallback
+ *  moved, from "local" to "bundled". The STT side has no bundled
+ *  engine (the bundled package is a mouth, not ears): a
+ *  "bundled" in the STT slot resolves exactly like any other
+ *  unrecognized value does today. */
 export type VoiceEngine = "local" | "endpoint" | "bundled";
 
 /** v0.9.11: how a call's spoken turns meet the Shield — "fast"
@@ -95,7 +111,9 @@ export interface VoiceConfig {
    *  Used only when sttEngine is "endpoint". */
   sttBaseUrl: string;
   sttModel: string;
-  /** v0.9.6: the speech engine — same rule as sttEngine. */
+  /** v0.9.6: the speech engine — the same resolution as
+   *  sttEngine, except the un-chosen default is "bundled"
+   *  since v0.17.5 (see the VoiceEngine note). */
   ttsEngine: VoiceEngine;
   /** v0.15.6: true when a settings surface that presents the
    *  engine pickers has saved since the marker existed — the
@@ -140,7 +158,7 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
   sttEngine: "local",
   sttBaseUrl: "http://127.0.0.1:8000/v1",
   sttModel: "whisper-1",
-  ttsEngine: "local",
+  ttsEngine: "bundled",
   ttsBaseUrl: "http://127.0.0.1:8880/v1",
   ttsModel: "kokoro",
   ttsVoice: "af_heart",
@@ -184,12 +202,16 @@ function urlConfigured(raw: unknown, shippedDefault: string): boolean {
  *  put it there. Otherwise — no engine field, garbage, or an
  *  unmarked "local" that may be the old default restating
  *  itself — the default decides: endpoint when the operator
- *  configured that side's URL, built-in when they didn't. */
+ *  configured that side's URL, the side's unconfigured default
+ *  when they didn't ("local" for STT; "bundled" for TTS since
+ *  v0.17.5 — the un-chosen fallback is the only thing that
+ *  moved, so no saved choice is ever overridden). */
 function resolveEngine(
   rawEngine: unknown,
   configured: boolean,
   chosen: boolean,
   allowBundled: boolean = false,
+  unconfiguredDefault: VoiceEngine = "local",
 ): VoiceEngine {
   // v0.17.2: "bundled" is honored verbatim where it exists
   // (TTS) — it was never a shipped default, so its presence in
@@ -198,7 +220,7 @@ function resolveEngine(
   if (rawEngine === "bundled" && allowBundled) return "bundled";
   if (rawEngine === "endpoint") return "endpoint";
   if (rawEngine === "local" && chosen) return "local";
-  return configured ? "endpoint" : "local";
+  return configured ? "endpoint" : unconfiguredDefault;
 }
 
 /** Parse defensively: only a literal `true` enables the channel,
@@ -217,7 +239,7 @@ export function parseVoiceConfig(raw: unknown): VoiceConfig {
     sttEngine: resolveEngine(r.sttEngine, urlConfigured(r.sttBaseUrl, DEFAULT_VOICE_CONFIG.sttBaseUrl), chosen),
     sttBaseUrl: urlOr(r.sttBaseUrl, DEFAULT_VOICE_CONFIG.sttBaseUrl),
     sttModel: textOr(r.sttModel, DEFAULT_VOICE_CONFIG.sttModel),
-    ttsEngine: resolveEngine(r.ttsEngine, urlConfigured(r.ttsBaseUrl, DEFAULT_VOICE_CONFIG.ttsBaseUrl), chosen, true),
+    ttsEngine: resolveEngine(r.ttsEngine, urlConfigured(r.ttsBaseUrl, DEFAULT_VOICE_CONFIG.ttsBaseUrl), chosen, true, "bundled"),
     ttsBaseUrl: urlOr(r.ttsBaseUrl, DEFAULT_VOICE_CONFIG.ttsBaseUrl),
     ttsModel: textOr(r.ttsModel, DEFAULT_VOICE_CONFIG.ttsModel),
     ttsVoice: textOr(r.ttsVoice, DEFAULT_VOICE_CONFIG.ttsVoice),

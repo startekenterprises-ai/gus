@@ -214,23 +214,25 @@ test("voice config: defensive parse — bad URLs fall back, enable needs a liter
   assert.equal(cfg.ttsBaseUrl, DEFAULT_VOICE_CONFIG.ttsBaseUrl, "an unusable URL falls back, never half-applies");
 });
 
-test("voice config (v0.9.6, amended v0.15.6): engines default to built-in; only a literal 'endpoint' opts out", () => {
+test("voice config (v0.9.6, amended v0.15.6, v0.17.5): default engines are built-in ears and bundled Kokoro speech; only a literal 'endpoint' opts out", () => {
   // The migration shape: a voice.json written before engines
-  // existed parses to built-in for both halves when the URLs on
-  // file are just the shipped defaults — nothing was ever
-  // configured, so there is no endpoint to default to.
+  // existed parses to the shipped defaults for both halves when
+  // the URLs on file are just the shipped defaults — nothing was
+  // ever configured, so there is no endpoint to default to.
+  // v0.17.5: the shipped TTS default is the bundled Kokoro
+  // engine; STT still defaults to built-in.
   const untouched = parseVoiceConfig({ enabled: true, bargeIn: true });
   assert.equal(untouched.sttEngine, "local", "no engine field, no configured URL → built-in");
-  assert.equal(untouched.ttsEngine, "local");
+  assert.equal(untouched.ttsEngine, "bundled", "no engine field, no configured URL → bundled Kokoro (v0.17.5)");
   assert.equal(DEFAULT_VOICE_CONFIG.sttEngine, "local");
-  assert.equal(DEFAULT_VOICE_CONFIG.ttsEngine, "local");
+  assert.equal(DEFAULT_VOICE_CONFIG.ttsEngine, "bundled");
 
   const chosen = parseVoiceConfig({ sttEngine: "endpoint", ttsEngine: "endpoint" });
   assert.equal(chosen.sttEngine, "endpoint", "a literal 'endpoint' is honored");
   assert.equal(chosen.ttsEngine, "endpoint");
   const garbage = parseVoiceConfig({ sttEngine: "cloud", ttsEngine: 42 });
   assert.equal(garbage.sttEngine, "local", "anything else fails toward built-in, never a half-mode");
-  assert.equal(garbage.ttsEngine, "local");
+  assert.equal(garbage.ttsEngine, "bundled", "anything else fails toward the shipped default, never a half-mode");
 });
 
 test("voice config (v0.15.6): configured endpoint URLs are the default — no manual flip", () => {
@@ -263,10 +265,11 @@ test("voice config (v0.15.6): configured endpoint URLs are the default — no ma
   // Per-side: each half follows its own URL.
   const half = parseVoiceConfig({ sttBaseUrl: "http://192.168.2.42:8000/v1" });
   assert.equal(half.sttEngine, "endpoint", "the configured half flips");
-  assert.equal(half.ttsEngine, "local", "the unconfigured half stays built-in");
+  assert.equal(half.ttsEngine, "bundled", "the unconfigured half takes the shipped default — bundled Kokoro (v0.17.5)");
 
   // The shipped default URLs are NOT a configuration — a fresh
-  // install that saved the form untouched stays built-in.
+  // install that saved the form untouched resolves to the
+  // shipped defaults (built-in ears, bundled Kokoro speech).
   const defaults = parseVoiceConfig({
     sttEngine: "local",
     sttBaseUrl: "http://127.0.0.1:8000/v1",
@@ -274,7 +277,7 @@ test("voice config (v0.15.6): configured endpoint URLs are the default — no ma
     ttsBaseUrl: "http://127.0.0.1:8880/v1",
   });
   assert.equal(defaults.sttEngine, "local", "shipped default URLs never strand a fresh install");
-  assert.equal(defaults.ttsEngine, "local");
+  assert.equal(defaults.ttsEngine, "bundled", "shipped default URLs never strand a fresh install");
 
   // The marker: once a picker save has landed, a stored "local"
   // is the operator's explicit choice and sticks.

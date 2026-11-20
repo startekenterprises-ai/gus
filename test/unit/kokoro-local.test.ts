@@ -365,11 +365,15 @@ test("config: bundled never resolves on the STT side", () => {
   );
 });
 
-test("config: pre-existing file shapes resolve exactly as before", () => {
-  // The shipped defaults.
+test("config: pre-existing file shapes resolve exactly as before (v0.17.5: the empty shape takes the new shipped TTS default)", () => {
+  // The shipped defaults — v0.17.5: an empty file is a fresh
+  // install, so the mouth takes the new default, bundled
+  // Kokoro; the ears are unchanged. Every CHOSEN shape below
+  // resolves exactly as before — the flip moves only the
+  // un-chosen fallback.
   const d = parseVoiceConfig({});
   assert.equal(d.sttEngine, "local");
-  assert.equal(d.ttsEngine, "local");
+  assert.equal(d.ttsEngine, "bundled");
   // An explicitly chosen endpoint pair.
   const e = parseVoiceConfig({ sttEngine: "endpoint", ttsEngine: "endpoint", enginesChosen: true });
   assert.equal(e.sttEngine, "endpoint");

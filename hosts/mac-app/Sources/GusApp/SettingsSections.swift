@@ -382,6 +382,12 @@ struct SettingsVoiceView: View {
                 Text("Endpoint").tag("endpoint")
             }
             .pickerStyle(.segmented)
+            // v0.17.5: engine picks save on select (the model's
+            // saveVoiceOnEngineChange — same write path as the
+            // Save button below). A pick is live on the next
+            // call the moment it's made; there is no unsaved
+            // engine state to test against by mistake.
+            .onChange(of: model.voiceSttEngine) { _ in model.saveVoiceOnEngineChange() }
             Picker("Speech (TTS)", selection: $model.voiceTtsEngine) {
                 Text("Built-in").tag("local")
                 Text("Endpoint").tag("endpoint")
@@ -395,13 +401,26 @@ struct SettingsVoiceView: View {
             }
             .pickerStyle(.segmented)
             .onAppear { model.refreshVoiceSettings() }
+            .onChange(of: model.voiceTtsEngine) { _ in model.saveVoiceOnEngineChange() }
+            // v0.17.5: ONE Kokoro status line, always shown.
+            // The pickers save on select, so the pick above IS
+            // the saved state this line describes: when Kokoro
+            // is the engine, the supervisor's own status
+            // sentence — Downloading… (with progress) / Ready /
+            // Unavailable + the reason, verbatim from the
+            // control plane; before the first status lands, the
+            // saved-state truth. When another engine is the
+            // saved one, the line says Kokoro is off and how to
+            // turn it on — no more reading "off" under a picker
+            // that shows it picked but was never saved.
             if model.voiceTtsEngine == "bundled" {
-                // The supervisor's own status sentence —
-                // Downloading… (with progress) / Ready /
-                // Unavailable + the reason, verbatim.
                 Text(model.voiceBundledStatus.isEmpty
-                    ? "Built-in Kokoro runs the Kokoro voice model on this Mac — the model downloads once, the first time it's picked."
+                    ? "Built-in Kokoro is the speech engine — it starts on the next call."
                     : model.voiceBundledStatus)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                Text("Built-in Kokoro is off — select it above to use it.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -449,83 +468,106 @@ struct SettingsVoiceView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
+            // v0.17.5: the endpoint fields belong to the
+            // Endpoint engine only — each half's URL/model
+            // fields (and its Test connection) show only while
+            // that half's engine IS Endpoint, hidden otherwise,
+            // so the page shows only what the picked engines
+            // actually use. The Kokoro Voice picker is the one
+            // exception: voice.json's ttsVoice names the voice
+            // for BOTH Kokoro engines (endpoint and bundled —
+            // the bundled speaker test and the call itself
+            // speak with it), so it stays whenever either is
+            // picked; under Built-in speech the built-in voice
+            // picker above is the voice choice instead.
             Group {
-                Text("Hearing — transcription (STT)")
-                    .font(.headline)
-                HStack {
-                    Text("Endpoint")
-                        .frame(width: 90, alignment: .leading)
-                    TextField("http://127.0.0.1:8000/v1", text: $model.voiceSttUrl)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(.callout, design: .monospaced))
-                }
-                HStack {
-                    Text("Model")
-                        .frame(width: 90, alignment: .leading)
-                    TextField("whisper-1", text: $model.voiceSttModel)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 240)
-                }
-                HStack {
-                    Button("Test connection") {
-                        model.testVoiceConnection(kind: "stt")
+                if model.voiceSttEngine == "endpoint" {
+                    Text("Hearing — transcription (STT)")
+                        .font(.headline)
+                    HStack {
+                        Text("Endpoint")
+                            .frame(width: 90, alignment: .leading)
+                        TextField("http://127.0.0.1:8000/v1", text: $model.voiceSttUrl)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(.callout, design: .monospaced))
                     }
-                    if let r = model.voiceSttTestResult {
-                        Text(r)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                    HStack {
+                        Text("Model")
+                            .frame(width: 90, alignment: .leading)
+                        TextField("whisper-1", text: $model.voiceSttModel)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 240)
                     }
-                }
-                Text("Speech — synthesis (TTS)")
-                    .font(.headline)
-                HStack {
-                    Text("Endpoint")
-                        .frame(width: 90, alignment: .leading)
-                    TextField("http://127.0.0.1:8880/v1", text: $model.voiceTtsUrl)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(.callout, design: .monospaced))
-                }
-                HStack {
-                    Text("Model")
-                        .frame(width: 90, alignment: .leading)
-                    TextField("kokoro", text: $model.voiceTtsModel)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 240)
-                }
-                HStack {
-                    Text("Voice")
-                        .frame(width: 90, alignment: .leading)
-                    // v0.15.6: a picker, not the free-text field —
-                    // the curated Kokoro catalog, the same eight
-                    // voices the iPhone app offers (iOS 0.15.4).
-                    // The selection is still voice.json's
-                    // ttsVoice, saved by the same saveVoice() as
-                    // before; a name on file outside the catalog
-                    // rides along as a custom entry.
-                    Picker("", selection: $model.voiceTtsVoice) {
-                        ForEach(SettingsModel.kokoroVoiceOptions(current: model.voiceTtsVoice)) { option in
-                            Text(option.label).tag(option.id)
+                    HStack {
+                        Button("Test connection") {
+                            model.testVoiceConnection(kind: "stt")
+                        }
+                        if let r = model.voiceSttTestResult {
+                            Text(r)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
                         }
                     }
-                    .frame(maxWidth: 300)
                 }
-                Text("The curated Kokoro voices — the same set the iPhone app offers. The pick takes effect on the next call.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                HStack {
-                    Button("Test connection") {
-                        model.testVoiceConnection(kind: "tts")
+                if model.voiceTtsEngine == "endpoint" {
+                    Text("Speech — synthesis (TTS)")
+                        .font(.headline)
+                    HStack {
+                        Text("Endpoint")
+                            .frame(width: 90, alignment: .leading)
+                        TextField("http://127.0.0.1:8880/v1", text: $model.voiceTtsUrl)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(.callout, design: .monospaced))
                     }
-                    if let r = model.voiceTtsTestResult {
-                        Text(r)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                    HStack {
+                        Text("Model")
+                            .frame(width: 90, alignment: .leading)
+                        TextField("kokoro", text: $model.voiceTtsModel)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 240)
+                    }
+                }
+                if model.voiceTtsEngine != "local" {
+                    HStack {
+                        Text("Voice")
+                            .frame(width: 90, alignment: .leading)
+                        // v0.15.6: a picker, not the free-text
+                        // field — the curated Kokoro catalog, the
+                        // same eight voices the iPhone app offers
+                        // (iOS 0.15.4). The selection is still
+                        // voice.json's ttsVoice, saved by the same
+                        // saveVoice() as before; a name on file
+                        // outside the catalog rides along as a
+                        // custom entry.
+                        Picker("", selection: $model.voiceTtsVoice) {
+                            ForEach(SettingsModel.kokoroVoiceOptions(current: model.voiceTtsVoice)) { option in
+                                Text(option.label).tag(option.id)
+                            }
+                        }
+                        .frame(maxWidth: 300)
+                    }
+                    Text("The curated Kokoro voices — the same set the iPhone app offers. The pick takes effect on the next call.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                if model.voiceTtsEngine == "endpoint" {
+                    HStack {
+                        Button("Test connection") {
+                            model.testVoiceConnection(kind: "tts")
+                        }
+                        if let r = model.voiceTtsTestResult {
+                            Text(r)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
                     }
                 }
             }
-            Text("Test connection checks the values in the form right now — no need to save first, and nothing is saved or changed by testing.")
-                .font(.caption)
-                .foregroundColor(.secondary)
+            if model.voiceSttEngine == "endpoint" || model.voiceTtsEngine == "endpoint" {
+                Text("Test connection checks the values in the form right now — no need to save first, and nothing is saved or changed by testing.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
             Divider()
             Text("Test mic and speaker")
                 .font(.headline)
