@@ -31,7 +31,8 @@
  * Phase 6 (Gmail pack): node main.js gmail-admin <status|revoke>
  * likewise; the pack's OAuth credential is the vault secret
  * "gmail-oauth" (docs/gmail-pack.md), its learned directory is
- * <state>/gmail-directory.json.
+ * <state>/gmail-directory.json. The cleanup layer adds
+ * gmail-admin cleanup <status|dry-run|archive|undo> (gmail-cleanup.ts).
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
@@ -59,6 +60,7 @@ import { Updater } from "./updater.js";
 import { runVaultAdmin } from "./vault-admin.js";
 import { loadProviderConfig, resolveProvider } from "./providers.js";
 import { GmailDirectory, GmailService, HttpGmailTransport, runGmailAdmin } from "./gmail.js";
+import { runGmailCleanupAdmin } from "./gmail-cleanup.js";
 import { GitHubPublishService } from "./github.js";
 import { MacService } from "./mac.js";
 import { createMacHostAdapter } from "./mac-native.js";
@@ -125,7 +127,22 @@ if (process.argv[2] === "vault-admin") {
 const gmailDirectory = new GmailDirectory(`${stateDir}/gmail-directory.json`);
 
 if (process.argv[2] === "gmail-admin") {
-  process.exit(runGmailAdmin(process.argv.slice(3), vault, gmailDirectory));
+  const rest = process.argv.slice(3);
+  // The cleanup layer (gmail-cleanup.ts) is an operator surface of
+  // the same pack: `gmail-admin cleanup <status|dry-run|archive|undo>`.
+  // It needs the state dir (rule file + manifest store), so it is
+  // routed here rather than inside runGmailAdmin.
+  if (rest[0] === "cleanup") {
+    process.exit(
+      await runGmailCleanupAdmin(rest.slice(1), {
+        vault,
+        directory: gmailDirectory,
+        stateDir,
+        transport: new HttpGmailTransport(vault),
+      }),
+    );
+  }
+  process.exit(await runGmailAdmin(rest, vault, gmailDirectory));
 }
 
 const governor = new Governor(stateDir);

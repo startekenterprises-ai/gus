@@ -112,8 +112,52 @@ It never enters the agent's context. Getting those three values:
    node main.js gmail-admin status
    ```
 
-   `status` prints setup state and directory counts — never a
-   credential value.
+   `status` prints setup state, directory counts, and an OAuth
+   health line (it performs a live token exchange, so a revoked
+   or expired refresh token shows up here instead of failing
+   silently later) — never a credential value.
+
+## The cleanup layer (MVP chunks 1–2)
+
+On top of the pack sits a deterministic cleanup engine
+(`packages/control-plane/src/gmail-cleanup.ts`) for the overnight
+inbox-cleanup MVP. It is **not a model tool** — the model has no
+path to it. The operator decrees a rule file
+(`<state>/gmail-cleanup-rules.json`: sender/domain/label/age rules
+plus a never-archive list); the engine applies it to mailbox
+metadata. This is how it coexists with the bulk hard line above:
+the cleanup executes **only** against an exact-ID manifest a dry
+run produced under that rule file — the enumeration the hard line
+exists to force, produced before anything is touched. Ad-hoc agent
+bulk actions still park exactly as before.
+
+Guardrails, all in code: the engine's transport exposes only
+search/get/modify (trash, delete, and send are unreachable from
+it); the only archive mutation is `modify(id, [], ["INBOX"])`,
+asserted before every call; the nightly cap is a code constant
+(200 — the rule file may lower it, never raise it); exclusions
+(starred, IMPORTANT, unread under 7 days, never-archive senders,
+known correspondents unless a rule names the sender exactly) are
+checked at selection **and again on fresh metadata immediately
+before each modify**; the run manifest
+(`<state>/gmail-cleanup/<batchId>.json`) is written before the
+first modify and records each message's exact prior label set,
+which is what undo restores. Settled runs and undos issue
+receipts through the same local-stub issuer as job settlement,
+appended to `<state>/receipts.jsonl` and hash-bound to the
+manifest — tamper-evident local receipts, not Agent-Shield
+Protocol receipts.
+
+Operator surface (nothing here is armed on a schedule yet — the
+scheduler is a later chunk):
+
+```sh
+node main.js gmail-admin status                     # pack state + OAuth health (live token exchange)
+node main.js gmail-admin cleanup status             # the same health probe + rule-file/cap summary
+node main.js gmail-admin cleanup dry-run            # "would archive N, by rule" + manifest; changes nothing
+node main.js gmail-admin cleanup archive --batch <batchId>   # execute exactly that dry run's manifest
+node main.js gmail-admin cleanup undo --batch <batchId>      # restore the batch's exact prior label sets
+```
 
 ## Revoking
 

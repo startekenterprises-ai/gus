@@ -12,5 +12,6 @@ export * from "./release.js";
 export * from "./canary.js";
 export * from "./updater.js";
 export * from "./gmail.js";
+export * from "./gmail-cleanup.js";
 export * from "./mac.js";
 export * from "./mac-native.js";

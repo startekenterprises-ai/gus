@@ -443,7 +443,14 @@ export class HttpGmailTransport implements GmailTransport {
       );
     }
     const material = this.vault.withSecret(GMAIL_OAUTH_SECRET, (v) => {
-      const parsed = JSON.parse(v) as Partial<OAuthMaterial>;
+      let parsed: Partial<OAuthMaterial>;
+      try {
+        parsed = JSON.parse(v) as Partial<OAuthMaterial>;
+      } catch {
+        throw new Error(
+          `vault secret "${GMAIL_OAUTH_SECRET}" is not the expected JSON {client_id, client_secret, refresh_token}`,
+        );
+      }
       if (!parsed.client_id || !parsed.client_secret || !parsed.refresh_token) {
         throw new Error(
           `vault secret "${GMAIL_OAUTH_SECRET}" is not the expected JSON {client_id, client_secret, refresh_token}`,
@@ -457,6 +464,14 @@ export class HttpGmailTransport implements GmailTransport {
     });
     if (!material) throw new Error(`vault secret "${GMAIL_OAUTH_SECRET}" vanished mid-call`);
     return material;
+  }
+
+  /** Prove the vault-held credential is well-formed AND exchanges
+   *  for an access token — the setup/health probe behind
+   *  `gmail-admin status`. Throws the pack's usual loud errors; they
+   *  name fields and HTTP statuses only, never a credential value. */
+  async verifyCredential(): Promise<void> {
+    await this.accessToken();
   }
 
   private async accessToken(): Promise<string> {
@@ -900,22 +915,80 @@ export class GmailService {
   }
 }
 
+// ------------------------------------------------------- credential health
+
+export interface GmailCredentialHealth {
+  /** The gmail-oauth secret exists in the vault. */
+  configured: boolean;
+  /** The secret parses as {client_id, client_secret, refresh_token}. */
+  shapeOk: boolean;
+  /** A live token exchange succeeded — the credential actually works. */
+  healthy: boolean;
+  /** Human-readable detail. Field names and HTTP statuses only —
+   *  a credential value never appears here (asserted in tests). */
+  detail: string;
+}
+
+/**
+ * The Chunk-1 setup check for the cleanup MVP (and the pack in
+ * general): is the OAuth credential present, well-formed, and live?
+ * "Healthy" means a real refresh-token exchange against Google —
+ * the same call the live transport makes before every API request —
+ * so a revoked or 7-day-expired token (the consent-app-in-Testing
+ * trap from docs/gmail-pack.md) reports unhealthy here instead of
+ * failing silently at 2 AM.
+ */
+export async function gmailCredentialHealth(
+  vault: VaultBroker,
+  http?: GmailHttpFetch,
+): Promise<GmailCredentialHealth> {
+  if (!vault.has(GMAIL_OAUTH_SECRET)) {
+    return {
+      configured: false,
+      shapeOk: false,
+      healthy: false,
+      detail: `no vault secret named "${GMAIL_OAUTH_SECRET}" — the Gmail pack is not set up yet (see docs/gmail-pack.md)`,
+    };
+  }
+  try {
+    await new HttpGmailTransport(vault, http).verifyCredential();
+    return { configured: true, shapeOk: true, healthy: true, detail: "token exchange succeeded" };
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    return {
+      configured: true,
+      shapeOk: !detail.includes("is not the expected JSON"),
+      healthy: false,
+      detail,
+    };
+  }
+}
+
 // ---------------------------------------------------------------- gmail-admin
 
 /**
  * Operator CLI (`node main.js gmail-admin <status|revoke>`) — the
- * pack's setup/revoke surface. `status` prints setup state and counts
- * only, never a credential value. `revoke` removes the vault secret:
- * the pack is dead from that moment, one click, no Google round-trip
- * needed (revoking on Google's side too is in docs/gmail-pack.md).
+ * pack's setup/revoke surface. `status` prints setup state, the
+ * credential health probe (presence + shape + live token exchange),
+ * and counts only, never a credential value. `revoke` removes the
+ * vault secret: the pack is dead from that moment, one click, no
+ * Google round-trip needed (revoking on Google's side too is in
+ * docs/gmail-pack.md).
  */
-export function runGmailAdmin(argv: string[], vault: VaultBroker, directory: GmailDirectory): number {
+export async function runGmailAdmin(
+  argv: string[],
+  vault: VaultBroker,
+  directory: GmailDirectory,
+  http?: GmailHttpFetch,
+): Promise<number> {
   const [cmd] = argv;
   try {
     switch (cmd) {
       case "status": {
         const data = directory.load();
-        console.log(`gmail pack: ${vault.has(GMAIL_OAUTH_SECRET) ? "configured (OAuth credential in the vault)" : "NOT configured — no gmail-oauth secret in the vault"}`);
+        const health = await gmailCredentialHealth(vault, http);
+        console.log(`gmail pack: ${health.configured ? "configured (OAuth credential in the vault)" : "NOT configured — no gmail-oauth secret in the vault"}`);
+        console.log(`OAuth health: ${health.healthy ? "OK — token exchange succeeded" : health.detail}`);
         console.log(`known correspondents: ${data.known.length}; blocked senders: ${data.blocked.length}`);
         return 0;
       }
