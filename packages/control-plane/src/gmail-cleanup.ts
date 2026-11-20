@@ -5,8 +5,9 @@
  * anything in this file. The operator decrees a rule file; this
  * engine applies it to mailbox metadata, archives exactly what a
  * dry run enumerated, and can restore a batch exactly from its
- * manifest. The scheduler that arms it overnight is chunk 3 and is
- * deliberately not here.
+ * manifest. The scheduler that arms it overnight is chunk 3
+ * (gmail-cleanup-scheduler.ts) — it rides these exact code paths
+ * and ships disabled.
  *
  * How this coexists with the Yue hard line in policy.ts (bulk gmail
  * actions always park for a one-time approval enumerating exact
@@ -728,6 +729,32 @@ export interface GmailCleanupAdminDeps {
   now?: () => number;
 }
 
+/** Display-only read of the chunk-3 scheduler's armed state for
+ *  the status surface. The authoritative parser/validator lives
+ *  in gmail-cleanup-scheduler.ts (which imports this module — the
+ *  read here stays local to avoid the cycle); any problem reading
+ *  the file reads as "off", which is also how the scheduler's own
+ *  tick treats an unreadable config. */
+function schedulerStatusLine(stateDir: string): string {
+  const path = join(stateDir, "gmail-cleanup-scheduler.json");
+  if (!existsSync(path)) {
+    return "cleanup scheduler: off (default) — nothing runs overnight; arm it with: gmail-admin cleanup schedule enable --conversation <telegram chat id>";
+  }
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8")) as { enabled?: unknown; runAt?: unknown; reportAt?: unknown; conversationId?: unknown };
+    if (raw.enabled === true) {
+      return (
+        `cleanup scheduler: ARMED — nightly run at ${typeof raw.runAt === "string" ? raw.runAt : "02:30"}, ` +
+        `report at ${typeof raw.reportAt === "string" ? raw.reportAt : "07:00"}` +
+        (typeof raw.conversationId === "string" && raw.conversationId ? ` to Telegram chat ${raw.conversationId}` : " — WARNING: no report conversation set")
+      );
+    }
+    return "cleanup scheduler: off — nothing runs overnight; arm it with: gmail-admin cleanup schedule enable --conversation <telegram chat id>";
+  } catch {
+    return `cleanup scheduler: config at ${path} is unreadable — treated as off; see: gmail-admin cleanup schedule status`;
+  }
+}
+
 function formatPlan(plan: CleanupPlan): string[] {
   const lines: string[] = [];
   lines.push(`would archive ${plan.entries.length}, by rule:`);
@@ -752,6 +779,8 @@ function formatPlan(plan: CleanupPlan): string[] {
 /**
  * The cleanup operator surface, reached as
  * `node main.js gmail-admin cleanup <status|dry-run|archive|undo>`.
+ * (`gmail-admin cleanup schedule <...>` is the chunk-3 arming
+ * surface; main.ts routes it to gmail-cleanup-scheduler.ts.)
  * Deliberately operator-only: nothing in the agent's tool surface
  * routes here. archive/undo take an explicit --batch <id> naming a
  * manifest — there is no "archive whatever matches now" command,
@@ -792,6 +821,7 @@ export async function runGmailCleanupAdmin(argv: string[], deps: GmailCleanupAdm
         console.log(
           `cleanup rules: ${existed ? `${rules.rules.length} rule(s) in ${rulesPath}` : `no rule file at ${rulesPath} — the empty default applies (nothing would be archived)`}; nightly cap ${effectiveCleanupCap(rules)} (hard cap ${GMAIL_CLEANUP_HARD_CAP})`,
         );
+        console.log(schedulerStatusLine(stateDir));
         return 0;
       }
       case "dry-run": {
@@ -847,7 +877,7 @@ export async function runGmailCleanupAdmin(argv: string[], deps: GmailCleanupAdm
         return run.status === "undone" ? 0 : 1;
       }
       default:
-        console.error("usage: gmail-admin cleanup <status|dry-run|archive --batch <id>|undo --batch <id>>");
+        console.error("usage: gmail-admin cleanup <status|dry-run|archive --batch <id>|undo --batch <id>|schedule <status|enable|disable>>");
         return 2;
     }
   } catch (e) {

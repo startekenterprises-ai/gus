@@ -117,7 +117,7 @@ It never enters the agent's context. Getting those three values:
    or expired refresh token shows up here instead of failing
    silently later) — never a credential value.
 
-## The cleanup layer (MVP chunks 1–2)
+## The cleanup layer (MVP chunks 1–3)
 
 On top of the pack sits a deterministic cleanup engine
 (`packages/control-plane/src/gmail-cleanup.ts`) for the overnight
@@ -148,16 +148,40 @@ appended to `<state>/receipts.jsonl` and hash-bound to the
 manifest — tamper-evident local receipts, not Agent-Shield
 Protocol receipts.
 
-Operator surface (nothing here is armed on a schedule yet — the
-scheduler is a later chunk):
+Operator surface:
 
 ```sh
 node main.js gmail-admin status                     # pack state + OAuth health (live token exchange)
-node main.js gmail-admin cleanup status             # the same health probe + rule-file/cap summary
+node main.js gmail-admin cleanup status             # the same health probe + rule-file/cap summary + scheduler armed state
 node main.js gmail-admin cleanup dry-run            # "would archive N, by rule" + manifest; changes nothing
 node main.js gmail-admin cleanup archive --batch <batchId>   # execute exactly that dry run's manifest
 node main.js gmail-admin cleanup undo --batch <batchId>      # restore the batch's exact prior label sets
+node main.js gmail-admin cleanup schedule enable --conversation <telegram chat id>   # arm the overnight run
+node main.js gmail-admin cleanup schedule status    # armed state, run/report times, last run + report dates
+node main.js gmail-admin cleanup schedule disable   # disarm (config kept)
 ```
+
+The overnight scheduler (chunk 3,
+`packages/control-plane/src/gmail-cleanup-scheduler.ts`) ships
+**disabled**: no config file means off, and a tick while disabled
+makes no mailbox calls at all. Arming is the explicit `schedule
+enable` above (a report conversation is required — an armed
+scheduler with nowhere to send the morning report would fail
+silently every night). The running control plane re-reads the
+config (`<state>/gmail-cleanup-scheduler.json`) on every tick, so
+arming lands without a restart. When armed, a timer checks every
+15 minutes: at/after the run time (default 02:30 local) it runs
+one cycle — a **fresh** dry-run selection, then the archive of
+that run's own manifest, exactly the chunks 1–2 flow — and
+at/after the report time (default 07:00) it sends the morning
+report over Telegram (the channel host's send path) to the
+configured chat. The report is built only from the batch's
+manifests: archived counts by rule, left-alone counts, the batch
+id, its receipt id, and the undo command for the batch. A Mac
+that slept through a window catches up at its first tick after
+wake; a failed cycle (pack not set up, selection error) still
+reports at report time — plainly, as a failure, with "nothing was
+archived" — instead of staying silent.
 
 ## Revoking
 

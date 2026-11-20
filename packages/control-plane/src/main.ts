@@ -61,6 +61,7 @@ import { runVaultAdmin } from "./vault-admin.js";
 import { loadProviderConfig, resolveProvider } from "./providers.js";
 import { GmailDirectory, GmailService, HttpGmailTransport, runGmailAdmin } from "./gmail.js";
 import { runGmailCleanupAdmin } from "./gmail-cleanup.js";
+import { runGmailCleanupScheduleAdmin, startGmailCleanupScheduler } from "./gmail-cleanup-scheduler.js";
 import { GitHubPublishService } from "./github.js";
 import { MacService } from "./mac.js";
 import { createMacHostAdapter } from "./mac-native.js";
@@ -133,6 +134,12 @@ if (process.argv[2] === "gmail-admin") {
   // It needs the state dir (rule file + manifest store), so it is
   // routed here rather than inside runGmailAdmin.
   if (rest[0] === "cleanup") {
+    // The chunk-3 arming surface (`gmail-admin cleanup schedule
+    // <status|enable|disable>`) lives with the scheduler; it only
+    // ever reads/writes its own config file in the state dir.
+    if (rest[1] === "schedule") {
+      process.exit(await runGmailCleanupScheduleAdmin(rest.slice(2), { stateDir }));
+    }
     process.exit(
       await runGmailCleanupAdmin(rest.slice(1), {
         vault,
@@ -1292,6 +1299,26 @@ void updater.bootReconcile(GUS_VERSION);
 // heartbeat. OFF unless the operator opted in (GUS_HEARTBEAT=1 with a
 // counter URL); the payload is { version, mode } and nothing else.
 startHeartbeat();
+// Gmail cleanup chunk 3: the overnight scheduler. DEFAULT OFF —
+// its config file ships absent (disabled) and every tick re-reads
+// it, so `gmail-admin cleanup schedule enable` arms it without a
+// restart. When armed, the nightly cycle rides the chunks 1–2
+// engine (fresh dry run → archive from that run's own manifest)
+// and the morning report goes out through the channel host's
+// Telegram send path. The scheduler never throws and its timer
+// never keeps this process alive.
+startGmailCleanupScheduler({
+  stateDir,
+  vault,
+  directory: gmailDirectory,
+  shield: shieldGate,
+  notify: (conversationId, text) => host.notifyOperator(conversationId, text),
+  log: (text) =>
+    appendFileSync(
+      `${stateDir}/runtime-log.jsonl`,
+      JSON.stringify({ ts: Date.now(), level: "info", text }) + "\n",
+    ),
+});
 // GUS-lead / Nova-fallback design (2026-11-16) Phase 0: the local
 // liveness beat — <state>/liveness.json rewritten every 15 minutes so
 // Nova's watchdog can tell whether this GUS can take a job now. $0:
