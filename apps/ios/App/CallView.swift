@@ -14,14 +14,14 @@ import SwiftUI
 /// them — with a composer under it for typing mid-call, and
 /// a cleaned-up control row whose states read at a glance:
 /// a filled circle means the thing is ON.
+///
+/// v0.29.0: no longer a tab — Chat presents this screen as
+/// a full-screen cover from its header phone button. The
+/// screen itself is the same; only the way out changed:
+/// Done (shown whenever no call is live) leaves without
+/// calling, and End hangs up AND dismisses back to Chat.
 struct CallView: View {
-    /// Extra bottom room that clears the floating tab
-    /// bar's pill while it is visible (v0.17.4) — sized
-    /// from the 0.17.3 screenshot, where the standard
-    /// 20 pt bottom padding still left the call button's
-    /// bottom edge behind the pill.
-    private static let tabBarClearance: CGFloat = 72
-
+    @Environment(\.dismiss) private var dismiss
     @StateObject private var call = CallSession()
     /// The mid-call composer's draft (v0.23.0). Local view
     /// state only — a sent message goes through
@@ -140,7 +140,7 @@ struct CallView: View {
                             systemImage: "phone.down.fill",
                             filled: true,
                             fillColor: .red
-                        ) { call.endCall() }
+                        ) { call.endCall(); dismiss() }
                     }
                 } else {
                     Button {
@@ -156,26 +156,22 @@ struct CallView: View {
                 }
             }
             .padding(20)
-            // Tab-bar clearance (v0.17.4): the floating tab
-            // bar overlays the bottom of this screen while it
-            // is visible, and the transcript panel claims the
-            // layout space the clearance would otherwise come from —
-            // in 0.17.3 the pre-call "Call GUS" button sat
-            // with its bottom hidden behind the tab-bar pill
-            // (operator's screenshot, 2026-11-20). While the
-            // bar is up (not in a call), add enough bottom
-            // room to clear the pill with margin. In a call
-            // the bar hides (below) and the layout is exactly
-            // as before — the in-call controls do not move.
-            .padding(.bottom, inCall ? 0 : Self.tabBarClearance)
             .navigationTitle("Call")
             .navigationBarTitleDisplayMode(.inline)
-            // The tab bar hides while a call is live
-            // (v0.16.0): the Speaker / Mute / End controls
-            // sit at the bottom of this screen, and the tab
-            // bar covered them (Glenn's screenshot,
-            // 2026-11-20). It returns when the call ends.
-            .toolbar(inCall ? .hidden : .visible, for: .tabBar)
+            // The way out (v0.29.0): this screen is a
+            // full-screen cover now, not a tab — there is no
+            // tab bar to clear or hide (the v0.17.4 clearance
+            // padding and the v0.16.0 tab-bar hiding went
+            // with the tab). While no call is live, Done
+            // dismisses back to Chat; during a call the End
+            // control is the way out and dismisses itself.
+            .toolbar {
+                if !inCall {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Done") { dismiss() }
+                    }
+                }
+            }
             // Shield quarantine (v0.15.7): a held turn waits
             // here for the operator's one-time decision. Send
             // anyway proceeds with THIS turn only — the scan's

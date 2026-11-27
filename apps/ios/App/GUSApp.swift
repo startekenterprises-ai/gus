@@ -34,8 +34,9 @@ final class GUSAppDelegate: NSObject, UIApplicationDelegate {
 /// GUS — the unified iPhone app (v0.15.0, "the front door",
 /// redo R4). One app, one identity: this replaces the retired
 /// companion (apps/companion) and its pairing flow. The phone
-/// signs in with the same GUS identity as the Mac, and its
-/// front door is a live voice call — see CallView.
+/// signs in with the same GUS identity as the Mac. Chat is
+/// home (v0.29.0); a live voice call is one tap from it —
+/// see CallView.
 @main
 struct GUSApp: App {
     @UIApplicationDelegateAdaptor(GUSAppDelegate.self) private var appDelegate

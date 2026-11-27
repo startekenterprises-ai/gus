@@ -22,9 +22,12 @@ struct RootView: View {
             case .needsConnection, .needsLogin:
                 LoginView(model: session)
             case .signedIn, .signedInOffline:
+                // Chat is home (v0.29.0, Glenn — Muse's shape):
+                // there is no Call tab anymore; the call is a
+                // full-screen cover presented from Chat's
+                // header phone button, and ending it returns
+                // here. Tabs: Chat, Activity, Settings.
                 TabView {
-                    CallView()
-                        .tabItem { Label("Call", systemImage: "phone.fill") }
                     ChatView()
                         .tabItem { Label("Chat", systemImage: "message") }
                     ActivityView()

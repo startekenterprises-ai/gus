@@ -32,6 +32,12 @@ import UIKit
 /// chats are simply store records that haven't synced yet;
 /// they flow to the desk on the next exchange with no
 /// action from the operator.
+///
+/// Chat is home (v0.29.0): the Call tab is gone — the call
+/// is a full-screen cover from this view's header phone
+/// button — and message text is selectable, copyable, and
+/// shareable, with a Share conversation export in the
+/// header. Copy and share always move the displayed text.
 struct ChatView: View {
     /// Extra bottom room that clears the floating tab
     /// bar's pill (v0.17.4) — the Call screen's figure,
@@ -41,6 +47,11 @@ struct ChatView: View {
     @StateObject private var model = ChatModel()
     @State private var expandedExchanges: Set<UUID> = []
     @FocusState private var composerFocused: Bool
+    /// The call, presented as a full-screen cover from the
+    /// header's phone button (v0.29.0 — Chat is home now;
+    /// there is no Call tab). Ending the call dismisses
+    /// the cover back here.
+    @State private var showCall = false
 
     /// The last message of each exchange — the Shield line
     /// renders under it, once per exchange.
@@ -74,7 +85,7 @@ struct ChatView: View {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
                             if model.messages.isEmpty {
-                                Text("Nothing here yet — type below. Voice stays on the Call tab; this is the same GUS, in text.")
+                                Text("Nothing here yet — type below, or tap the phone button up top to talk. This is the same GUS, in text.")
                                     .font(.callout)
                                     .foregroundColor(.secondary)
                                     .multilineTextAlignment(.center)
@@ -116,6 +127,29 @@ struct ChatView: View {
             }
             .navigationTitle("Chat")
             .navigationBarTitleDisplayMode(.inline)
+            // The header (v0.29.0): share the conversation,
+            // and the call button — Muse's shape, a phone
+            // in the chat header instead of a Call tab.
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    ShareLink(item: model.exportText()) {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                    .disabled(model.exportText().isEmpty)
+                    .accessibilityLabel("Share conversation")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showCall = true
+                    } label: {
+                        Image(systemName: "phone.fill")
+                    }
+                    .accessibilityLabel("Call GUS")
+                }
+            }
+            .fullScreenCover(isPresented: $showCall) {
+                CallView()
+            }
             .onAppear { model.refreshMode() }
         }
     }
@@ -137,6 +171,7 @@ struct ChatView: View {
                 HStack {
                     Spacer(minLength: 48)
                     bubble(message, mine: true)
+                        .contextMenu { messageMenu(message) }
                 }
                 if message.held {
                     heldControls(message)
@@ -151,9 +186,30 @@ struct ChatView: View {
         case .assistant:
             HStack {
                 bubble(message, mine: false)
+                    .contextMenu { messageMenu(message) }
                 Spacer(minLength: 48)
             }
             .id(message.id)
+        }
+    }
+
+    /// Copy / Share for one message (v0.29.0) — the text
+    /// that moves is the DISPLAYED text (ChatMessage.shareText):
+    /// what the operator sees on screen is what lands on
+    /// the pasteboard or in the share sheet, never the
+    /// store's verbatim record behind it.
+    @ViewBuilder
+    private func messageMenu(_ message: ChatMessage) -> some View {
+        let text = message.shareText
+        if !text.isEmpty {
+            Button {
+                UIPasteboard.general.string = text
+            } label: {
+                Label("Copy", systemImage: "doc.on.doc")
+            }
+            ShareLink(item: text) {
+                Label("Share", systemImage: "square.and.arrow.up")
+            }
         }
     }
 
@@ -171,6 +227,11 @@ struct ChatView: View {
                 Text(message.text)
                     .font(.callout)
                     .foregroundColor(mine ? .white : .primary)
+                    // Selectable (v0.29.0): long-press and
+                    // drag selects PART of a message to copy
+                    // just that — the whole-message Copy and
+                    // Share live on the bubble's context menu.
+                    .textSelection(.enabled)
             }
             if let note = message.photoNote {
                 Text(note)
@@ -406,6 +467,19 @@ struct ChatMessage: Identifiable {
         self.dropped = dropped
         self.blocked = blocked
     }
+
+    /// The text Copy and Share move (v0.29.0): the message's
+    /// own words when it has any. A photo message with no
+    /// words shares a "[Photo]" placeholder — image data
+    /// never rides a text share. This is the DISPLAYED
+    /// text: for a Core reply the Shield stopped, the view
+    /// shows the canned line, and the canned line is what
+    /// shares — the store's verbatim record stays home.
+    var shareText: String {
+        if !text.isEmpty { return text }
+        if photoData != nil || photoNote != nil { return "[Photo]" }
+        return ""
+    }
 }
 
 @MainActor
@@ -491,6 +565,28 @@ final class ChatModel: ObservableObject {
 
     func receipts(for exchangeID: UUID) -> [ShieldReceipt] {
         receiptsByExchange[exchangeID] ?? []
+    }
+
+    /// The whole visible conversation as plain text
+    /// (v0.29.0) — "You: …" / "GUS: …" paragraphs in the
+    /// order on screen, built from the DISPLAYED text
+    /// (ChatMessage.shareText), so a stopped Core reply
+    /// exports as its canned line and a photo exports as
+    /// its words or "[Photo]", never image data. Notices
+    /// are session ephemera, not conversation, and stay
+    /// out.
+    func exportText() -> String {
+        messages.compactMap { message in
+            switch message.role {
+            case .notice:
+                return nil
+            case .user:
+                return message.shareText.isEmpty ? nil : "You: \(message.shareText)"
+            case .assistant:
+                return message.shareText.isEmpty ? nil : "GUS: \(message.shareText)"
+            }
+        }
+        .joined(separator: "\n\n")
     }
 
     // MARK: Photos
