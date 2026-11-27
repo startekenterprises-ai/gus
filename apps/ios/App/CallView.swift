@@ -291,10 +291,51 @@ struct CallView: View {
         if inCall {
             composer
 
+            // Push to talk (v0.41.0): the hold button
+            // exists ONLY when this call runs in
+            // push-to-talk mode — a hands-free call's
+            // layout is exactly what it has always been.
+            if call.inputMode == .pushToTalk {
+                pushToTalkButton
+            }
+
             callControlsRow
         } else {
             startCallButton
         }
+    }
+
+    /// The hold-to-talk button (v0.41.0): a press-and-hold,
+    /// not a tap — the press barges in and starts the
+    /// capture, the release sends it (CallSession
+    /// .begin/endPushToTalk). It wears its state: while
+    /// held it fills with the accent and its words change,
+    /// so the operator can feel the mode from the button
+    /// alone, mid-conversation, without reading anything
+    /// small. The long-press gesture's pressing callback
+    /// reports both edges — and a cancelled press (a
+    /// system gesture stealing the touch) reports the
+    /// release edge too, so a hold can never stick on.
+    private var pushToTalkButton: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 16)
+                .fill(call.pttHolding ? Color.accentColor : Color.secondary.opacity(0.25))
+            Label(call.pttHolding ? "Listening — release to send" : "Hold to talk",
+                  systemImage: "mic.fill")
+                .font(.headline)
+                .foregroundColor(call.pttHolding ? .white : .primary)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 64)
+        .contentShape(RoundedRectangle(cornerRadius: 16))
+        .onLongPressGesture(minimumDuration: 0, maximumDistance: .infinity, pressing: { pressing in
+            if pressing {
+                call.beginPushToTalk()
+            } else {
+                call.endPushToTalk()
+            }
+        }, perform: {})
+        .accessibilityLabel("Hold to talk")
     }
 
     private var callControlsRow: some View {

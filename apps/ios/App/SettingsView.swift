@@ -23,6 +23,10 @@ struct SettingsView: View {
     /// (StartInCall) — read once per cold launch by
     /// RootView; written here.
     @State private var startInCall: Bool = StartInCall.enabled
+    /// v0.41.0: the call input mode (CallInputMode) —
+    /// CallSession reads it once per call, in startCall;
+    /// written here.
+    @State private var callInputMode: CallInputMode = CallInputMode.preferred
     @State private var personaText: String = LocalBrain.customPrompt ?? ""
     @State private var stockAvatar: String = UserDefaults.standard.string(forKey: "gus.avatar.stock") ?? "boy"
     @State private var shieldEnabled: Bool = ShieldSettings.enabled
@@ -94,6 +98,26 @@ struct SettingsView: View {
                             StartInCall.enabled = newValue
                         }
                     Text("On, opening GUS fresh starts a voice call right away, so GUS can say hello first. Coming back to the app later never re-starts a call.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    // v0.41.0: the call's input mode —
+                    // Claude's framing (Glenn's screenshots,
+                    // 2026-11-27): hands free, or push to
+                    // talk, where the call screen's hold
+                    // button is the only door a turn takes.
+                    // CallSession reads the preference once
+                    // per call, so the caption's rule is the
+                    // demo pitch's rule: next call, never
+                    // mid-call.
+                    Picker("Input mode", selection: $callInputMode) {
+                        ForEach(CallInputMode.allCases) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    .onChange(of: callInputMode) { newValue in
+                        CallInputMode.preferred = newValue
+                    }
+                    Text("Hands free is best for quiet environments — GUS answers when you pause. Push to talk: hold to speak, release to send, so a pause mid-sentence never sends early. Takes effect on your next call.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 } header: {

@@ -39,6 +39,12 @@ import UIKit
 // speaks, with no core session at all: the call works in
 // airplane mode. Core mode is byte-for-byte the chunk-1
 // behavior above.
+//
+// v0.41.0 adds an input MODE to that same call: hands-free
+// (the default — everything above, unchanged) or
+// push-to-talk, where the call screen's hold button gates
+// when a spoken turn is released. The call stays live and
+// full-duplex in both modes; only the turn's door differs.
 
 /// Where a call's brain lives. On-device is the default (the
 /// spec: on-device mode is the default for calls and the demo);
@@ -80,6 +86,43 @@ enum StartInCall {
     static var enabled: Bool {
         get { UserDefaults.standard.bool(forKey: "gus.call.startInCall") }
         set { UserDefaults.standard.set(newValue, forKey: "gus.call.startInCall") }
+    }
+}
+
+/// Call input mode (v0.41.0): how the operator's speech
+/// becomes a turn. Hands free is the call as it has always
+/// been — continuous recognition, and a pause (or the
+/// recognizer's own final) ends the turn. Push to talk
+/// gates the turn on the call screen's hold button: the
+/// recognizer still runs and its words still show, but
+/// nothing dispatches and nothing barges in until the
+/// button is released (Claude's framing, from Glenn's
+/// screenshots 2026-11-27 — open-mic end-of-turn misfires
+/// are the top voice-mode complaint across the competitor
+/// teardown). Persisted; Settings carries the picker.
+/// CallSession reads the preference ONCE, in startCall: a
+/// call runs in the mode it started in, and a change made
+/// in Settings mid-call applies to the NEXT call — it
+/// never hot-swaps under the operator's thumb.
+enum CallInputMode: String, CaseIterable, Identifiable {
+    case handsFree
+    case pushToTalk
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .handsFree: return "Hands free"
+        case .pushToTalk: return "Push to talk"
+        }
+    }
+
+    static var preferred: CallInputMode {
+        get {
+            let raw = UserDefaults.standard.string(forKey: "gus.call.inputMode") ?? ""
+            return CallInputMode(rawValue: raw) ?? .handsFree
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "gus.call.inputMode") }
     }
 }
 
@@ -221,6 +264,16 @@ final class CallSession: NSObject, ObservableObject {
     /// Which transport this call is running (CallView captions
     /// it, so the operator can SEE where the brain lives).
     @Published private(set) var callMode: CallMode = CallMode.preferred
+    /// The input mode THIS call runs in (v0.41.0):
+    /// CallInputMode.preferred, read once in startCall.
+    /// The call screen shows its hold button only when
+    /// this is .pushToTalk, and the transcript path gates
+    /// its end-of-turn dispatch on it.
+    @Published private(set) var inputMode: CallInputMode = .handsFree
+    /// A push-to-talk hold is in progress (v0.41.0): the
+    /// call screen's button is down and the recognizer's
+    /// words are being captured for the release dispatch.
+    @Published private(set) var pttHolding = false
     /// A note about the voice, when there is one: the core's
     /// speech notice, or the local note that Kokoro is still
     /// getting ready (it prepares itself; the first sentence
@@ -330,6 +383,22 @@ final class CallSession: NSObject, ObservableObject {
     // over GUS sustains theirs.
     private var bargeCandidateText = ""
     private var bargeCandidateAt = Date.distantPast
+    // Push-to-talk capture (v0.41.0): the current hold's
+    // words, in three pieces because the recognizer's
+    // partials are CUMULATIVE within a run and a run ends
+    // at every final. pttCapturedText holds the hold's
+    // finalized segments; pttPartialText is the live run's
+    // contribution so far; pttBaselineText is the run's
+    // text as of the press — words the recognizer already
+    // had are the baseline, not the turn (the turn is what
+    // is said while holding). The release joins captured +
+    // partial into the one turn it dispatches. All three
+    // clear at press, at release, and whenever a call
+    // starts, ends, or fails — a capture never survives
+    // its own hold.
+    private var pttCapturedText = ""
+    private var pttPartialText = ""
+    private var pttBaselineText = ""
 
     // Hearing (endpoint mode): mic buffers → PCM16 chunks.
     private var pcmConverter: AVAudioConverter?
@@ -393,6 +462,12 @@ final class CallSession: NSObject, ObservableObject {
         lastSeq = 0
         playbackFailuresThisCall = 0
         callMode = CallMode.preferred
+        // The input mode is read ONCE, here (v0.41.0): the
+        // call runs in the mode it started in. A Settings
+        // change made while this call is live applies to
+        // the next call — never a hot-swap mid-call.
+        inputMode = CallInputMode.preferred
+        resetPushToTalkCapture()
         // The call's ONE audio engine (v0.18.0): this session's
         // hearing engine is handed to the speech engine, so
         // Kokoro playback and the microphone share an engine —
@@ -871,6 +946,7 @@ final class CallSession: NSObject, ObservableObject {
         stopWatch(announce: false)
         removeAudioLifecycleObservers()
         pendingShieldQuarantine = nil
+        resetPushToTalkCapture()
         watchdogTask?.cancel(); watchdogTask = nil
         pollTask?.cancel(); pollTask = nil
         playbackTask?.cancel(); playbackTask = nil
@@ -897,6 +973,7 @@ final class CallSession: NSObject, ObservableObject {
         stopWatch(announce: false)
         removeAudioLifecycleObservers()
         pendingShieldQuarantine = nil
+        resetPushToTalkCapture()
         phase = .ended
         Self.isAnyCallLive = false
         watchdogTask?.cancel(); watchdogTask = nil
@@ -1464,6 +1541,15 @@ final class CallSession: NSObject, ObservableObject {
 
     private func handleTranscript(_ text: String, isFinal: Bool) {
         if isEcho(text) { return }
+        // Push to talk (v0.41.0): the echo guard above has
+        // already run — it is unchanged in this mode — but
+        // from here the paths divide. In push-to-talk a
+        // transcript never dispatches and never barges in:
+        // the hold button is the only door a turn takes.
+        if inputMode == .pushToTalk {
+            handlePushToTalkTranscript(text, isFinal: isFinal)
+            return
+        }
         liveTranscript = text
         if !isFinal, text != lastPartialText {
             lastPartialText = text
@@ -1498,25 +1584,162 @@ final class CallSession: NSObject, ObservableObject {
             liveReplyText = ""
             lastPartialText = ""
             if !trimmed.isEmpty {
-                if transport == .local {
-                    answerLocally(trimmed)
-                } else if sttMode == "local", let id = sessionId {
-                    Task {
-                        // Persona (v0.40.0): the core's
-                        // context is brought current first
-                        // (see sendTypedMessage).
-                        await self.syncCorePersonaContext()
-                        // Watch (v0.37.0): the fresh frame
-                        // goes FIRST, awaited — the core's
-                        // eyes are current before the turn
-                        // runs (see sendTypedMessage). A
-                        // no-op unless Watch is on.
-                        await self.uploadWatchFrames(turnRefresh: true)
-                        _ = try? await client.voiceSessionTranscript(sessionId: id, text: trimmed)
-                    }
-                }
+                dispatchSpokenFinal(trimmed)
             }
         }
+    }
+
+    /// One completed spoken utterance takes its turn —
+    /// THE doors a spoken final walks through, shared
+    /// verbatim by the recognizer's finals, the watchdog's
+    /// synthesized finals, and (v0.41.0) a push-to-talk
+    /// release: on-device, the Shield gate in answerLocally
+    /// scans the words before the brain sees them; on the
+    /// core, the persona context is brought current and
+    /// the Watch frame refreshed before the transcript
+    /// goes up, and the core Shield-scans server-side.
+    private func dispatchSpokenFinal(_ text: String) {
+        if transport == .local {
+            answerLocally(text)
+        } else if sttMode == "local", let id = sessionId {
+            Task {
+                // Persona (v0.40.0): the core's
+                // context is brought current first
+                // (see sendTypedMessage).
+                await self.syncCorePersonaContext()
+                // Watch (v0.37.0): the fresh frame
+                // goes FIRST, awaited — the core's
+                // eyes are current before the turn
+                // runs (see sendTypedMessage). A
+                // no-op unless Watch is on.
+                await self.uploadWatchFrames(turnRefresh: true)
+                _ = try? await client.voiceSessionTranscript(sessionId: id, text: text)
+            }
+        }
+    }
+
+    // MARK: - Push to talk (v0.41.0)
+
+    /// Push-to-talk's transcript handling: the recognizer
+    /// runs exactly as in a hands-free call — same
+    /// partials, same finals, same restarts — but its
+    /// words go nowhere on their own. While the operator
+    /// holds the button, finals append to the capture and
+    /// partials extend it on the live strip; while they
+    /// don't, words are display-only and a final simply
+    /// clears the strip. Barge-in lives on the button's
+    /// press, not here: stray noise over GUS's speech cuts
+    /// nothing in this mode, which is the point of the
+    /// mode. The release (endPushToTalk) is the one
+    /// dispatch.
+    private func handlePushToTalkTranscript(_ text: String, isFinal: Bool) {
+        if isFinal {
+            if pttHolding {
+                let segment = pttEffectiveText(text)
+                if !segment.isEmpty {
+                    pttCapturedText = pttCapturedText.isEmpty
+                        ? segment
+                        : pttCapturedText + " " + segment
+                }
+            }
+            // The run is over and the recognizer restarts
+            // clean (the result handler does), so the next
+            // run's words carry no baseline.
+            pttBaselineText = ""
+            pttPartialText = ""
+            lastPartialText = ""
+            liveTranscript = pttHolding ? pttCapturedText : ""
+        } else {
+            if text != lastPartialText {
+                lastPartialText = text
+                lastPartialChangeAt = Date()
+            }
+            if pttHolding {
+                pttPartialText = pttEffectiveText(text)
+                liveTranscript = [pttCapturedText, pttPartialText]
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " ")
+            } else {
+                liveTranscript = text
+            }
+        }
+    }
+
+    /// A recognizer run's words, minus the baseline: the
+    /// run's text as of the press is not the operator's
+    /// held speech, so it is stripped by prefix. The
+    /// recognizer occasionally revises a word it already
+    /// reported, which can break the prefix — then the
+    /// whole run text stands (a word or two of pre-press
+    /// speech may ride along; the alternative, dropping
+    /// held words, is worse).
+    private func pttEffectiveText(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !pttBaselineText.isEmpty else { return trimmed }
+        if trimmed == pttBaselineText { return "" }
+        if trimmed.hasPrefix(pttBaselineText) {
+            return String(trimmed.dropFirst(pttBaselineText.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return trimmed
+    }
+
+    /// The hold begins: the call screen's push-to-talk
+    /// button went down. While GUS is speaking, the press
+    /// IS the barge-in — the same cut a voice barge-in
+    /// makes (local playback stops, the local generation
+    /// is interrupted, the core is told to drop its
+    /// unfetched sentences), landed at once rather than
+    /// after the debounce, because a thumb on a button is
+    /// not a stray partial. The capture starts empty: the
+    /// recognizer run's words so far become the baseline,
+    /// and the turn is what is said from here.
+    func beginPushToTalk() {
+        guard phase == .live, inputMode == .pushToTalk, !pttHolding else { return }
+        if gusSpeaking {
+            cutSpeech()
+            if transport == .local { interruptLocalAnswer() }
+            if let id = sessionId {
+                Task { _ = try? await client.voiceSessionInterrupt(sessionId: id) }
+            }
+        }
+        pttHolding = true
+        pttCapturedText = ""
+        pttPartialText = ""
+        pttBaselineText = lastPartialText
+        bargeCandidateText = ""
+        liveTranscript = ""
+    }
+
+    /// The hold ends: the button came up, and the captured
+    /// words — the finalized segments plus the in-flight
+    /// partial — dispatch as ONE turn through exactly the
+    /// doors a spoken final takes (dispatchSpokenFinal).
+    /// Nothing captured, nothing dispatched: a silent
+    /// hold is not a turn. The capture clears either way.
+    func endPushToTalk() {
+        guard inputMode == .pushToTalk, pttHolding else { return }
+        pttHolding = false
+        let text = [pttCapturedText, pttPartialText]
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        pttCapturedText = ""
+        pttPartialText = ""
+        pttBaselineText = ""
+        liveTranscript = ""
+        liveReplyText = ""
+        lastPartialText = ""
+        guard phase == .live, !text.isEmpty else { return }
+        dispatchSpokenFinal(text)
+    }
+
+    /// A capture never survives its own hold — or its own
+    /// call. Called at call start, end, and failure.
+    private func resetPushToTalkCapture() {
+        pttHolding = false
+        pttCapturedText = ""
+        pttPartialText = ""
+        pttBaselineText = ""
     }
 
     /// Barge-in's confirmation (v0.18.0): is this partial a
@@ -1560,12 +1783,17 @@ final class CallSession: NSObject, ObservableObject {
     /// final, and the recognizer restarts clean. Barge-in is
     /// untouched: partials still cut speech the moment they
     /// land; this only supplies the final the system withholds.
+    /// Hands-free only (v0.41.0): in push-to-talk a stale
+    /// partial is a held thought, not an ended turn — the
+    /// watchdog never synthesizes a final there; the
+    /// button's release is the only dispatch.
     private func startWatchdog() {
         watchdogTask?.cancel()
         watchdogTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 250_000_000)
-                guard let self, self.phase == .live, self.sttMode == "local" else { continue }
+                guard let self, self.phase == .live, self.sttMode == "local",
+                      self.inputMode == .handsFree else { continue }
                 let text = self.liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty,
                       text == self.lastPartialText,

@@ -95,8 +95,25 @@ preserve_archive_log() {
   [ -f "$ARCHIVE_LOG" ] && cp "$ARCHIVE_LOG" "/tmp/gus-archive-$VERSION.log" 2>/dev/null || true
 }
 
+# v0.41.0: prune the preserved per-version logs — keep only
+# the newest 6 gus-archive-<version>.log files in /tmp and
+# delete the older ones, so a long run of build attempts
+# doesn't grow an archive of archives. Newest by modification
+# time (ls -t, newest first; tail -n +7 skips the six to
+# keep). The preserve above runs first in the same EXIT trap,
+# so this attempt's own log was just refreshed and is never
+# the one pruned. The glob requires the -<version> segment,
+# so the live /tmp/gus-archive.log itself never matches.
+# Best-effort and silent, like the copy: a failed prune
+# changes nothing about the build.
+prune_archive_logs() {
+  ls -t /tmp/gus-archive-*.log 2>/dev/null | tail -n +7 | while IFS= read -r old_log; do
+    rm -f "$old_log" 2>/dev/null || true
+  done || true
+}
+
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"; preserve_archive_log' EXIT
+trap 'rm -rf "$WORK"; preserve_archive_log; prune_archive_logs' EXIT
 ARCHIVE="$WORK/$SCHEME.xcarchive"
 EXPORT_DIR="$WORK/export"
 
