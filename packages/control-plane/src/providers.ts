@@ -42,7 +42,7 @@
  *     real authority and the declared class is still only a floor.
  */
 import { existsSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
-import type { ToolClass } from "@gus/shared";
+import type { MessageImage, ToolClass } from "@gus/shared";
 import type { VaultBroker } from "@gus/vault";
 import {
   estimateTokens,
@@ -126,10 +126,15 @@ export interface Provider {
    *  native-capable, runs the call on the native tool-calling
    *  channel instead of the text protocol. Only the comm server's
    *  job loop supplies it; every other caller gets the text
-   *  protocol exactly as before. */
+   *  protocol exactly as before.
+   *  v0.24.0: opts.images carries a job's attached photos on the
+   *  TEXT channel (the native channel carries them inside its
+   *  messages instead). Remote providers present them to the
+   *  model as image input alongside the prompt; the stub ignores
+   *  them — it is a fixed text script and cannot see. */
   complete(
     prompt: string,
-    opts?: { maxTokensOut?: number; messages?: NativeMessage[] },
+    opts?: { maxTokensOut?: number; messages?: NativeMessage[]; images?: MessageImage[] },
   ): Promise<ProviderCompletion>;
 }
 
@@ -203,13 +208,14 @@ export class StubProvider implements Provider {
 
   async complete(
     prompt: string,
-    _opts?: { maxTokensOut?: number; messages?: NativeMessage[] },
+    _opts?: { maxTokensOut?: number; messages?: NativeMessage[]; images?: MessageImage[] },
   ): Promise<ProviderCompletion> {
     // The stub's replies are fixed scripts; a reply budget has
     // nothing to clamp (the CommServer's stub path never passes
     // one — its estimates are exact by construction). The stub is
     // never native-capable: it declares no nativeTools, so the comm
-    // server never supplies it a conversation.
+    // server never supplies it a conversation. v0.24.0: images are
+    // accepted and ignored — a fixed text script cannot see.
     const reply = fakeComplete(prompt);
     return {
       reply,
@@ -319,10 +325,32 @@ export interface NativeToolCallRef {
  *  as a fresh user message — the native mirror of the text loop's
  *  prompt-per-hop shape. */
 export type NativeMessage =
-  | { role: "user"; text: string }
+  /** v0.24.0: a user message may carry the job's attached photos
+   *  (only the conversation's opening message ever does — the
+   *  comm server puts them there). Serializers present them as
+   *  image input in each API's own shape. */
+  | { role: "user"; text: string; images?: MessageImage[] }
   | { role: "assistant"; text: string }
   | { role: "assistant"; toolCall: NativeToolCallRef }
   | { role: "tool"; toolCallId: string; text: string };
+
+/** v0.24.0: one attached photo as an OpenAI-compatible content
+ *  part — a data URL, so the bytes ride the request itself and
+ *  nothing is ever hosted or linked. */
+function openAiImagePart(img: MessageImage): Record<string, unknown> {
+  return {
+    type: "image_url",
+    image_url: { url: `data:${img.mediaType};base64,${img.data}` },
+  };
+}
+
+/** v0.24.0: one attached photo as an Anthropic image block. */
+function anthropicImageBlock(img: MessageImage): Record<string, unknown> {
+  return {
+    type: "image",
+    source: { type: "base64", media_type: img.mediaType, data: img.data },
+  };
+}
 
 /** The name a provider API sees for a canonical tool. Meta's
  *  chat-completions API rejects function names with more than one
@@ -415,6 +443,14 @@ function openAiNativeMessages(messages: NativeMessage[]): Record<string, unknown
       case "user": {
         const content = !prefaced ? `${NATIVE_TOOL_PREAMBLE}\n\n---\n\n${m.text}` : m.text;
         prefaced = true;
+        // v0.24.0: photos turn the content into parts — text
+        // first, then the images as data-URL parts.
+        if (m.images?.length) {
+          return {
+            role: "user",
+            content: [{ type: "text", text: content }, ...m.images.map(openAiImagePart)],
+          };
+        }
         return { role: "user", content };
       }
       case "assistant":
@@ -452,6 +488,14 @@ function anthropicNativeMessages(messages: NativeMessage[]): Record<string, unkn
       case "user": {
         const content = !prefaced ? `${NATIVE_TOOL_PREAMBLE}\n\n---\n\n${m.text}` : m.text;
         prefaced = true;
+        // v0.24.0: photos become image blocks ahead of the text
+        // block (the Messages API's multimodal message shape).
+        if (m.images?.length) {
+          return {
+            role: "user",
+            content: [...m.images.map(anthropicImageBlock), { type: "text", text: content }],
+          };
+        }
         return { role: "user", content };
       }
       case "assistant":
@@ -515,7 +559,7 @@ abstract class RemoteProvider implements Provider {
 
   abstract complete(
     prompt: string,
-    opts?: { maxTokensOut?: number; messages?: NativeMessage[] },
+    opts?: { maxTokensOut?: number; messages?: NativeMessage[]; images?: MessageImage[] },
   ): Promise<ProviderCompletion>;
 
   /** Phase 9: present the tool protocol to a real model. Until now the
@@ -662,7 +706,7 @@ export class AnthropicProvider extends RemoteProvider {
 
   async complete(
     prompt: string,
-    opts?: { maxTokensOut?: number; messages?: NativeMessage[] },
+    opts?: { maxTokensOut?: number; messages?: NativeMessage[]; images?: MessageImage[] },
   ): Promise<ProviderCompletion> {
     // v0.14.4: a supplied conversation on a native-capable provider
     // runs the native channel; everything else — including every
@@ -675,6 +719,14 @@ export class AnthropicProvider extends RemoteProvider {
     // usage sums across both attempts when the API reports it
     // per attempt, and falls back to the estimates when it
     // doesn't, exactly as a single attempt did).
+    // v0.24.0: photos make the user content a block array —
+    // image blocks ahead of the protocol-carrying text block.
+    // Without photos the content stays the plain string it has
+    // always been, byte for byte.
+    const fullPrompt = this.promptWithToolProtocol(prompt);
+    const content: string | Record<string, unknown>[] = opts?.images?.length
+      ? [...opts.images.map(anthropicImageBlock), { type: "text", text: fullPrompt }]
+      : fullPrompt;
     let attempts = 0;
     let inSum = 0;
     let outSum = 0;
@@ -691,7 +743,7 @@ export class AnthropicProvider extends RemoteProvider {
         {
           model: this.model,
           max_tokens: opts?.maxTokensOut ?? this.maxTokensOut,
-          messages: [{ role: "user", content: this.promptWithToolProtocol(prompt) }],
+          messages: [{ role: "user", content }],
         },
         { "anthropic-version": "2023-06-01" },
       );
@@ -837,7 +889,7 @@ export class OpenAiCompatibleProvider extends RemoteProvider {
 
   async complete(
     prompt: string,
-    opts?: { maxTokensOut?: number; messages?: NativeMessage[] },
+    opts?: { maxTokensOut?: number; messages?: NativeMessage[]; images?: MessageImage[] },
   ): Promise<ProviderCompletion> {
     // v0.14.4: a supplied conversation on a native-capable provider
     // runs the native channel; everything else — including every
@@ -852,6 +904,14 @@ export class OpenAiCompatibleProvider extends RemoteProvider {
     // estimates when it doesn't, exactly as a single attempt did.
     // (Transport-level 429/503 retries live in callWithKey; this
     // is the 200-but-empty case above them.)
+    // v0.24.0: photos make the user content a parts array — the
+    // protocol-carrying text part first, then the images as
+    // data-URL parts. Without photos the content stays the plain
+    // string it has always been, byte for byte.
+    const fullPrompt = this.promptWithToolProtocol(prompt);
+    const content: string | Record<string, unknown>[] = opts?.images?.length
+      ? [{ type: "text", text: fullPrompt }, ...opts.images.map(openAiImagePart)]
+      : fullPrompt;
     let attempts = 0;
     let inSum = 0;
     let outSum = 0;
@@ -863,7 +923,7 @@ export class OpenAiCompatibleProvider extends RemoteProvider {
       const res = await this.callWithKey(this.keyName, this.keyRequired, "authorization", `${this.base}/chat/completions`, {
         model: this.model,
         max_tokens: opts?.maxTokensOut ?? this.maxTokensOut,
-        messages: [{ role: "user", content: this.promptWithToolProtocol(prompt) }],
+        messages: [{ role: "user", content }],
       });
       const body = await this.expectOk(res, this.who);
       const choices = Array.isArray(body.choices) ? (body.choices as Array<Record<string, unknown>>) : [];

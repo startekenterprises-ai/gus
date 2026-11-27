@@ -17,7 +17,7 @@
  * plain-text reply before any tool call is not a final for them.
  */
 import { createConnection, type Socket } from "node:net";
-import type { ControlMessage, RuntimeRequest } from "@gus/shared";
+import type { ControlMessage, MessageImage, RuntimeRequest } from "@gus/shared";
 import { GUS_VERSION } from "@gus/shared";
 import { Workspace, executeTool } from "./tools.js";
 import { TurnQueue } from "./turn-queue.js";
@@ -72,11 +72,17 @@ function request<T extends ControlMessage>(req: RuntimeRequest, match: (m: Contr
  */
 const MAX_HOPS = 1000;
 
-async function runTurn(jobId: string, text: string, voiceFastLane = false, kind = ""): Promise<void> {
+async function runTurn(
+  jobId: string,
+  text: string,
+  voiceFastLane = false,
+  kind = "",
+  images?: MessageImage[],
+): Promise<void> {
   const signal = { aborted: killed };
   currentTurn = { jobId, signal };
   try {
-    await driveLoop(jobId, text, signal, new VoiceLane(voiceFastLane), TaskGuard.forJob(kind));
+    await driveLoop(jobId, text, signal, new VoiceLane(voiceFastLane), TaskGuard.forJob(kind), images);
   } finally {
     if (currentTurn?.jobId === jobId) currentTurn = null;
   }
@@ -93,6 +99,14 @@ async function driveLoop(
   signal: { aborted: boolean },
   lane: VoiceLane = new VoiceLane(false),
   guard: TaskGuard = TaskGuard.afterToolExecution(),
+  /** v0.24.0: the job's attached photos. They ride the FIRST
+   *  model request only: on the control plane's native channel
+   *  the opening conversation message holds them from then on,
+   *  and a text-channel continuation is a TOOL_RESULT prompt —
+   *  re-sending the photo every hop would re-bill its tokens for
+   *  no new information. Approved-execution continuations enter
+   *  with none (their first prompt is a tool result). */
+  images?: MessageImage[],
 ): Promise<void> {
     let prompt = initialPrompt;
     for (let hop = 0; hop < MAX_HOPS; hop++) {
@@ -101,7 +115,14 @@ async function driveLoop(
         return;
       }
       const res = await request<Extract<ControlMessage, { t: "model_response" }>>(
-        { t: "model_request", reqId: `mr${++seq}`, jobId, workClass: "primary", prompt },
+        {
+          t: "model_request",
+          reqId: `mr${++seq}`,
+          jobId,
+          workClass: "primary",
+          prompt,
+          ...(hop === 0 && images?.length ? { images } : {}),
+        },
         (m) => m.t === "model_response",
       );
       if (!res.ok) {
@@ -205,7 +226,7 @@ function onMessage(m: ControlMessage): void {
       killed = m.killed;
       break;
     case "user_message":
-      turns.enqueue(() => runTurn(m.jobId, m.text, m.voiceFastLane === true, m.kind));
+      turns.enqueue(() => runTurn(m.jobId, m.text, m.voiceFastLane === true, m.kind, m.images));
       break;
     case "approved_execution": {
       // Phase 2: the operator approved this exact action on the channel

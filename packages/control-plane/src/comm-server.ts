@@ -9,7 +9,7 @@
  */
 import { createServer, type Server, type Socket } from "node:net";
 import { chmodSync, existsSync, unlinkSync } from "node:fs";
-import type { ContextProfile, ControlMessage, JobRecord, RuntimeRequest } from "@gus/shared";
+import type { ContextProfile, ControlMessage, JobRecord, MessageImage, RuntimeRequest } from "@gus/shared";
 import { GUS_VERSION, screenText } from "@gus/shared";
 import type { ShieldGate } from "@gus/gate";
 import type { Governor } from "./governor.js";
@@ -46,6 +46,16 @@ import type { ContextAssembler } from "./context-pack.js";
  *  request alike (the reservation stays honest), and only to jobs
  *  whose record carries the voiceFastLane stamp. */
 export const VOICE_REPLY_TOKEN_BUDGET = 320;
+
+/** v0.24.0: the Governor's per-image input allowance for a call
+ *  carrying photos. Vision APIs price an image by its tiles, not
+ *  by the prompt's character count, so the text estimator cannot
+ *  see the cost; a flat 1,024 tokens per image (the order of a
+ *  downscaled photo's tile count on the major APIs) is added to
+ *  the reservation estimate. Settlement always uses the usage
+ *  the API actually reports — this only keeps the reservation
+ *  honest. */
+export const IMAGE_TOKEN_ESTIMATE = 1024;
 
 /** v0.13.0 (Memory Slice B, spec §7.1): the per-job memory_propose
  *  rate limit. A proposal is inert, but an unbounded proposal loop
@@ -394,13 +404,23 @@ export class CommServer {
     this.send(msg);
   }
 
-  pushUserMessage(m: { jobId: string; kind: string; text: string; voiceFastLane?: boolean }): void {
+  pushUserMessage(m: {
+    jobId: string;
+    kind: string;
+    text: string;
+    voiceFastLane?: boolean;
+    /** v0.24.0: the job's attached photos (validated by the
+     *  ChannelHost). The runtime attaches them to the turn's
+     *  first model request only. */
+    images?: MessageImage[];
+  }): void {
     this.send({
       t: "user_message",
       jobId: m.jobId,
       kind: m.kind,
       text: m.text,
       ...(m.voiceFastLane ? { voiceFastLane: true } : {}),
+      ...(m.images?.length ? { images: m.images } : {}),
     });
   }
 
@@ -855,7 +875,10 @@ export class CommServer {
           // The stub provider is deterministic, so the exact tokens of
           // the reply are computable BEFORE authorization — the
           // Governor's reservation therefore equals the settlement,
-          // and cap math is exact (governor.ts).
+          // and cap math is exact (governor.ts). v0.24.0: a job's
+          // photos (req.images) are not passed on this path — the
+          // stub is a fixed text script and cannot see images;
+          // vision exists only on the real providers below.
           const stubStartedAt = Date.now();
           const { reply, tokensIn, tokensOut } = stubCompletion(prompt);
           const decision = this.governor.authorize(req.jobId, tokensIn, tokensOut, FAKE_MODEL_NAME);
@@ -905,7 +928,20 @@ export class CommServer {
         let nativeState = provider.nativeTools ? this.nativeJobs.get(req.jobId) : undefined;
         if (provider.nativeTools) {
           if (!nativeState) {
-            nativeState = { messages: [{ role: "user", text: prompt }], lastEvent: "start" };
+            // v0.24.0: the job's photos ride the conversation's
+            // opening user message — the one place they enter
+            // the native channel; later hops' requests carry no
+            // images because the conversation already holds them.
+            nativeState = {
+              messages: [
+                {
+                  role: "user",
+                  text: prompt,
+                  ...(req.images?.length ? { images: req.images } : {}),
+                },
+              ],
+              lastEvent: "start",
+            };
             this.nativeJobs.set(req.jobId, nativeState);
             if (this.nativeJobs.size > 512) {
               const oldest = this.nativeJobs.keys().next().value;
@@ -918,9 +954,22 @@ export class CommServer {
         // The Governor meters what will actually be sent: on the
         // native channel that is the whole conversation plus the
         // tool definitions, not just this hop's prompt text.
-        const estIn = nativeState
-          ? estimateTokens(nativeRequestEstimateText(nativeState.messages))
-          : estimateTokens(prompt);
+        // v0.24.0: plus the per-image allowance for any photos the
+        // call carries (on the native channel they sit inside the
+        // conversation's opening message; on the text channel
+        // they ride this request). The text estimator cannot see
+        // image cost — see IMAGE_TOKEN_ESTIMATE.
+        const imageCount = nativeState
+          ? nativeState.messages.reduce(
+              (n, m) => n + (m.role === "user" && m.images ? m.images.length : 0),
+              0,
+            )
+          : (req.images?.length ?? 0);
+        const estIn =
+          (nativeState
+            ? estimateTokens(nativeRequestEstimateText(nativeState.messages))
+            : estimateTokens(prompt)) +
+          imageCount * IMAGE_TOKEN_ESTIMATE;
         const decision = this.governor.authorize(
           req.jobId,
           estIn,
@@ -936,6 +985,12 @@ export class CommServer {
           const completion = await provider.complete(prompt, {
             maxTokensOut,
             ...(nativeState ? { messages: nativeState.messages } : {}),
+            // v0.24.0: on the text channel the photos ride the
+            // call itself (the native channel carries them inside
+            // its messages, above). Continuation hops send none —
+            // the runtime attaches images to the first request
+            // only.
+            ...(nativeState ? {} : req.images?.length ? { images: req.images } : {}),
           });
           const costUsd = this.governor.settle(
             decision.reservationId,

@@ -41,6 +41,11 @@ import { PANEL_HTML } from "./page.js";
 import { HELP_ENTRIES, HELP_HTML } from "./help.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
+/** v0.24.0: the chat route's own body cap — a submission may
+ *  carry up to 4 photos as base64 (the adapter caps each at
+ *  8M chars), so the JSON body can legitimately reach ~33 MB.
+ *  Every other route keeps the 64 KB cap. */
+const MAX_CHAT_BODY_BYTES = 36 * 1024 * 1024;
 /** v0.9: the voice call's raw-audio body cap. A push-to-talk
  *  utterance is seconds of speech (~32 KB/s as WAV); 16 MB is
  *  minutes of headroom, and the voice service enforces the same
@@ -157,12 +162,15 @@ export class PanelServer {
 
   // ------------------------------------------------------------ io
 
-  private async readJson(req: import("node:http").IncomingMessage): Promise<Record<string, unknown>> {
+  private async readJson(
+    req: import("node:http").IncomingMessage,
+    maxBytes: number = MAX_BODY_BYTES,
+  ): Promise<Record<string, unknown>> {
     const chunks: Buffer[] = [];
     let size = 0;
     for await (const chunk of req) {
       size += (chunk as Buffer).length;
-      if (size > MAX_BODY_BYTES) throw new Error("request body too large");
+      if (size > maxBytes) throw new Error("request body too large");
       chunks.push(chunk as Buffer);
     }
     const text = Buffer.concat(chunks).toString("utf8").trim();
@@ -256,9 +264,15 @@ export class PanelServer {
       return;
     }
     if (method === "POST" && path === "/api/chat") {
-      const body = await this.readJson(req);
+      const body = await this.readJson(req, MAX_CHAT_BODY_BYTES);
+      // v0.24.0: photos ride the submission as {mediaType, data}
+      // pairs. Shape and caps are enforced by the chat adapter;
+      // here the body field is only passed through when it is an
+      // array — anything else is treated as no photos, and the
+      // adapter refuses unusable entries with its own detail.
       const result = await this.backend.submitChat(
         typeof body.text === "string" ? body.text : "",
+        Array.isArray(body.images) ? body.images : undefined,
       );
       return json(result.ok ? 200 : 400, result);
     }

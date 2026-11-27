@@ -14,6 +14,21 @@ export interface ApprovalButton {
   label: string;
 }
 
+/** v0.24.0: one image attached to an inbound message, carried as
+ *  data (never a path or URL — channels terminate in the control
+ *  plane, and the image must cross the same screened pipeline as
+ *  the text). Adapters that accept attachments validate the shape
+ *  and cap the count/size before emitting; the ChannelHost
+ *  re-validates before anything rides to the runtime. Only the
+ *  panel adapter produces these today (the iOS chat's photos);
+ *  adapters without attachments never set the field. */
+export interface MessageImage {
+  /** IANA media type, e.g. "image/jpeg". */
+  mediaType: string;
+  /** Base64-encoded image bytes (no "data:" prefix). */
+  data: string;
+}
+
 export interface InboundMessage {
   /** Adapter-native conversation id (Telegram chat id, Teams chat id, …). */
   conversationId: string;
@@ -23,6 +38,12 @@ export interface InboundMessage {
    *  beyond "this is the paired operator" in v1's single-operator model). */
   senderId: string;
   text: string;
+  /** v0.24.0: images attached to this message (see MessageImage).
+   *  The text is scanned and receipted exactly as before; the
+   *  images ride the job to the model's first call as image input
+   *  on providers that support it. The durable transcript records
+   *  only the COUNT, never the image data. */
+  images?: MessageImage[];
   /** Unix ms. */
   receivedAt: number;
   /** v0.5.1: artifact post-conditions declared by the requester —

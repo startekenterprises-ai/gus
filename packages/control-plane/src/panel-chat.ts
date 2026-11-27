@@ -27,11 +27,18 @@
  * host before send() is called. Buttons are not recorded: the
  * panel renders live approval cards from the Approval Engine's
  * own durable state, never from transcript text.
+ *
+ * v0.24.0: photos. A submission may carry images (the iOS chat's
+ * photo attach). The images ride the emitted event to the model
+ * as image input, but they are NEVER recorded: the transcript
+ * entry carries only the photo COUNT (`photos`), so the durable
+ * record shows a photo was sent without holding the photo.
  */
 import { appendFileSync } from "node:fs";
 import type {
   ChannelAdapter,
   ChannelEvent,
+  MessageImage,
   OutboundMessage,
 } from "@gus/shared";
 import { JsonlLogCache } from "./log-cache.js";
@@ -41,11 +48,31 @@ export const PANEL_CHAT_SENDER = "panel";
 
 const MAX_TEXT_CHARS = 8_000;
 const MAX_HISTORY = 200;
+/** v0.24.0: photo caps for one submission — the iOS app sends a
+ *  single downscaled JPEG (hundreds of KB); these are headroom,
+ *  not targets. The ChannelHost re-validates before the runtime. */
+export const MAX_CHAT_IMAGES = 4;
+export const MAX_CHAT_IMAGE_BASE64_CHARS = 8_000_000;
 
 export interface PanelChatEntry {
   ts: number;
   direction: "in" | "out";
   text: string;
+  /** v0.24.0: how many photos the operator sent with this entry
+   *  (inbound only). The image data itself is never recorded. */
+  photos?: number;
+}
+
+/** v0.24.0: shape-check one submitted image. Returns the image
+ *  when it is a plausible photo payload, undefined otherwise. */
+export function sanitizeChatImage(raw: unknown): MessageImage | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as { mediaType?: unknown; data?: unknown };
+  if (typeof r.mediaType !== "string" || !r.mediaType.startsWith("image/")) return undefined;
+  if (typeof r.data !== "string" || r.data.length === 0) return undefined;
+  if (r.data.length > MAX_CHAT_IMAGE_BASE64_CHARS) return undefined;
+  if (!/^[A-Za-z0-9+/=\s]+$/.test(r.data)) return undefined;
+  return { mediaType: r.mediaType, data: r.data };
 }
 
 /** The history mapping, applied by the log cache once per line
@@ -58,11 +85,17 @@ function mapChatLine(raw: unknown): PanelChatEntry | undefined {
     ts?: number;
     direction?: string;
     text?: string;
+    photos?: number;
   };
   if (!r || typeof r !== "object") return undefined;
   if (r.conversationId !== PANEL_CHAT_CONVERSATION) return undefined;
   if (typeof r.ts !== "number" || typeof r.text !== "string") return undefined;
-  return { ts: r.ts, direction: r.direction === "in" ? "in" : "out", text: r.text };
+  return {
+    ts: r.ts,
+    direction: r.direction === "in" ? "in" : "out",
+    text: r.text,
+    ...(typeof r.photos === "number" && r.photos > 0 ? { photos: r.photos } : {}),
+  };
 }
 
 export class PanelChatAdapter implements ChannelAdapter {
@@ -93,17 +126,45 @@ export class PanelChatAdapter implements ChannelAdapter {
    * operator's words, then emits the ordinary message event — from
    * here on the pipeline cannot tell (and does not care) that the
    * words came from the panel rather than Telegram.
+   *
+   * v0.24.0: `images` carries the submission's photos. Each is
+   * shape-checked and capped here (and again in the ChannelHost);
+   * a submission naming photos that are not usable image payloads
+   * is refused outright — a photo is never silently dropped. A
+   * photo-only submission (no words) is a real message: the event
+   * text is empty and the ChannelHost frames it for the model.
+   * The transcript records the photo count, never the data.
    */
-  submit(text: string): { ok: boolean; detail: string } {
+  submit(text: string, images?: MessageImage[]): { ok: boolean; detail: string } {
     const trimmed = text.trim();
-    if (!trimmed) return { ok: false, detail: "The message is empty — nothing was sent." };
+    let photos: MessageImage[] | undefined;
+    if (images !== undefined) {
+      if (!Array.isArray(images) || images.length > MAX_CHAT_IMAGES) {
+        return { ok: false, detail: `Too many photos — at most ${MAX_CHAT_IMAGES} per message. Nothing was sent.` };
+      }
+      photos = [];
+      for (const raw of images) {
+        const img = sanitizeChatImage(raw);
+        if (!img) {
+          return { ok: false, detail: "One of the attached photos isn't a usable image — nothing was sent." };
+        }
+        photos.push(img);
+      }
+      if (photos.length === 0) photos = undefined;
+    }
+    if (!trimmed && !photos) return { ok: false, detail: "The message is empty — nothing was sent." };
     if (trimmed.length > MAX_TEXT_CHARS) {
       return { ok: false, detail: `That message is over the ${MAX_TEXT_CHARS}-character limit for one job — nothing was sent.` };
     }
     if (!this.onEvent) {
       return { ok: false, detail: "The chat channel is not running yet — nothing was sent." };
     }
-    this.record({ ts: Date.now(), direction: "in", text: trimmed });
+    this.record({
+      ts: Date.now(),
+      direction: "in",
+      text: trimmed,
+      ...(photos ? { photos: photos.length } : {}),
+    });
     this.onEvent({
       type: "message",
       message: {
@@ -112,6 +173,7 @@ export class PanelChatAdapter implements ChannelAdapter {
         senderId: PANEL_CHAT_SENDER,
         text: trimmed,
         receivedAt: Date.now(),
+        ...(photos ? { images: photos } : {}),
       },
     });
     return { ok: true, detail: "Sent — it goes through the same scan, caps and receipts as any channel message." };

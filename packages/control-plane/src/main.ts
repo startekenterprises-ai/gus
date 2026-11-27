@@ -1017,7 +1017,7 @@ const panelBackend: PanelBackend = {
   // the ordinary channel event; history is the adapter's durable
   // transcript plus this conversation's jobs from the same store
   // /api/jobs reads.
-  submitChat: async (text) => panelChat.submit(text),
+  submitChat: async (text, images) => panelChat.submit(text, images),
   chatHistory: () => {
     const urls = shieldVerifyUrls();
     return {

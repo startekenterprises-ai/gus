@@ -19,6 +19,8 @@
  *   self-report.
  */
 
+import type { MessageImage } from "./channel.js";
+
 export type ToolClass = "read" | "write" | "destructive" | "external-send" | "pay";
 
 /** v0.14.3: the prefix of the `job_update` note the runtime sends
@@ -42,6 +44,14 @@ export type RuntimeRequest =
       /** Class of work, for Governor routing ("primary" | "cheap"). */
       workClass: "primary" | "cheap";
       prompt: string;
+      /** v0.24.0: the job's attached images, sent ONLY on the
+       *  turn's first model request (the runtime holds them from
+       *  the user_message). Continuation hops omit them: on the
+       *  native channel the opening user message already carries
+       *  them inside the control plane's conversation state, and
+       *  on the text channel a TOOL_RESULT continuation is about
+       *  the tool, not the photo. */
+      images?: MessageImage[];
     }
   | {
       /** Authorization request — sent BEFORE the tool executes. */
@@ -92,6 +102,11 @@ export type ControlMessage =
       jobId: string;
       kind: string;
       text: string;
+      /** v0.24.0: images attached to the operator's message,
+       *  screened and capped by the control plane before this
+       *  delivery (channel.ts MessageImage). The runtime attaches
+       *  them to the turn's first model request only. */
+      images?: MessageImage[];
       /** v0.9.8: the job is a live voice call's spoken chat turn —
        *  the runtime runs it in the voice fast lane (see
        *  runtime/src/voice-lane.ts). Set only from the job

@@ -14,12 +14,15 @@ import UIKit
 /// Shield line under each exchange says what happened, with
 /// the receipts a tap away.
 ///
-/// Photos are the one attachment (this build): they route
-/// to Core mode, and the photo button stays disabled until a
-/// core is connected. The honest limit, stated on the photo
-/// itself: the core's chat channel takes text only, so in
-/// this build the photo stays in this chat, marked as not
-/// sent — nothing pretends it was delivered.
+/// Photos are the one attachment: they DELIVER in Core
+/// mode (v0.24.0) — the image rides the chat submission to
+/// the Mac, whose brain receives it as image input; the
+/// core's transcript records the photo count, never the
+/// image. The on-device brains are text-only, so a photo
+/// message in on-device mode is not dispatched at all: the
+/// note on the message says so in plain words at send time —
+/// never a silent drop, never a pretend delivery. The photo
+/// button stays disabled until a core is connected.
 struct ChatView: View {
     /// Extra bottom room that clears the floating tab
     /// bar's pill (v0.17.4) — the Call screen's figure,
@@ -309,7 +312,9 @@ struct ChatView: View {
                         .frame(width: 52, height: 52)
                         .clipped()
                         .cornerRadius(8)
-                    Text("Photo attached — it routes to your Mac.")
+                    Text(model.mode == .onDevice
+                         ? "Photo attached — photos need Core mode; this brain can't see pictures."
+                         : "Photo attached — it sends with your message, and GUS sees it on your Mac.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .lineLimit(2)
@@ -428,8 +433,34 @@ final class ChatModel: ObservableObject {
             return
         }
         Task {
-            photoData = try? await item.loadTransferable(type: Data.self)
+            let raw = try? await item.loadTransferable(type: Data.self)
+            photoData = raw.map { Self.transportPhotoData($0) }
         }
+    }
+
+    /// Re-encode a picked photo for transport, at attach time:
+    /// the picker hands back the library's original bytes —
+    /// possibly a multi-megabyte HEIC the core's brain APIs
+    /// can't read. Decode, cap the long edge at 1568 px (the
+    /// vision APIs' own working size), and re-encode as JPEG:
+    /// what reaches the core is a few hundred KB in a format
+    /// every vision model accepts. A pick that won't decode
+    /// keeps its original bytes rather than vanishing.
+    private static func transportPhotoData(_ raw: Data) -> Data {
+        guard let image = UIImage(data: raw) else { return raw }
+        let maxEdge: CGFloat = 1568
+        let longest = max(image.size.width, image.size.height)
+        var out = image
+        if longest > maxEdge {
+            let scale = maxEdge / longest
+            let size = CGSize(width: image.size.width * scale,
+                              height: image.size.height * scale)
+            let renderer = UIGraphicsImageRenderer(size: size)
+            out = renderer.image { _ in
+                image.draw(in: CGRect(origin: .zero, size: size))
+            }
+        }
+        return out.jpegData(compressionQuality: 0.8) ?? raw
     }
 
     func clearPhoto() {
@@ -491,23 +522,37 @@ final class ChatModel: ObservableObject {
     }
 
     private func dispatch(exchangeID: UUID, text: String, photo: Data?) {
-        if photo != nil {
-            // Photos route to Core mode. The honest limit of
-            // this build: the core's chat channel takes text
-            // only, so the photo itself cannot be delivered —
-            // it stays in this chat, marked on the message as
-            // not sent, while the words still go to the core.
-            if let i = messages.firstIndex(where: { $0.exchangeID == exchangeID && $0.role == .user }) {
-                messages[i].photoNote = "The photo itself wasn't sent — your Mac's GUS chat takes text only for now. The photo stays in this chat."
+        if let photo {
+            // v0.24.0: photos DELIVER — in Core mode. The image
+            // rides the chat submission to the Mac, whose brain
+            // receives it as image input (the core's transcript
+            // records the count, never the image). The
+            // on-device brains take text only — the local
+            // models have no image input at all — so a photo
+            // message in on-device mode is not dispatched, in
+            // whole or in part: the note on the message says
+            // why, in plain words, at send time. Never a silent
+            // drop, never a pretend delivery.
+            if mode == .onDevice {
+                setPhotoNote(exchangeID: exchangeID,
+                    note: "This brain can't look at photos yet — switch to Core to ask about pictures.")
+                return
             }
-            guard !text.isEmpty else { return }
-            dispatchCore(exchangeID: exchangeID, text: text)
+            dispatchCore(exchangeID: exchangeID, text: text, images: [photo])
             return
         }
         if mode == .onDevice {
             dispatchOnDevice(exchangeID: exchangeID, text: text)
         } else {
             dispatchCore(exchangeID: exchangeID, text: text)
+        }
+    }
+
+    /// The note under a message's photo — set when the photo's
+    /// fate is known (delivered, refused by mode, or failed).
+    private func setPhotoNote(exchangeID: UUID, note: String) {
+        if let i = messages.firstIndex(where: { $0.exchangeID == exchangeID && $0.role == .user }) {
+            messages[i].photoNote = note
         }
     }
 
@@ -592,7 +637,7 @@ final class ChatModel: ObservableObject {
 
     // MARK: Core answers
 
-    private func dispatchCore(exchangeID: UUID, text: String) {
+    private func dispatchCore(exchangeID: UUID, text: String, images: [Data] = []) {
         replyingCount += 1
         Task { [weak self] in
             guard let self else { return }
@@ -607,15 +652,27 @@ final class ChatModel: ObservableObject {
                     self.coreSeenCount = history.messages.count
                     self.coreBaselineTaken = true
                 }
-                let result = try await self.client.chat(text: text)
+                let result = try await self.client.chat(text: text, images: images)
                 guard result.ok else {
+                    if !images.isEmpty {
+                        self.setPhotoNote(exchangeID: exchangeID,
+                            note: "The photo wasn't sent — your Mac's GUS refused the message.")
+                    }
                     self.appendNotice(exchangeID: exchangeID, text: result.detail)
                     self.replyingCount -= 1
                     return
                 }
+                if !images.isEmpty {
+                    self.setPhotoNote(exchangeID: exchangeID,
+                        note: "Photo sent to your Mac — GUS can see it there.")
+                }
                 self.pendingCoreExchanges.append(exchangeID)
                 self.startCorePolling()
             } catch {
+                if !images.isEmpty {
+                    self.setPhotoNote(exchangeID: exchangeID,
+                        note: "The photo wasn't sent — your Mac couldn't be reached.")
+                }
                 self.appendNotice(exchangeID: exchangeID,
                     text: "Couldn't reach your GUS core: \(error.localizedDescription)")
                 self.replyingCount -= 1

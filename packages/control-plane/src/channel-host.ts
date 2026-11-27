@@ -29,6 +29,8 @@ import {
 } from "./governor-mode.js";
 import { delegateResolutionAllowed, loadApproverPolicy } from "./approver-policy.js";
 import type { MemoryWriteService } from "./memory-write.js";
+import { MAX_CHAT_IMAGES, sanitizeChatImage } from "./panel-chat.js";
+import type { MessageImage } from "@gus/shared";
 
 const SECRET_WARNING = (classes: string[]) =>
   `⚠️ That looked like a secret (${classes.join(", ")}), so I refused it: ` +
@@ -45,6 +47,20 @@ const SECRET_WARNING = (classes: string[]) =>
 export const VOICE_BREVITY_NOTE =
   "\n\n(Voice call: this was spoken aloud, and your reply will be read aloud. " +
   "Answer in plain text, no markdown, and keep it short — a few sentences at most — unless the operator asks for more.)";
+
+/** v0.24.0 (photo delivery): appended by the HOST to a chat job's
+ *  runtime prompt when the operator's message carried photos —
+ *  the same construction as the voice note: control-plane-authored
+ *  framing; the job record keeps the operator's verbatim words,
+ *  and the images themselves ride the delivery as image input.
+ *  A photo-only message (no words at all) gets the framing as its
+ *  whole prompt: the operator's intent is "look at this". */
+export function photoNote(count: number, hasText: boolean): string {
+  const noun = count === 1 ? "photo" : "photos";
+  return hasText
+    ? `\n\n(The operator attached ${count} ${noun} to this message — ${count === 1 ? "it is" : "they are"} included with this message as image input. Look at ${count === 1 ? "it" : "them"} as part of answering.)`
+    : `(The operator sent ${count} ${noun} with no caption — ${count === 1 ? "it is" : "they are"} included with this message as image input. Describe what you see and answer any question the ${noun} imply.)`;
+}
 
 /** v0.14.1 (execution tasks): appended by the HOST to a task job's
  *  runtime prompt, the same construction as the voice note above —
@@ -371,6 +387,30 @@ export class ChannelHost {
       return;
     }
     const msg = ev.message;
+    // v0.24.0: attached photos are re-validated HERE, at the
+    // choke point every channel crosses — an adapter's claim is
+    // never trusted. Entries that are not usable image payloads
+    // are dropped and the drop is logged (the producing adapter
+    // refuses such submissions outright, so a drop here means a
+    // buggy or hostile adapter; the count is the record — image
+    // data never enters any log).
+    let images: MessageImage[] | undefined;
+    if (msg.images?.length) {
+      const valid = msg.images
+        .slice(0, MAX_CHAT_IMAGES)
+        .map((raw) => sanitizeChatImage(raw))
+        .filter((i): i is MessageImage => i !== undefined);
+      if (valid.length < msg.images.length) {
+        this.logEvent("events.jsonl", {
+          ts: Date.now(),
+          kind: "message_photos_dropped",
+          conversationId: msg.conversationId,
+          claimed: msg.images.length,
+          kept: valid.length,
+        });
+      }
+      if (valid.length) images = valid;
+    }
     const screened = screenText(msg.text);
     if (!screened.clean) {
       this.logEvent("guard.jsonl", guardEvent("ingress", screened));
@@ -659,6 +699,18 @@ export class ChannelHost {
       deliverables: msg.deliverables,
       voiceFastLane,
     });
+    // v0.24.0: the photo count joins the job's event record —
+    // the durable, receipt-adjacent trace that photos were sent
+    // with this message (count only, never image data).
+    if (images) {
+      this.logEvent("events.jsonl", {
+        ts: Date.now(),
+        kind: "message_photos",
+        jobId: job.id,
+        conversationId: msg.conversationId,
+        photoCount: images.length,
+      });
+    }
     this.jobs.transition(job.id, "running");
     // v0.9.8: the job's stage-timing ledger opens with the job.
     this.stageStats.set(job.id, { shieldMs: 0, modelMs: 0, hops: 0 });
@@ -775,9 +827,19 @@ export class ChannelHost {
     const jobText =
       (role.role === "delegate" ? `[from ${role.name}] ${text}` : text) +
       (voiceFastLane ? VOICE_BREVITY_NOTE : "") +
-      (kind === "task" ? taskExecutionNote(msg.deliverables) : "");
+      (kind === "task" ? taskExecutionNote(msg.deliverables) : "") +
+      // v0.24.0: the photo framing rides the runtime prompt (the
+      // record keeps the operator's words; the images themselves
+      // ride the delivery below as image input).
+      (images ? photoNote(images.length, text.length > 0) : "");
     this.pendingDeliveries.set(job.id, jobText);
-    this.comm.pushUserMessage({ jobId: job.id, kind, text: jobText, voiceFastLane });
+    this.comm.pushUserMessage({
+      jobId: job.id,
+      kind,
+      text: jobText,
+      voiceFastLane,
+      ...(images ? { images } : {}),
+    });
   }
 
   async kill(adapterName: string, conversationId: string, by: string): Promise<void> {

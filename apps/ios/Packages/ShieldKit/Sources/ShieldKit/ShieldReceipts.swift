@@ -7,9 +7,19 @@ import Security
 // chains to the previous receipt's hash (per-device stream
 // only — Gemini sharpening 3: devices never merge chains), and
 // each receipt's hash is signed with this device's own P256
-// key. The key is generated on first use and held in the
-// Keychain — plainly: a Keychain-held key, NOT a Secure Enclave
-// key. Moving it into the enclave is a later hardening chunk.
+// key.
+//
+// v0.24.0 (the enclave hardening): the signing key lives in
+// the Secure Enclave wherever the device has one — the
+// private material never leaves the enclave, and all the
+// Keychain holds is the key's opaque dataRepresentation, a
+// reference the enclave resolves. The pre-enclave software
+// key (Keychain-held raw key material, generated on first
+// use) is RETAINED, never deleted: it still signs on
+// platforms without an enclave, and every receipt it signed
+// before the move stays verifiable against it — each receipt
+// names the key that signed it (see `signingKey`), and
+// `verify` checks a receipt against the named key.
 //
 // A receipt binds: when, which direction, the verdict the app
 // acted on, the verdict the rules alone produced, the posture
@@ -39,6 +49,14 @@ public struct ShieldReceipt: Codable, Identifiable, Sendable {
     public let hash: String
     /// Base64 P256 signature over the canonical form.
     public let signature: String
+    /// v0.24.0: which of this device's keys produced the
+    /// signature — "enclave" or "software". Absent (nil) on
+    /// every receipt written before the field existed, and
+    /// nil means the legacy software key: it signed
+    /// everything back then. Verification keys off this
+    /// field, defaulting nil to the legacy key, so history
+    /// stays verifiable across the enclave move.
+    public let signingKey: String?
 
     public var id: Int { seq }
 
@@ -80,7 +98,11 @@ public final class ShieldReceiptLog: @unchecked Sendable {
     private var loaded = false
     private var receipts: [ShieldReceipt] = []
     private var lastHash = String(repeating: "0", count: 64)
-    private var signingKey: P256.Signing.PrivateKey?
+    /// The key new receipts sign with — resolved once, lazily.
+    private var activeKey: ReceiptSigningKey?
+    /// Cached key material/references, per key home.
+    private var enclaveKey: SecureEnclave.P256.Signing.PrivateKey?
+    private var legacyKey: P256.Signing.PrivateKey?
 
     private init() {}
 
@@ -105,11 +127,12 @@ public final class ShieldReceiptLog: @unchecked Sendable {
             contentHash: result.contentHash,
             prevHash: lastHash,
             hash: "",
-            signature: "")
+            signature: "",
+            signingKey: nil)
         let canonical = draft.canonicalForm()
         let hash = SHA256.hash(data: Data(canonical.utf8))
             .map { String(format: "%02x", $0) }.joined()
-        let signature = sign(canonical)
+        let signed = sign(canonical)
         let receipt = ShieldReceipt(
             seq: draft.seq,
             timestamp: draft.timestamp,
@@ -122,7 +145,8 @@ public final class ShieldReceiptLog: @unchecked Sendable {
             contentHash: draft.contentHash,
             prevHash: draft.prevHash,
             hash: hash,
-            signature: signature)
+            signature: signed.signature,
+            signingKey: signed.keyTag)
         receipts.append(receipt)
         lastHash = hash
         appendLine(receipt)
@@ -182,52 +206,205 @@ public final class ShieldReceiptLog: @unchecked Sendable {
         }
     }
 
-    // MARK: - Signing (per-device P256 key, Keychain-held)
+    // MARK: - Verification
 
-    private func sign(_ canonical: String) -> String {
-        guard let key = deviceKey(),
-              let signature = try? key.signature(for: Data(canonical.utf8))
-        else { return "" }
-        return signature.rawRepresentation.base64EncodedString()
+    /// Verify one receipt end to end: its hash recomputes from
+    /// the canonical form, and its signature verifies under the
+    /// public key of the key the receipt names — "enclave"
+    /// names the Secure Enclave key; nil (every receipt from
+    /// before v0.24.0) and "software" name the legacy key,
+    /// which is retained on the device precisely so history
+    /// stays verifiable after the move. A receipt whose named
+    /// key is not on this device (a log carried across
+    /// devices) does not verify — chains are per-device by
+    /// design, and keys never leave their device.
+    public func verify(_ receipt: ShieldReceipt) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let canonical = receipt.canonicalForm()
+        let hash = SHA256.hash(data: Data(canonical.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        guard hash == receipt.hash,
+              let sigData = Data(base64Encoded: receipt.signature),
+              let signature = try? P256.Signing.ECDSASignature(rawRepresentation: sigData),
+              let publicKey = publicKey(forTag: receipt.signingKey)
+        else { return false }
+        return publicKey.isValidSignature(signature, for: Data(canonical.utf8))
     }
 
-    /// This device's receipt-signing key: loaded from the
-    /// Keychain, generated and stored on first use. Keychain —
-    /// NOT the Secure Enclave (see the header note).
-    private func deviceKey() -> P256.Signing.PrivateKey? {
-        if let signingKey { return signingKey }
-        let service = "com.startekenterprises.gus.shieldkit"
-        let account = "receipt-signing-key"
+    private func publicKey(forTag tag: String?) -> P256.Signing.PublicKey? {
+        switch tag {
+        case "enclave":
+            return storedEnclaveKey()?.publicKey
+        default:
+            // nil (pre-v0.24.0) and "software" both name the
+            // legacy Keychain-held key.
+            return storedLegacyKey()?.publicKey
+        }
+    }
+
+    // MARK: - Signing (Secure Enclave first, legacy key retained)
+
+    private func sign(_ canonical: String) -> (signature: String, keyTag: String?) {
+        guard let key = activeSigningKey(),
+              let signature = key.sign(canonical)
+        else { return ("", nil) }
+        return (signature, key.tag)
+    }
+
+    /// The key new receipts sign with: the Secure Enclave key
+    /// when this device has an enclave, the legacy software key
+    /// when it doesn't (or when enclave key creation fails).
+    /// Resolved once per process; the choice is stamped on
+    /// every receipt it signs.
+    private func activeSigningKey() -> ReceiptSigningKey? {
+        if let activeKey { return activeKey }
+        if let enclave = loadOrCreateEnclaveKey() {
+            activeKey = .enclave(enclave)
+            return activeKey
+        }
+        if let legacy = loadOrCreateLegacyKey() {
+            activeKey = .software(legacy)
+            return activeKey
+        }
+        return nil
+    }
+
+    // MARK: Enclave key
+
+    /// The stored enclave key, if one has been minted on this
+    /// device. Lookup only — verification uses this, so merely
+    /// checking old receipts never creates a key.
+    private func storedEnclaveKey() -> SecureEnclave.P256.Signing.PrivateKey? {
+        if let enclaveKey { return enclaveKey }
+        guard let data = keychainData(account: Self.enclaveKeyAccount),
+              let key = try? SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: data)
+        else { return nil }
+        enclaveKey = key
+        return key
+    }
+
+    private func loadOrCreateEnclaveKey() -> SecureEnclave.P256.Signing.PrivateKey? {
+        if let key = storedEnclaveKey() { return key }
+        guard SecureEnclave.isAvailable else { return nil }
+        // First use on this device: mint the enclave key. The
+        // access control is private-key-usage only, available
+        // after first unlock — receipts sign at turn boundaries
+        // with nobody present, so no user-presence requirement
+        // can ride the key. Only the key's dataRepresentation
+        // (an opaque reference the enclave resolves — not key
+        // material) is stored, in the Keychain, so the same key
+        // is found again next launch.
+        var accessError: Unmanaged<CFError>?
+        guard let access = SecAccessControlCreateWithFlags(
+                nil,
+                kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+                .privateKeyUsage,
+                &accessError),
+              let key = try? SecureEnclave.P256.Signing.PrivateKey(accessControl: access)
+        else { return nil }
+        storeKeychainData(key.dataRepresentation, account: Self.enclaveKeyAccount)
+        enclaveKey = key
+        return key
+    }
+
+    // MARK: Legacy software key (pre-v0.24.0)
+
+    /// The stored legacy key, if this install has one. Lookup
+    /// only — it is never deleted, so receipts signed before
+    /// the enclave move remain verifiable (see `verify`).
+    private func storedLegacyKey() -> P256.Signing.PrivateKey? {
+        if let legacyKey { return legacyKey }
+        guard let data = keychainData(account: Self.legacyKeyAccount),
+              let key = try? P256.Signing.PrivateKey(rawRepresentation: data)
+        else { return nil }
+        legacyKey = key
+        return key
+    }
+
+    /// The legacy path, exactly as it behaved before v0.24.0:
+    /// loaded from the Keychain, generated and stored on first
+    /// use. It is the signing key only where no enclave is
+    /// available — and the verification key for old receipts
+    /// everywhere.
+    private func loadOrCreateLegacyKey() -> P256.Signing.PrivateKey? {
+        if let key = storedLegacyKey() { return key }
+        let key = P256.Signing.PrivateKey()
+        storeKeychainData(key.rawRepresentation, account: Self.legacyKeyAccount)
+        // Whether or not the Keychain took the store, sign with
+        // the key for this process rather than failing the
+        // scan — the receipt chain stays intact, and the next
+        // launch retries the store. (Pre-v0.24.0 behavior,
+        // unchanged.)
+        legacyKey = key
+        return key
+    }
+
+    // MARK: Keychain plumbing
+
+    private static let keychainService = "com.startekenterprises.gus.shieldkit"
+    private static let legacyKeyAccount = "receipt-signing-key"
+    private static let enclaveKeyAccount = "receipt-signing-key-enclave"
+
+    private func keychainData(account: String) -> Data? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
+            kSecAttrService as String: Self.keychainService,
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
         ]
         var item: CFTypeRef?
-        if SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-           let data = item as? Data,
-           let key = try? P256.Signing.PrivateKey(rawRepresentation: data) {
-            signingKey = key
-            return key
-        }
-        let key = P256.Signing.PrivateKey()
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+              let data = item as? Data
+        else { return nil }
+        return data
+    }
+
+    @discardableResult
+    private func storeKeychainData(_ data: Data, account: String) -> Bool {
         let add: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
+            kSecAttrService as String: Self.keychainService,
             kSecAttrAccount as String: account,
-            kSecValueData as String: key.rawRepresentation,
+            kSecValueData as String: data,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
         ]
-        if SecItemAdd(add as CFDictionary, nil) == errSecSuccess {
-            signingKey = key
-            return key
+        return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
+    }
+}
+
+/// The two homes a receipt-signing key can have (v0.24.0).
+/// The enclave form's private material never leaves the Secure
+/// Enclave — signing happens inside it, and the app holds only
+/// the key object. The software form is the pre-v0.24.0
+/// Keychain-held key, retained for enclave-less platforms and
+/// for verifying the receipts it already signed. Both produce
+/// the same P256 signature type over the same canonical form,
+/// so a receipt's verification needs only the key's public half
+/// and the receipt's own `signingKey` tag.
+private enum ReceiptSigningKey {
+    case enclave(SecureEnclave.P256.Signing.PrivateKey)
+    case software(P256.Signing.PrivateKey)
+
+    /// The tag stamped on receipts this key signs.
+    var tag: String {
+        switch self {
+        case .enclave: return "enclave"
+        case .software: return "software"
         }
-        // Keychain refused the store: still sign with an
-        // in-memory key for this process rather than failing
-        // the scan — the receipt chain stays intact, and the
-        // next launch retries the store.
-        signingKey = key
-        return key
+    }
+
+    /// Base64 signature over the canonical form, or nil if the
+    /// key refused (enclave unavailable mid-flight, device
+    /// locked before first unlock).
+    func sign(_ canonical: String) -> String? {
+        let signature: P256.Signing.ECDSASignature?
+        switch self {
+        case .enclave(let key):
+            signature = try? key.signature(for: Data(canonical.utf8))
+        case .software(let key):
+            signature = try? key.signature(for: Data(canonical.utf8))
+        }
+        return signature?.rawRepresentation.base64EncodedString()
     }
 }

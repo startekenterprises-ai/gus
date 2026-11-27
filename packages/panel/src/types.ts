@@ -573,6 +573,18 @@ export interface PanelChatMessageData {
   ts: number;
   direction: "in" | "out";
   text: string;
+  /** v0.24.0: photos sent with this (inbound) entry — the count
+   *  only; image data is never part of the transcript. */
+  photos?: number;
+}
+
+/** v0.24.0: one photo attached to a chat submission — mirrors
+ *  @gus/shared's MessageImage. The bytes ride the submission to
+ *  the model as image input; they are never stored. */
+export interface PanelChatImageData {
+  mediaType: string;
+  /** Base64-encoded image bytes (no "data:" prefix). */
+  data: string;
 }
 
 /** v0.6: the Chat view's full read model — the transcript plus the
@@ -784,8 +796,10 @@ export interface PanelBackend {
   /** v0.6: submit the Chat composer's text. It becomes a NORMAL
    *  job through the channel pipeline (ingress secret-guard,
    *  Shield scan, classifier, Governor caps, receipts) — the panel
-   *  chat is a channel adapter, not a side door. */
-  submitChat(text: string): Promise<PanelActionResult>;
+   *  chat is a channel adapter, not a side door. v0.24.0: a
+   *  submission may carry photos, which ride the same pipeline
+   *  to the model as image input. */
+  submitChat(text: string, images?: PanelChatImageData[]): Promise<PanelActionResult>;
   /** v0.6: the Chat view's read model, from durable state. */
   chatHistory(): PanelChatData;
   /** v0.6: the latest Watch frame, fetched on demand from the Mac

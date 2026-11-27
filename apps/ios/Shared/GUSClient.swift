@@ -295,9 +295,22 @@ actor GUSClient {
     /// the answer lands in chatHistory() as an "out" message.
     /// A refusal (empty, or over the 8,000-character limit)
     /// answers 400 with this same shape — decode either way.
-    func chat(text: String) async throws -> ActionResult {
+    ///
+    /// v0.24.0: `images` carries the message's photos (JPEG
+    /// data, downscaled and re-encoded by the chat view at
+    /// attach time). They ride the same POST as base64 and the
+    /// core presents them to its brain as image input; the
+    /// core's transcript records only the count. A photo-only
+    /// message (empty text) is a valid submission.
+    func chat(text: String, images: [Data] = []) async throws -> ActionResult {
+        var body: [String: Any] = ["text": text]
+        if !images.isEmpty {
+            body["images"] = images.map {
+                ["mediaType": "image/jpeg", "data": $0.base64EncodedString()]
+            }
+        }
         let (data, status) = try await requestRaw(
-            "/api/chat", method: "POST", jsonBody: ["text": text])
+            "/api/chat", method: "POST", jsonBody: body)
         guard status == 200 || status == 400 else {
             throw ClientError.http(status, String(data: data, encoding: .utf8) ?? "")
         }

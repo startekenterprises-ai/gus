@@ -110,10 +110,24 @@ export function proposalIdFor(sender: string): string {
 // ------------------------------------------------------------------- store
 
 /** The proposals file: <state>/gmail-cleanup-proposals.json,
- *  0600 like the manifests it sits beside. A missing file is the
- *  empty set; a malformed one throws loudly — the accept path in
- *  particular must fail closed rather than guess at the record it
- *  is resolving. */
+ *  0600 like the manifests it sits beside.
+ *
+ *  v0.24.0 (store hardening): saves are ATOMIC — write to a temp
+ *  file, then rename over the real one (the scheduler-config
+ *  pattern), so a crash mid-save leaves the previous complete
+ *  file, never a torn one. Loads RECOVER: a missing file is the
+ *  empty set (as always), and a corrupt one — invalid JSON, no
+ *  proposals list, a malformed record — is quarantined (renamed
+ *  aside as `<file>.corrupt-<timestamp>`, never deleted, so the
+ *  audit trail survives for the operator to inspect) and the
+ *  store starts clean rather than crashing every cycle that
+ *  touches it. This replaces the old throw-loudly load: a torn
+ *  write once wedged the store permanently, and the morning
+ *  report depends on this state. The accept path's fail-closed
+ *  property is unchanged where it matters — accepting still
+ *  validates the resulting RULE file through loadCleanupRules
+ *  before anything replaces it; a recovered (empty) store simply
+ *  has no proposal to accept. */
 export class GmailCleanupProposalStore {
   constructor(private path: string) {}
 
@@ -123,10 +137,10 @@ export class GmailCleanupProposalStore {
     try {
       parsed = JSON.parse(readFileSync(this.path, "utf8")) as Partial<GmailCleanupProposalsFile>;
     } catch {
-      throw new Error(`gmail cleanup proposals: ${this.path} is not valid JSON — refusing to guess`);
+      return this.recoverCorrupt();
     }
     if (!parsed || !Array.isArray(parsed.proposals)) {
-      throw new Error(`gmail cleanup proposals: ${this.path} has no proposals list — refusing to guess`);
+      return this.recoverCorrupt();
     }
     for (const p of parsed.proposals) {
       if (
@@ -138,15 +152,40 @@ export class GmailCleanupProposalStore {
         !p.evidence ||
         typeof p.evidence.sender !== "string"
       ) {
-        throw new Error(`gmail cleanup proposals: ${this.path} holds a malformed proposal record — refusing to guess`);
+        return this.recoverCorrupt();
       }
     }
     return { version: 1, proposals: parsed.proposals };
   }
 
+  /** Quarantine a corrupt proposals file and start clean. The
+   *  bad file is renamed aside — evidence preserved, nothing
+   *  silently destroyed — and the empty set is returned. If the
+   *  rename itself fails (the file vanished in a race, the
+   *  directory is read-only), starting clean still stands: the
+   *  next save replaces the file atomically. */
+  private recoverCorrupt(): GmailCleanupProposalsFile {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    let aside = `${this.path}.corrupt-${stamp}`;
+    // Never overwrite an earlier quarantine: two corruptions in
+    // the same millisecond get distinct asides.
+    for (let n = 2; existsSync(aside); n++) aside = `${this.path}.corrupt-${stamp}-${n}`;
+    try {
+      renameSync(this.path, aside);
+    } catch {
+      /* starting clean does not depend on the quarantine landing */
+    }
+    return { version: 1, proposals: [] };
+  }
+
   save(file: GmailCleanupProposalsFile): void {
     mkdirSync(dirname(this.path), { recursive: true });
-    writeFileSync(this.path, JSON.stringify(file, null, 2) + "\n", { mode: 0o600 });
+    // Atomic (tmp + rename, the scheduler-config pattern): a
+    // crash mid-save leaves the previous complete file, never a
+    // torn one the next load would have to recover from.
+    const tmp = `${this.path}.tmp`;
+    writeFileSync(tmp, JSON.stringify(file, null, 2) + "\n", { mode: 0o600 });
+    renameSync(tmp, this.path);
     chmodSync(this.path, 0o600);
   }
 
