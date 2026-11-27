@@ -20,9 +20,29 @@ import SwiftUI
 /// screen itself is the same; only the way out changed:
 /// Done (shown whenever no call is live) leaves without
 /// calling, and End hangs up AND dismisses back to Chat.
+///
+/// v0.30.0: the cover STARTS the call — Chat's phone button
+/// is the only door in, and tapping it means "call", so
+/// autoStart connects on appear (Muse's one-tap shape;
+/// Glenn, 2026-11-27) instead of landing on an idle screen
+/// that asks for a second tap. The in-screen Call button
+/// stays for one job: re-calling after a call has ended
+/// while the cover is still up. The avatar is a button now
+/// too — tapping the face opens the persona picker.
 struct CallView: View {
+    /// Set by the presenting door: true means connect the
+    /// moment this screen appears. Only Chat's cover passes
+    /// true today; the default keeps the screen's old
+    /// idle-first behavior for any future host.
+    let autoStart: Bool
     @Environment(\.dismiss) private var dismiss
     @StateObject private var call = CallSession()
+    @State private var didAutoStart = false
+    @State private var showPersonaPicker = false
+
+    init(autoStart: Bool = false) {
+        self.autoStart = autoStart
+    }
     /// The mid-call composer's draft (v0.23.0). Local view
     /// state only — a sent message goes through
     /// CallSession.sendTypedMessage, the spoken final's own
@@ -50,10 +70,20 @@ struct CallView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 16) {
-                AvatarFaceView(level: call.voiceLevel,
-                               speaking: call.gusSpeaking,
-                               listening: inCall && call.corePhase == "listening")
-                    .padding(.top, 12)
+                // The face is the persona door (v0.30.0):
+                // tap it to switch personas mid-visit — the
+                // pick writes the same key Settings writes
+                // and lands when the brain next loads.
+                Button {
+                    showPersonaPicker = true
+                } label: {
+                    AvatarFaceView(level: call.voiceLevel,
+                                   speaking: call.gusSpeaking,
+                                   listening: inCall && call.corePhase == "listening")
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Choose persona")
+                .padding(.top, 12)
 
                 // Layout discipline (v0.17.0): every text on
                 // this screen is width-flexible — it wraps or
@@ -171,6 +201,20 @@ struct CallView: View {
                         Button("Done") { dismiss() }
                     }
                 }
+            }
+            // One tap means call (v0.30.0): the cover
+            // connects on appear when the door asked it to.
+            // didAutoStart keeps a later re-appear (the
+            // persona sheet closing, say) from re-dialing a
+            // call the operator already ended.
+            .onAppear {
+                if autoStart && !didAutoStart {
+                    didAutoStart = true
+                    call.startCall()
+                }
+            }
+            .sheet(isPresented: $showPersonaPicker) {
+                PersonaPickerSheet()
             }
             // Shield quarantine (v0.15.7): a held turn waits
             // here for the operator's one-time decision. Send

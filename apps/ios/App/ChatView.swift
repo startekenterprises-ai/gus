@@ -52,6 +52,10 @@ struct ChatView: View {
     /// there is no Call tab). Ending the call dismisses
     /// the cover back here.
     @State private var showCall = false
+    /// The persona picker sheet, behind the header's
+    /// avatar (v0.30.0): the face at the top is the door
+    /// to switching personas.
+    @State private var showPersonaPicker = false
 
     /// The last message of each exchange — the Shield line
     /// renders under it, once per exchange.
@@ -130,7 +134,19 @@ struct ChatView: View {
             // The header (v0.29.0): share the conversation,
             // and the call button — Muse's shape, a phone
             // in the chat header instead of a Call tab.
+            // v0.30.0: the avatar sits at the top-left, and
+            // tapping it opens the persona picker; the call
+            // button now STARTS the call (the cover passes
+            // autoStart) — one tap, like Muse's.
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        showPersonaPicker = true
+                    } label: {
+                        AvatarThumbnailView()
+                    }
+                    .accessibilityLabel("Choose persona")
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     ShareLink(item: model.exportText()) {
                         Image(systemName: "square.and.arrow.up")
@@ -148,7 +164,10 @@ struct ChatView: View {
                 }
             }
             .fullScreenCover(isPresented: $showCall) {
-                CallView()
+                CallView(autoStart: true)
+            }
+            .sheet(isPresented: $showPersonaPicker) {
+                PersonaPickerSheet()
             }
             .onAppear { model.refreshMode() }
         }

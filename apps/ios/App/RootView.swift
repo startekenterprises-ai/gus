@@ -26,12 +26,29 @@ struct RootView: View {
                 // there is no Call tab anymore; the call is a
                 // full-screen cover presented from Chat's
                 // header phone button, and ending it returns
-                // here. Tabs: Chat, Activity, Settings.
+                // here. v0.30.0: five tabs, Muse's count —
+                // the Shield log and the persona picker move
+                // out of Settings' depths to the top level.
+                // Both host the SAME views (the log Settings
+                // links to, the picker behind the avatar tap);
+                // the Settings doors to them stay where they
+                // were. Tabs: Chat, Activity, Shield,
+                // Personas, Settings.
                 TabView {
                     ChatView()
                         .tabItem { Label("Chat", systemImage: "message") }
                     ActivityView()
                         .tabItem { Label("Activity", systemImage: "list.bullet.rectangle") }
+                    NavigationStack {
+                        ShieldLogView()
+                    }
+                    .tabItem { Label("Shield", systemImage: "shield") }
+                    NavigationStack {
+                        PersonaPickerView()
+                            .navigationTitle("Personas")
+                            .navigationBarTitleDisplayMode(.inline)
+                    }
+                    .tabItem { Label("Personas", systemImage: "person.2") }
                     SettingsView(model: session)
                         .tabItem { Label("Settings", systemImage: "gearshape") }
                 }

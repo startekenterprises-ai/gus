@@ -280,7 +280,17 @@ struct SettingsView: View {
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
-            .onAppear { voiceLogLines = VoiceFailureLog.shared.recentLines }
+            .onAppear {
+                voiceLogLines = VoiceFailureLog.shared.recentLines
+                // v0.30.0: the persona picker (the avatar
+                // tap, the Personas tab) writes the same key
+                // this editor holds — re-read it on appear so
+                // a pick made there is the text shown here.
+                // The editor writes every keystroke through
+                // to the key, so this can only ever catch the
+                // field up, never clobber an edit.
+                personaText = LocalBrain.customPrompt ?? ""
+            }
         }
     }
 
