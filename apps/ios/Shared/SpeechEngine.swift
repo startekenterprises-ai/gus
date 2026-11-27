@@ -110,7 +110,17 @@ struct PreparedSpeech {
 final class KokoroSpeechEngine: SpeechEngine {
     let kind: SpeechEngineKind = .kokoro
 
-    private let player = KokoroPlayer()
+    private let player: KokoroPlayer
+
+    /// The call's shared audio engine, when the session hands
+    /// one in (v0.18.0 — see KokoroPlayer's note): playback
+    /// rides the same engine that captures the microphone, so
+    /// the system's echo canceller can hear what it must
+    /// subtract. No engine handed in: the player makes its
+    /// own, exactly as before.
+    init(engine: AVAudioEngine = AVAudioEngine()) {
+        player = KokoroPlayer(engine: engine)
+    }
     private let lock = NSLock()
     private var generation = 0
     private var pendingFinish: (() -> Void)?
@@ -285,11 +295,12 @@ final class StudioVoiceEngine: SpeechEngine {
 /// borrowing another voice. Resolution never fails and never
 /// returns a fallback voice, because there isn't one.
 enum SpeechEngineResolver {
-    static func resolve(_ preferred: SpeechEngineKind = .preferred) -> SpeechEngine {
+    static func resolve(_ preferred: SpeechEngineKind = .preferred,
+                        callAudioEngine: AVAudioEngine? = nil) -> SpeechEngine {
         if preferred != .kokoro {
             let optIn = StudioVoiceEngine()
             if optIn.kind == preferred, optIn.isAvailable { return optIn }
         }
-        return KokoroSpeechEngine()
+        return KokoroSpeechEngine(engine: callAudioEngine ?? AVAudioEngine())
     }
 }

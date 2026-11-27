@@ -182,6 +182,23 @@ final class CallSession: NSObject, ObservableObject {
     private var speakingText = ""
     private var lastSpokenText = ""
     private var lastSpokenAt = Date.distantPast
+    // System voice processing (v0.18.0): enabled on the call
+    // engine's input node in startHearing, before the tap is
+    // installed — the Voice Processing I/O unit's echo
+    // cancellation, noise suppression and automatic gain.
+    // Playback shares this same engine (the session hands it
+    // to the speech engine in startCall), which is what gives
+    // the canceller its reference: it subtracts the engine's
+    // own output from the mic. Set once per engine; the
+    // setting survives the engine's stops and restarts.
+    private var voiceProcessingEnabled = false
+    // Barge-in debounce (v0.18.0): the first partial heard
+    // while GUS is speaking is only a CANDIDATE cut — see
+    // bargeInConfirmed. Residual echo and recognizer
+    // fragments arrive as lone partials; a person talking
+    // over GUS sustains theirs.
+    private var bargeCandidateText = ""
+    private var bargeCandidateAt = Date.distantPast
 
     // Hearing (endpoint mode): mic buffers → PCM16 chunks.
     private var pcmConverter: AVAudioConverter?
@@ -203,7 +220,12 @@ final class CallSession: NSObject, ObservableObject {
         turns = []
         lastSeq = 0
         callMode = CallMode.preferred
-        speaker = SpeechEngineResolver.resolve()
+        // The call's ONE audio engine (v0.18.0): this session's
+        // hearing engine is handed to the speech engine, so
+        // Kokoro playback and the microphone share an engine —
+        // the precondition for system echo cancellation (see
+        // the voice-processing note at the properties).
+        speaker = SpeechEngineResolver.resolve(callAudioEngine: audioEngine)
         // The avatar's mouth (v0.15.5): the engine reports
         // the level of the samples it plays; hop to the main
         // actor and publish. Once per utterance — never per
@@ -260,7 +282,22 @@ final class CallSession: NSObject, ObservableObject {
         }
         do {
             let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetoothHFP])
+            // Mode .default, NOT .voiceChat (v0.18.0, the quiet-
+            // call fix): .voiceChat puts the session on the
+            // voice-processing path, whose output gain is staged
+            // for handset voice chat — through the speaker it
+            // caps the call well below what the same samples
+            // play at in .default, which is why the v0.15.4 gain
+            // stage (samples peak-normalized to 0.89, near full
+            // scale) still sounded soft and why the speaker
+            // toggle barely changed anything. And .voiceChat
+            // never gave this app echo cancellation in return:
+            // AVAudioEngine clients get AEC from the ENGINE's
+            // voice processing (startHearing enables it), which
+            // is specified against the .default mode. Full-
+            // volume speaker output from .default; echo
+            // cancellation from the engine. Both, not either.
+            try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
             try session.setActive(true)
         } catch {
             fail("The call's audio couldn't be set up: \(error.localizedDescription)")
@@ -329,6 +366,9 @@ final class CallSession: NSObject, ObservableObject {
         if transport == .local { interruptLocalAnswer() }
         stopHearing()
         cutSpeech()
+        // The shared call engine stops with the call (v0.18.0:
+        // stopHearing no longer stops it — see there).
+        if audioEngine.isRunning { audioEngine.stop() }
         voiceLevel = 0
         if let id = sessionId {
             Task { _ = try? await client.voiceSessionEnd(sessionId: id) }
@@ -343,6 +383,7 @@ final class CallSession: NSObject, ObservableObject {
         pendingShieldQuarantine = nil
         phase = .ended
         watchdogTask?.cancel(); watchdogTask = nil
+        if audioEngine.isRunning { audioEngine.stop() }
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
@@ -354,6 +395,24 @@ final class CallSession: NSObject, ObservableObject {
         let generation = recognitionGeneration
         let input = audioEngine.inputNode
         input.removeTap(onBus: 0)
+        // Voice processing BEFORE the format is read (v0.18.0):
+        // enabling it swaps the input to the Voice Processing
+        // I/O unit, whose output format is the one the tap must
+        // use. It can only be set while the engine is stopped —
+        // a call's first startHearing always runs stopped, and
+        // the setting then persists for the engine's life, so
+        // restarts during playback simply find it already on.
+        // A failure here is not fatal: unprocessed input still
+        // works, defended by the echo guard and the barge-in
+        // debounce exactly as before v0.18.0.
+        if !voiceProcessingEnabled, !audioEngine.isRunning {
+            do {
+                try input.setVoiceProcessingEnabled(true)
+                voiceProcessingEnabled = true
+            } catch {
+                // Fall through with unprocessed input.
+            }
+        }
         let format = input.outputFormat(forBus: 0)
 
         if sttMode == "local" {
@@ -409,10 +468,14 @@ final class CallSession: NSObject, ObservableObject {
         recognitionTask = nil
         recognitionRequest?.endAudio()
         recognitionRequest = nil
-        if audioEngine.isRunning {
-            audioEngine.stop()
-            audioEngine.inputNode.removeTap(onBus: 0)
-        }
+        // The engine is the call's SHARED engine (v0.18.0):
+        // Kokoro playback runs on it too, so stopping hearing
+        // takes the tap off but must NOT stop the engine — a
+        // recognizer restart mid-reply would cut the voice
+        // itself. With no tap and no connection, the input
+        // node pulls no mic data (mute stays mute). The engine
+        // stops at endCall / fail, when the call is over.
+        audioEngine.inputNode.removeTap(onBus: 0)
         pendingPCM.removeAll()
     }
 
@@ -428,9 +491,10 @@ final class CallSession: NSObject, ObservableObject {
     /// Speaker on/off from the call screen (field report,
     /// Glenn 2026-11-20: the call screen had no speaker
     /// button at all). Only the output port is overridden —
-    /// the session's .voiceChat mode stays exactly as
-    /// prepareCallAudio set it, because its echo behavior is
-    /// what the echo guard is tuned against.
+    /// the session stays exactly as prepareCallAudio set it,
+    /// because its echo behavior comes from the engine's
+    /// voice processing (v0.18.0), which the output-port
+    /// override does not touch.
     func setSpeaker(_ on: Bool) {
         isSpeakerOn = on
         try? AVAudioSession.sharedInstance().overrideOutputAudioPort(on ? .speaker : .none)
@@ -475,13 +539,25 @@ final class CallSession: NSObject, ObservableObject {
         // Barge-in: the operator talking over a reply cuts it —
         // locally at once, and on the core so unfetched
         // sentences are dropped unsaid. On-device, the same cut
-        // also stops the local brain mid-generation.
+        // also stops the local brain mid-generation. Since
+        // v0.18.0 the cut is DEBOUNCED for partials: a final
+        // cuts at once (it is a complete utterance), but a
+        // partial must be sustained (bargeInConfirmed) — one
+        // stray partial is how residual echo and recognizer
+        // fragments used to cut GUS mid-sentence even with the
+        // echo guard and, before it, Glenn muting after every
+        // sentence he spoke (2026-11-26 field report).
         if gusSpeaking && !text.isEmpty {
-            cutSpeech()
-            if transport == .local { interruptLocalAnswer() }
-            if let id = sessionId {
-                Task { _ = try? await client.voiceSessionInterrupt(sessionId: id) }
+            if isFinal || bargeInConfirmed(text) {
+                bargeCandidateText = ""
+                cutSpeech()
+                if transport == .local { interruptLocalAnswer() }
+                if let id = sessionId {
+                    Task { _ = try? await client.voiceSessionInterrupt(sessionId: id) }
+                }
             }
+        } else if !gusSpeaking {
+            bargeCandidateText = ""
         }
         if isFinal {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -495,6 +571,39 @@ final class CallSession: NSObject, ObservableObject {
                 }
             }
         }
+    }
+
+    /// Barge-in's confirmation (v0.18.0): is this partial a
+    /// person sustaining speech over GUS, or a lone fragment?
+    /// A cut is confirmed when a partial of at least two words
+    /// is followed, at least 0.35 s after the first candidate,
+    /// by another partial that grows the candidate or shares
+    /// most of its words. A person talking over GUS keeps
+    /// talking, so their partials sustain and the cut lands a
+    /// beat later; a fragment — echo residue the word-overlap
+    /// guard couldn't recognize, a recognizer stutter — stands
+    /// alone and dies here. An unrelated new partial restarts
+    /// the candidacy rather than confirming the old one.
+    private func bargeInConfirmed(_ text: String) -> Bool {
+        let words = Self.normalizedWords(text)
+        guard words.count >= 2 else { return false }
+        let now = Date()
+        if !bargeCandidateText.isEmpty {
+            let candidate = Self.normalizedWords(bargeCandidateText)
+            if now.timeIntervalSince(bargeCandidateAt) >= 0.35,
+               words.count > candidate.count
+                || Self.wordOverlap(words, with: candidate) >= 0.5 {
+                return true
+            }
+            if Self.wordOverlap(words, with: candidate) == 0 {
+                bargeCandidateText = text
+                bargeCandidateAt = now
+            }
+            return false
+        }
+        bargeCandidateText = text
+        bargeCandidateAt = now
+        return false
     }
 
     /// The end-of-speech watchdog (see the note at the
@@ -826,6 +935,11 @@ final class CallSession: NSObject, ObservableObject {
     /// playback loop and the on-device sentence pump.
     private func speakText(_ text: String) async {
         speakingText = text
+        // A new sentence starts with a clean barge-in slate
+        // (v0.18.0): a candidate left over from the previous
+        // sentence can never confirm against this one's first
+        // partials.
+        bargeCandidateText = ""
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             segmentContinuation = c
             speaker.speak(text) { [weak self] in

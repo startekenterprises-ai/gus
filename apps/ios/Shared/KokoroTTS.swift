@@ -218,13 +218,25 @@ private actor SynthGate {
 /// handler has varied across iOS versions; this class does
 /// not depend on the answer.)
 final class KokoroPlayer {
-    private let engine = AVAudioEngine()
+    private let engine: AVAudioEngine
     private let player = AVAudioPlayerNode()
     private var attached = false
     private var connectedFormat: AVAudioFormat?
     private let lock = NSLock()
     private var finish: (() -> Void)?
     private var playing = false
+
+    /// The engine is the CALL's shared engine when one is
+    /// handed in (v0.18.0): playback and the microphone must
+    /// live on the SAME engine for the system's voice
+    /// processing to cancel GUS's own voice out of the mic —
+    /// the echo canceller subtracts the output of its own
+    /// engine, so sound played through a private engine is
+    /// uncancellable by construction. Constructions with no
+    /// call behind them keep a private engine, as before.
+    init(engine: AVAudioEngine = AVAudioEngine()) {
+        self.engine = engine
+    }
 
     /// Playback amplitude for the call screen's avatar
     /// (v0.15.5, "the face"): fired once per buffer with the
@@ -290,9 +302,17 @@ final class KokoroPlayer {
 
         if !attached {
             engine.attach(player)
+            // Full scale, stated rather than assumed (v0.18.0):
+            // nothing in the playback path turns the call down.
+            engine.mainMixerNode.outputVolume = 1.0
             attached = true
         }
         if connectedFormat != format {
+            // One-time (the first buffer): on the call's shared
+            // engine this stop/start also pauses the mic tap
+            // for a beat, before the first sentence is heard —
+            // the tap rides through it and playback restarts
+            // the engine immediately below.
             if engine.isRunning { engine.stop() }
             engine.disconnectNodeOutput(player)
             engine.connect(player, to: engine.mainMixerNode, format: format)
