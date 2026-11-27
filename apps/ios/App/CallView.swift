@@ -84,199 +84,7 @@ struct CallView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 16) {
-                // The face is the persona door (v0.30.0):
-                // tap it to switch personas mid-visit — the
-                // pick writes the same key Settings writes
-                // and lands when the brain next loads.
-                // Watch mode (v0.37.0): while the camera is
-                // on, the layout goes FaceTime-shaped — the
-                // persona shrinks to a participant TILE and
-                // the camera's tiles sit beside it, all on
-                // screen at once; the persona is never
-                // replaced by the camera. Off, the face is
-                // the screen again.
-                if call.watchOn {
-                    HStack(alignment: .top, spacing: 12) {
-                        personaFaceButton(side: 104)
-                        VStack(alignment: .leading, spacing: 8) {
-                            onAirPill
-                            WatchPreviewHost(view: call.watchPreviewView)
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 118)
-                                .background(Color.black)
-                                .cornerRadius(10)
-                                .clipped()
-                            watchControlsRow
-                        }
-                        .frame(maxWidth: .infinity)
-                    }
-                    .padding(.top, 12)
-                } else {
-                    personaFaceButton(side: 232)
-                        .padding(.top, 12)
-                }
-
-                // Who you're talking to (v0.32.0): the
-                // active persona's name under the face,
-                // always on this screen — a call is the one
-                // place the operator couldn't tell whose
-                // voice they were hearing (Glenn, 2026-11-27).
-                // The name is LocalBrain.activeDisplayName,
-                // the one derivation every surface shares,
-                // and it moves with the pick (see
-                // personaSelection above).
-                Text(LocalBrain.activeDisplayName)
-                    .font(.title3)
-                    .fontWeight(.semibold)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-                    .frame(maxWidth: .infinity)
-
-                // Layout discipline (v0.17.0): every text on
-                // this screen is width-flexible — it wraps or
-                // shrinks inside the screen's margins, never
-                // hard-clips at the edges. The 0.16 screens
-                // let the status line and the button row lay
-                // out wider than the phone and spill off both
-                // sides; nothing here may size itself past
-                // the container again.
-                Text(statusText)
-                    .font(.headline)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(3)
-                    .minimumScaleFactor(0.75)
-                    .frame(maxWidth: .infinity)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Text(call.callMode == .onDevice
-                     ? "On-device — the brain and voice live on this iPhone."
-                     : "Core — this call's brain is your GUS core.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.8)
-                    .frame(maxWidth: .infinity)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                if let notice = call.speechNotice {
-                    Text(notice)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                        .lineLimit(3)
-                        .minimumScaleFactor(0.8)
-                        .frame(maxWidth: .infinity)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if let notice = call.watchNotice {
-                    Text(notice)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                        .lineLimit(3)
-                        .minimumScaleFactor(0.8)
-                        .frame(maxWidth: .infinity)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if let error = call.errorText {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundColor(.orange)
-                        .multilineTextAlignment(.center)
-                        .lineLimit(3)
-                        .minimumScaleFactor(0.8)
-                        .frame(maxWidth: .infinity)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                transcriptPanel
-
-                if inCall {
-                    composer
-
-                    // The control row (v0.23.0 cleanup):
-                    // equal circles with the label UNDER the
-                    // icon, so state reads at a glance across
-                    // a room — a filled accent circle means
-                    // Speaker is on, a filled orange circle
-                    // means you are muted, and End is always
-                    // the red one. Through v0.22.0 these were
-                    // bordered text buttons whose on/off
-                    // difference was a swapped SF Symbol and
-                    // the word Mute flipping to Unmute — easy
-                    // to misread mid-demo (Glenn, 2026-11-26).
-                    // v0.31.0: the Speaker circle now shows the
-                    // ACTUAL route (CallSession
-                    // .outputRouteIsSpeaker — the session's
-                    // live route, not the toggle's intent),
-                    // and a fourth control joins: Devices, the
-                    // system route picker, for Bluetooth and
-                    // every other output the phone can see.
-                    // v0.36.0: a fifth control joins: Camera —
-                    // one tap, one photo, sent as the next
-                    // turn of the call (see openCamera and
-                    // CallSession.sendPhotoTurn). Never
-                    // automatic, never a stream.
-                    // v0.37.0: a sixth joins: Watch — the
-                    // call's camera as the persona's eyes, an
-                    // explicit per-call toggle that never
-                    // starts itself (see CallSession.setWatch).
-                    // Six controls is why the circles are
-                    // 50 pt now: at 60 the row outgrew the
-                    // screen it lives on.
-                    HStack(spacing: 8) {
-                        CallControlButton(
-                            title: "Speaker",
-                            systemImage: call.outputRouteIsSpeaker ? "speaker.wave.2.fill" : "speaker.slash.fill",
-                            filled: call.outputRouteIsSpeaker,
-                            fillColor: .accentColor
-                        ) { call.setSpeaker(!call.outputRouteIsSpeaker) }
-
-                        CallRouteButton()
-
-                        CallControlButton(
-                            title: "Camera",
-                            systemImage: "camera.fill",
-                            filled: false
-                        ) { openCamera() }
-
-                        CallControlButton(
-                            title: call.watchOn ? "Watching" : "Watch",
-                            systemImage: "video.fill",
-                            filled: call.watchOn,
-                            fillColor: .accentColor
-                        ) { call.setWatch(on: !call.watchOn) }
-
-                        CallControlButton(
-                            title: call.isMuted ? "Muted" : "Mute",
-                            systemImage: call.isMuted ? "mic.slash.fill" : "mic.fill",
-                            filled: call.isMuted,
-                            fillColor: .orange
-                        ) { call.setMuted(!call.isMuted) }
-
-                        CallControlButton(
-                            title: "End",
-                            systemImage: "phone.down.fill",
-                            filled: true,
-                            fillColor: .red
-                        ) { call.endCall(); dismiss() }
-                    }
-                } else {
-                    Button {
-                        call.startCall()
-                    } label: {
-                        Label("Call GUS", systemImage: "phone.fill")
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.7)
-                            .frame(minWidth: 160)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                }
-            }
+            callContent
             .padding(20)
             .navigationTitle("Call")
             .navigationBarTitleDisplayMode(.inline)
@@ -338,6 +146,238 @@ struct CallView: View {
                 Text("What you said matched \(held.ruleID) — Shield quarantined it before GUS heard it. The scan is recorded in Settings → Security → Shield log.")
             }
         }
+    }
+
+    // MARK: - Body sections (v0.40.1)
+
+    /// Why these exist: through v0.39.0, `body` above was
+    /// one monolithic expression — a NavigationStack over
+    /// a VStack holding the face/Watch section, the name
+    /// and status lines, the transcript, the controls,
+    /// and the composer — and the 0.39.0 archive failed
+    /// at CallView.swift:85 with "the compiler is unable
+    /// to type-check this expression in reasonable time".
+    /// The sections below are that same view tree,
+    /// factored at its natural seams so each expression
+    /// type-checks on its own. Code motion only: no view,
+    /// modifier, binding, or conditional changed.
+    private var callContent: some View {
+        VStack(spacing: 16) {
+            headerSection
+
+            statusBlock
+
+            transcriptPanel
+
+            inCallSection
+        }
+    }
+
+    @ViewBuilder
+    private var headerSection: some View {
+        // The face is the persona door (v0.30.0):
+        // tap it to switch personas mid-visit — the
+        // pick writes the same key Settings writes
+        // and lands when the brain next loads.
+        // Watch mode (v0.37.0): while the camera is
+        // on, the layout goes FaceTime-shaped — the
+        // persona shrinks to a participant TILE and
+        // the camera's tiles sit beside it, all on
+        // screen at once; the persona is never
+        // replaced by the camera. Off, the face is
+        // the screen again.
+        if call.watchOn {
+            HStack(alignment: .top, spacing: 12) {
+                personaFaceButton(side: 104)
+                VStack(alignment: .leading, spacing: 8) {
+                    onAirPill
+                    WatchPreviewHost(view: call.watchPreviewView)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 118)
+                        .background(Color.black)
+                        .cornerRadius(10)
+                        .clipped()
+                    watchControlsRow
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .padding(.top, 12)
+        } else {
+            personaFaceButton(side: 232)
+                .padding(.top, 12)
+        }
+    }
+
+    @ViewBuilder
+    private var statusBlock: some View {
+        // Who you're talking to (v0.32.0): the
+        // active persona's name under the face,
+        // always on this screen — a call is the one
+        // place the operator couldn't tell whose
+        // voice they were hearing (Glenn, 2026-11-27).
+        // The name is LocalBrain.activeDisplayName,
+        // the one derivation every surface shares,
+        // and it moves with the pick (see
+        // personaSelection above).
+        Text(LocalBrain.activeDisplayName)
+            .font(.title3)
+            .fontWeight(.semibold)
+            .multilineTextAlignment(.center)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            .frame(maxWidth: .infinity)
+
+        // Layout discipline (v0.17.0): every text on
+        // this screen is width-flexible — it wraps or
+        // shrinks inside the screen's margins, never
+        // hard-clips at the edges. The 0.16 screens
+        // let the status line and the button row lay
+        // out wider than the phone and spill off both
+        // sides; nothing here may size itself past
+        // the container again.
+        Text(statusText)
+            .font(.headline)
+            .multilineTextAlignment(.center)
+            .lineLimit(3)
+            .minimumScaleFactor(0.75)
+            .frame(maxWidth: .infinity)
+            .fixedSize(horizontal: false, vertical: true)
+
+        Text(call.callMode == .onDevice
+             ? "On-device — the brain and voice live on this iPhone."
+             : "Core — this call's brain is your GUS core.")
+            .font(.caption)
+            .foregroundColor(.secondary)
+            .multilineTextAlignment(.center)
+            .lineLimit(2)
+            .minimumScaleFactor(0.8)
+            .frame(maxWidth: .infinity)
+            .fixedSize(horizontal: false, vertical: true)
+
+        if let notice = call.speechNotice {
+            Text(notice)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .lineLimit(3)
+                .minimumScaleFactor(0.8)
+                .frame(maxWidth: .infinity)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if let notice = call.watchNotice {
+            Text(notice)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .lineLimit(3)
+                .minimumScaleFactor(0.8)
+                .frame(maxWidth: .infinity)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if let error = call.errorText {
+            Text(error)
+                .font(.caption)
+                .foregroundColor(.orange)
+                .multilineTextAlignment(.center)
+                .lineLimit(3)
+                .minimumScaleFactor(0.8)
+                .frame(maxWidth: .infinity)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    @ViewBuilder
+    private var inCallSection: some View {
+        if inCall {
+            composer
+
+            callControlsRow
+        } else {
+            startCallButton
+        }
+    }
+
+    private var callControlsRow: some View {
+        // The control row (v0.23.0 cleanup):
+        // equal circles with the label UNDER the
+        // icon, so state reads at a glance across
+        // a room — a filled accent circle means
+        // Speaker is on, a filled orange circle
+        // means you are muted, and End is always
+        // the red one. Through v0.22.0 these were
+        // bordered text buttons whose on/off
+        // difference was a swapped SF Symbol and
+        // the word Mute flipping to Unmute — easy
+        // to misread mid-demo (Glenn, 2026-11-26).
+        // v0.31.0: the Speaker circle now shows the
+        // ACTUAL route (CallSession
+        // .outputRouteIsSpeaker — the session's
+        // live route, not the toggle's intent),
+        // and a fourth control joins: Devices, the
+        // system route picker, for Bluetooth and
+        // every other output the phone can see.
+        // v0.36.0: a fifth control joins: Camera —
+        // one tap, one photo, sent as the next
+        // turn of the call (see openCamera and
+        // CallSession.sendPhotoTurn). Never
+        // automatic, never a stream.
+        // v0.37.0: a sixth joins: Watch — the
+        // call's camera as the persona's eyes, an
+        // explicit per-call toggle that never
+        // starts itself (see CallSession.setWatch).
+        // Six controls is why the circles are
+        // 50 pt now: at 60 the row outgrew the
+        // screen it lives on.
+        HStack(spacing: 8) {
+            CallControlButton(
+                title: "Speaker",
+                systemImage: call.outputRouteIsSpeaker ? "speaker.wave.2.fill" : "speaker.slash.fill",
+                filled: call.outputRouteIsSpeaker,
+                fillColor: .accentColor
+            ) { call.setSpeaker(!call.outputRouteIsSpeaker) }
+
+            CallRouteButton()
+
+            CallControlButton(
+                title: "Camera",
+                systemImage: "camera.fill",
+                filled: false
+            ) { openCamera() }
+
+            CallControlButton(
+                title: call.watchOn ? "Watching" : "Watch",
+                systemImage: "video.fill",
+                filled: call.watchOn,
+                fillColor: .accentColor
+            ) { call.setWatch(on: !call.watchOn) }
+
+            CallControlButton(
+                title: call.isMuted ? "Muted" : "Mute",
+                systemImage: call.isMuted ? "mic.slash.fill" : "mic.fill",
+                filled: call.isMuted,
+                fillColor: .orange
+            ) { call.setMuted(!call.isMuted) }
+
+            CallControlButton(
+                title: "End",
+                systemImage: "phone.down.fill",
+                filled: true,
+                fillColor: .red
+            ) { call.endCall(); dismiss() }
+        }
+    }
+
+    private var startCallButton: some View {
+        Button {
+            call.startCall()
+        } label: {
+            Label("Call GUS", systemImage: "phone.fill")
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .frame(minWidth: 160)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
     }
 
     // MARK: - Face + Watch (v0.37.0)
