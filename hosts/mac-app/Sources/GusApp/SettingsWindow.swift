@@ -656,6 +656,30 @@ final class SettingsModel: ObservableObject {
         }
         return options
     }
+
+    /// The simple level (v0.23.0, mirroring the iPhone): the
+    /// front-door picker shows three curated voices — Heart
+    /// (the default), Emma (British, a clearly different
+    /// voice), and Michael (male) — with the full eight
+    /// under the Voice pane's Advanced disclosure. The value
+    /// on file rides along when it isn't one of the three,
+    /// under the same rule as kokoroVoiceOptions: a pick
+    /// made from the full list (or a custom name) stays the
+    /// selection and stays visible, never reset by the
+    /// restructure.
+    static let kokoroVoiceCuratedIDs = ["af_heart", "bf_emma", "am_michael"]
+    static func kokoroVoiceCuratedOptions(current: String) -> [KokoroVoiceOption] {
+        var options = kokoroVoiceCatalog.filter { kokoroVoiceCuratedIDs.contains($0.id) }
+        let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty, !options.contains(where: { $0.id == trimmed }) {
+            if let known = kokoroVoiceCatalog.first(where: { $0.id == trimmed }) {
+                options.append(known)
+            } else {
+                options.append(KokoroVoiceOption(id: trimmed, label: "\(trimmed) (custom)"))
+            }
+        }
+        return options
+    }
     static func speechVoiceLabel(_ voice: AVSpeechSynthesisVoice) -> String {
         DesktopModel.speechVoiceLabel(voice)
     }

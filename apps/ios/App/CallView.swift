@@ -5,8 +5,15 @@ import SwiftUI
 /// push-to-talk anywhere in this app (Glenn's ruling,
 /// 2026-11-19: dead air while holding a button is where a
 /// demo dies). While the call runs, the screen shows what GUS
-/// is doing — listening, thinking, speaking — the live
-/// transcript as you speak, and the turns so far.
+/// is doing — listening, thinking, speaking — and the running
+/// transcript of the conversation.
+///
+/// v0.23.0 (Glenn's demo feedback, 2026-11-26): the
+/// transcript is a real panel now — labeled, auto-scrolling,
+/// your words landing as you speak and GUS's as he speaks
+/// them — with a composer under it for typing mid-call, and
+/// a cleaned-up control row whose states read at a glance:
+/// a filled circle means the thing is ON.
 struct CallView: View {
     /// Extra bottom room that clears the floating tab
     /// bar's pill while it is visible (v0.17.4) — sized
@@ -16,6 +23,12 @@ struct CallView: View {
     private static let tabBarClearance: CGFloat = 72
 
     @StateObject private var call = CallSession()
+    /// The mid-call composer's draft (v0.23.0). Local view
+    /// state only — a sent message goes through
+    /// CallSession.sendTypedMessage, the spoken final's own
+    /// doors; nothing typed is stored anywhere else.
+    @State private var draft = ""
+    @FocusState private var composerFocused: Bool
 
     private var inCall: Bool { call.phase == .live || call.phase == .connecting }
 
@@ -90,80 +103,44 @@ struct CallView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                if !call.liveTranscript.isEmpty {
-                    Text(call.liveTranscript)
-                        .font(.callout)
-                        .italic()
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                        .lineLimit(4)
-                        .minimumScaleFactor(0.8)
-                        .frame(maxWidth: .infinity)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                List(call.turns) { turn in
-                    VStack(alignment: .leading, spacing: 2) {
-                        if let transcript = turn.transcript, !transcript.isEmpty {
-                            Text(transcript).font(.callout)
-                        }
-                        if let reply = turn.replyText, !reply.isEmpty {
-                            Text(reply)
-                                .font(.callout)
-                                .foregroundColor(.accentColor)
-                        }
-                        if turn.interrupted {
-                            Text("Interrupted — speech cut, nothing else stopped.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                }
-                .listStyle(.plain)
-
-                Spacer()
+                transcriptPanel
 
                 if inCall {
-                    // The three controls share the row's width
-                    // equally (v0.17.0): flexible labels, tight
-                    // spacing — the fixed 90pt minimums plus
-                    // 24pt gaps could exceed the screen and
-                    // spill off both edges.
+                    composer
+
+                    // The control row (v0.23.0 cleanup):
+                    // three equal circles with the label
+                    // UNDER the icon, so state reads at a
+                    // glance across a room — a filled accent
+                    // circle means Speaker is on, a filled
+                    // orange circle means you are muted, and
+                    // End is always the red one. Through
+                    // v0.22.0 these were bordered text
+                    // buttons whose on/off difference was a
+                    // swapped SF Symbol and the word Mute
+                    // flipping to Unmute — easy to misread
+                    // mid-demo (Glenn, 2026-11-26).
                     HStack(spacing: 12) {
-                        Button {
-                            call.setSpeaker(!call.isSpeakerOn)
-                        } label: {
-                            Label("Speaker",
-                                  systemImage: call.isSpeakerOn ? "speaker.wave.2.fill" : "speaker.slash.fill")
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.7)
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.large)
+                        CallControlButton(
+                            title: "Speaker",
+                            systemImage: call.isSpeakerOn ? "speaker.wave.2.fill" : "speaker.slash.fill",
+                            filled: call.isSpeakerOn,
+                            fillColor: .accentColor
+                        ) { call.setSpeaker(!call.isSpeakerOn) }
 
-                        Button {
-                            call.setMuted(!call.isMuted)
-                        } label: {
-                            Label(call.isMuted ? "Unmute" : "Mute",
-                                  systemImage: call.isMuted ? "mic.slash.fill" : "mic.fill")
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.7)
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.large)
+                        CallControlButton(
+                            title: call.isMuted ? "Muted" : "Mute",
+                            systemImage: call.isMuted ? "mic.slash.fill" : "mic.fill",
+                            filled: call.isMuted,
+                            fillColor: .orange
+                        ) { call.setMuted(!call.isMuted) }
 
-                        Button(role: .destructive) {
-                            call.endCall()
-                        } label: {
-                            Label("End", systemImage: "phone.down.fill")
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.7)
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.large)
+                        CallControlButton(
+                            title: "End",
+                            systemImage: "phone.down.fill",
+                            filled: true,
+                            fillColor: .red
+                        ) { call.endCall() }
                     }
                 } else {
                     Button {
@@ -181,8 +158,8 @@ struct CallView: View {
             .padding(20)
             // Tab-bar clearance (v0.17.4): the floating tab
             // bar overlays the bottom of this screen while it
-            // is visible, and the turns List claims the layout
-            // space the clearance would otherwise come from —
+            // is visible, and the transcript panel claims the
+            // layout space the clearance would otherwise come from —
             // in 0.17.3 the pre-call "Call GUS" button sat
             // with its bottom hidden behind the tab-bar pill
             // (operator's screenshot, 2026-11-20). While the
@@ -213,6 +190,174 @@ struct CallView: View {
                 Text("What you said matched \(held.ruleID) — Shield quarantined it before GUS heard it. The scan is recorded in Settings → Security → Shield log.")
             }
         }
+    }
+
+    // MARK: - Transcript (v0.23.0)
+
+    /// The running transcript of the call, from the data the
+    /// session already keeps: completed turns from
+    /// `call.turns`, the in-flight reply from
+    /// `call.liveReplyText` (sentences land as their playback
+    /// starts), and your in-progress words from
+    /// `call.liveTranscript`. Auto-scrolls to the newest line
+    /// as any of the three changes; the panel flexes to
+    /// whatever height the rest of the screen leaves it, so
+    /// the controls and composer never move.
+    private var transcriptPanel: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Transcript")
+                .font(.caption)
+                .fontWeight(.semibold)
+                .foregroundColor(.secondary)
+                .textCase(.uppercase)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        if call.turns.isEmpty && call.liveReplyText.isEmpty && call.liveTranscript.isEmpty {
+                            Text("What you say and what GUS answers will appear here as you talk.")
+                                .font(.callout)
+                                .foregroundColor(.secondary)
+                        }
+                        ForEach(call.turns) { turn in
+                            transcriptTurn(turn)
+                        }
+                        if showLiveReply {
+                            transcriptRow(speaker: "GUS", text: call.liveReplyText, tint: .accentColor)
+                        }
+                        if !call.liveTranscript.isEmpty {
+                            transcriptRow(speaker: "You", text: call.liveTranscript + " …", tint: .primary, italic: true)
+                        }
+                        Color.clear
+                            .frame(height: 1)
+                            .id(Self.transcriptBottomID)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .onChange(of: call.turns.count) { _ in scrollTranscript(proxy) }
+                .onChange(of: call.liveTranscript) { _ in scrollTranscript(proxy) }
+                .onChange(of: call.liveReplyText) { _ in scrollTranscript(proxy) }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(12)
+        .background(Color.secondary.opacity(0.08))
+        .cornerRadius(12)
+    }
+
+    private static let transcriptBottomID = "transcript-bottom"
+
+    private func scrollTranscript(_ proxy: ScrollViewProxy) {
+        withAnimation(.easeOut(duration: 0.2)) {
+            proxy.scrollTo(Self.transcriptBottomID, anchor: .bottom)
+        }
+    }
+
+    /// The in-flight reply row shows only until the finished
+    /// turn lands carrying the same words — then the turn's
+    /// own row is the record and the live row steps aside.
+    private var showLiveReply: Bool {
+        guard !call.liveReplyText.isEmpty else { return false }
+        return call.turns.last?.replyText != call.liveReplyText
+    }
+
+    @ViewBuilder
+    private func transcriptTurn(_ turn: VoiceSessionState.Turn) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let transcript = turn.transcript, !transcript.isEmpty {
+                transcriptRow(speaker: "You", text: transcript, tint: .primary)
+            }
+            if let reply = turn.replyText, !reply.isEmpty {
+                transcriptRow(speaker: "GUS", text: reply, tint: .accentColor)
+            }
+            if turn.interrupted {
+                Text("Interrupted — speech cut, nothing else stopped.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    private func transcriptRow(speaker: String, text: String, tint: Color, italic: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(speaker)
+                .font(.caption2)
+                .fontWeight(.semibold)
+                .foregroundColor(.secondary)
+            Text(text)
+                .font(.callout)
+                .italic(italic)
+                .foregroundColor(tint)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // MARK: - Composer (v0.23.0)
+
+    /// Type while talking: the draft sends into the same
+    /// conversation through CallSession.sendTypedMessage —
+    /// the spoken final's own doors (Shield gate on-device,
+    /// the core's server-side scan in Core mode) — and the
+    /// reply is spoken as part of the call. The keyboard
+    /// changes nothing about hearing; the mic stays live.
+    private var composer: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            TextField("Type a message…", text: $draft, axis: .vertical)
+                .lineLimit(1...4)
+                .textFieldStyle(.roundedBorder)
+                .focused($composerFocused)
+                .onSubmit(sendDraft)
+            Button(action: sendDraft) {
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.title)
+            }
+            .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .accessibilityLabel("Send message")
+        }
+    }
+
+    private func sendDraft() {
+        let text = draft
+        draft = ""
+        call.sendTypedMessage(text)
+    }
+}
+
+/// One call control (v0.23.0): a 60 pt circle with its label
+/// underneath. Filled means the state is ON — accent for
+/// Speaker, orange for Muted (the state that needs noticing),
+/// red always for End. Unfilled is a plain ring with a
+/// secondary icon. Same size and spacing for all three, so
+/// the row reads as one instrument, not three buttons that
+/// happen to share a line.
+private struct CallControlButton: View {
+    let title: String
+    let systemImage: String
+    let filled: Bool
+    let fillColor: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                ZStack {
+                    Circle()
+                        .fill(filled ? fillColor : Color.secondary.opacity(0.12))
+                        .frame(width: 60, height: 60)
+                    Image(systemName: systemImage)
+                        .font(.title3)
+                        .foregroundColor(filled ? .white : .secondary)
+                }
+                Text(title)
+                    .font(.caption)
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
     }
 }
 

@@ -67,6 +67,34 @@ struct KokoroVoice: Identifiable, Equatable, Hashable {
         KokoroVoice(id: "bm_george", displayName: "George — British male"),
     ]
 
+    /// The simple level (v0.23.0): three voices up front —
+    /// Heart (the default), Emma (a clearly different voice:
+    /// British, where Heart is American), and Michael (the
+    /// male voice). The full eight stay one disclosure away
+    /// in Settings. Michael has been in the catalog since
+    /// v0.15.4 and rides the same delivery as every voice:
+    /// warm-up preloads the SELECTED voice's pack, and the
+    /// SDK fetches any other pack on demand (~0.5 MB) the
+    /// first time that voice speaks — no separate asset
+    /// pipeline exists or is needed.
+    static let curated: [KokoroVoice] = [
+        KokoroVoice(id: "af_heart", displayName: "Heart — female (default)"),
+        KokoroVoice(id: "bf_emma", displayName: "Emma — British female"),
+        KokoroVoice(id: "am_michael", displayName: "Michael — male"),
+    ]
+
+    /// The simple picker's options: the curated three, plus
+    /// the current pick when it isn't one of them — a voice
+    /// chosen from the full list stays the selection and
+    /// stays visible up front, never silently reset by the
+    /// restructure (the Mac picker's custom-entry rule,
+    /// applied to the simple level).
+    static func simpleOptions(current: KokoroVoice) -> [KokoroVoice] {
+        var options = curated
+        if !options.contains(current) { options.append(current) }
+        return options
+    }
+
     /// The operator's pick, persisted. Default: af_heart.
     static var selected: KokoroVoice {
         get {

@@ -488,9 +488,10 @@ struct SettingsVoiceView: View {
                 // it belongs to (through v0.19.0 it sat inside
                 // the endpoint-fields group below, which read
                 // as plumbing). v0.15.6: a picker, not the
-                // free-text field — the curated Kokoro
-                // catalog, the same eight voices the iPhone
-                // app offers (iOS 0.15.4). The selection is
+                // free-text field. v0.23.0: the front door
+                // shows the curated three (the full eight are
+                // under Advanced below), mirroring the
+                // iPhone's simple level. The selection is
                 // still voice.json's ttsVoice; a name on file
                 // outside the catalog rides along as a custom
                 // entry. It shows for BOTH Kokoro engines
@@ -502,13 +503,13 @@ struct SettingsVoiceView: View {
                     Text("Voice")
                         .frame(width: 90, alignment: .leading)
                     Picker("", selection: $model.voiceTtsVoice) {
-                        ForEach(SettingsModel.kokoroVoiceOptions(current: model.voiceTtsVoice)) { option in
+                        ForEach(SettingsModel.kokoroVoiceCuratedOptions(current: model.voiceTtsVoice)) { option in
                             Text(option.label).tag(option.id)
                         }
                     }
                     .frame(maxWidth: 300)
                 }
-                Text("The curated Kokoro voices — the same set the iPhone app offers. The pick takes effect on the next call; Save under Advanced writes it with the rest of the form.")
+                Text("Three voices up front — Heart, Emma (British), and Michael (male) — the same simple level the iPhone shows; the full set of eight is under Advanced below. The pick takes effect on the next call; Save under Advanced writes it with the rest of the form.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -525,6 +526,26 @@ struct SettingsVoiceView: View {
                     Text("How a call runs: the microphone is open only while the call is, a pause ends your turn, and the reply is spoken sentence by sentence as it's made. Your words are transcribed on your own machine — by the app's built-in speech, or by a speech service you run — then treated like a typed message: same secret-guard, caps, and receipts, and the Shield's fast scan (typed messages get the full review) unless you switch it off below. If endpoint speech fails, you get the reply as text with the reason stated.")
                         .font(.callout)
                         .foregroundColor(.secondary)
+                    // v0.23.0: the full Kokoro voice list —
+                    // the front door above shows the curated
+                    // three; this picker is the same pick
+                    // (voice.json's ttsVoice) over all eight,
+                    // custom names riding along as before.
+                    if model.voiceTtsEngine != "local" {
+                        HStack {
+                            Text("All voices")
+                                .frame(width: 90, alignment: .leading)
+                            Picker("", selection: $model.voiceTtsVoice) {
+                                ForEach(SettingsModel.kokoroVoiceOptions(current: model.voiceTtsVoice)) { option in
+                                    Text(option.label).tag(option.id)
+                                }
+                            }
+                            .frame(maxWidth: 300)
+                        }
+                        Text("The full set of eight Kokoro voices. Same pick as the front door's three — Save below writes it with the rest of the form.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                     Toggle("Interrupt GUS when I talk over it (barge-in)", isOn: $model.voiceBargeIn)
                     Text("Barge-in cuts the spoken reply off when you start talking over it. It stops the talking only — never a running job, never an approval.")
                         .font(.caption)

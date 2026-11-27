@@ -84,6 +84,17 @@ final class CallSession: NSObject, ObservableObject {
     /// speaking | ended — drives the call screen's status line.
     @Published private(set) var corePhase: String = ""
     @Published private(set) var liveTranscript: String = ""
+    /// The reply being spoken right now, sentence by sentence
+    /// (v0.23.0): speakText appends each sentence as its
+    /// playback STARTS, so the call screen's transcript shows
+    /// GUS's words as he says them instead of only when the
+    /// finished turn lands in `turns`. Cleared when a new user
+    /// turn begins (spoken final or typed send). The screen
+    /// renders it as the in-flight GUS row and drops it once
+    /// the completed turn carries the same text — this is a
+    /// display seam on the existing turn flow, not a second
+    /// transcript store.
+    @Published private(set) var liveReplyText: String = ""
     @Published private(set) var turns: [VoiceSessionState.Turn] = []
     @Published private(set) var isMuted: Bool = false
     /// Output route: speaker (the default — calls start on
@@ -222,6 +233,7 @@ final class CallSession: NSObject, ObservableObject {
         phase = .connecting
         errorText = nil
         liveTranscript = ""
+        liveReplyText = ""
         turns = []
         lastSeq = 0
         playbackFailuresThisCall = 0
@@ -541,6 +553,47 @@ final class CallSession: NSObject, ObservableObject {
         try? AVAudioSession.sharedInstance().overrideOutputAudioPort(on ? .speaker : .none)
     }
 
+    /// A typed message sent mid-call (v0.23.0, Glenn's
+    /// "type while talking"): it enters the conversation
+    /// through EXACTLY the doors a spoken final takes, so it
+    /// gets the same treatment end to end — on-device, the
+    /// Shield gate in answerLocally scans it before the
+    /// brain sees it (quarantine holds it for the same
+    /// one-time prompt); on the core, it posts as a session
+    /// transcript, which the core Shield-scans server-side
+    /// like any spoken final. The reply is spoken by the
+    /// call's normal pump, as part of the call.
+    ///
+    /// Interaction choices: the keyboard changes NOTHING
+    /// about hearing — the mic tap, the recognizer, the echo
+    /// guard and the barge-in debounce all keep running
+    /// exactly as in a hands-free call (keystrokes make no
+    /// sound a recognizer could mistake for sustained
+    /// speech, and a stray partial still has to pass the
+    /// echo guard and the two-word/0.35 s debounce to cut
+    /// anything). The operator can talk and type in the same
+    /// call. The one deliberate act: pressing Send while GUS
+    /// is mid-reply cuts the reply, locally and on the core —
+    /// a typed send is a turn, with a spoken final's manners.
+    /// The call itself never ends, and mute is untouched.
+    func sendTypedMessage(_ raw: String) {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard phase == .live, !text.isEmpty else { return }
+        liveReplyText = ""
+        if gusSpeaking {
+            cutSpeech()
+            if transport == .local { interruptLocalAnswer() }
+            if let id = sessionId {
+                Task { _ = try? await client.voiceSessionInterrupt(sessionId: id) }
+            }
+        }
+        if transport == .local {
+            answerLocally(text)
+        } else if let id = sessionId {
+            Task { _ = try? await client.voiceSessionTranscript(sessionId: id, text: text) }
+        }
+    }
+
     /// Endpoint mode: convert a mic buffer to 16 kHz mono
     /// PCM16 and post ~100 ms chunks to the core. Runs on the
     /// audio tap's thread; the converter and accumulator are
@@ -603,6 +656,7 @@ final class CallSession: NSObject, ObservableObject {
         if isFinal {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             liveTranscript = ""
+            liveReplyText = ""
             lastPartialText = ""
             if !trimmed.isEmpty {
                 if transport == .local {
@@ -976,6 +1030,13 @@ final class CallSession: NSObject, ObservableObject {
     /// playback loop and the on-device sentence pump.
     private func speakText(_ text: String) async {
         speakingText = text
+        // The live transcript's GUS row (v0.23.0): this
+        // sentence is starting to play — put its words on
+        // screen now, in order, so the reply reads as it is
+        // spoken. Both transports pass through here (the
+        // local sentence pump and the core's text segments);
+        // audio segments carry no text and add nothing.
+        liveReplyText = liveReplyText.isEmpty ? text : liveReplyText + " " + text
         // A new sentence starts with a clean barge-in slate
         // (v0.18.0): a candidate left over from the previous
         // sentence can never confirm against this one's first

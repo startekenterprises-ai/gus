@@ -124,18 +124,37 @@ struct SettingsView: View {
                     .onChange(of: engineKind) { newValue in
                         SpeechEngineKind.preferred = newValue
                     }
+                    // v0.23.0: the simple level shows three
+                    // curated voices — Heart, Emma (British),
+                    // and Michael (male) — with the full set
+                    // of eight under the disclosure below,
+                    // both pickers bound to the same saved
+                    // pick (gus.voice.kokoroVoice, untouched
+                    // by the restructure: a pick made from
+                    // the full list rides along in the simple
+                    // picker rather than being reset).
                     Picker("Kokoro voice", selection: $kokoroVoice) {
-                        ForEach(KokoroVoice.all) { voice in
+                        ForEach(KokoroVoice.simpleOptions(current: kokoroVoice)) { voice in
                             Text(voice.displayName).tag(voice)
                         }
                     }
                     .onChange(of: kokoroVoice) { newValue in
                         KokoroVoice.selected = newValue
                     }
+                    DisclosureGroup("All voices") {
+                        Picker("Full voice list", selection: $kokoroVoice) {
+                            ForEach(KokoroVoice.all) { voice in
+                                Text(voice.displayName).tag(voice)
+                            }
+                        }
+                        .onChange(of: kokoroVoice) { newValue in
+                            KokoroVoice.selected = newValue
+                        }
+                    }
                 } header: {
                     Text("Call voice")
                 } footer: {
-                    Text("Kokoro is GUS's voice — it runs on this iPhone and prepares itself automatically when the app opens. There is no setup tap and no fallback voice behind it. Studio Voice is a future cloud opt-in — off until you configure it.")
+                    Text("Kokoro is GUS's voice — it runs on this iPhone and prepares itself automatically when the app opens. There is no setup tap and no fallback voice behind it. Three voices sit up front; the full set is under All voices. Studio Voice is a future cloud opt-in — off until you configure it.")
                 }
 
                 // v0.20.0: the stock avatar pair — the face
