@@ -322,6 +322,15 @@ final class KokoroPlayer {
     private let lock = NSLock()
     private var finish: (() -> Void)?
     private var playing = false
+    /// Serializes the graph sequence in playSamples (connect
+    /// → verify → schedule → play) against stop(): the two
+    /// must never interleave, because a graph operation
+    /// landing between playSamples' state checks and its
+    /// play() reopens exactly the window the v0.27.0
+    /// playable-state guarantee exists to close (see
+    /// playSamples). Never held across playback itself —
+    /// only across the setup sequence.
+    private let playLock = NSLock()
 
     /// The engine is the CALL's shared engine when one is
     /// handed in (v0.18.0): playback and the microphone must
@@ -452,35 +461,42 @@ final class KokoroPlayer {
             }
         }
 
-        if !attached {
-            engine.attach(player)
-            // Full scale, stated rather than assumed (v0.18.0):
-            // nothing in the playback path turns the call down.
-            engine.mainMixerNode.outputVolume = 1.0
-            attached = true
-        }
-        if connectedFormat != playFormat {
-            // The connection is made WITHOUT stopping the
-            // engine (v0.22.0 — the second silent-call fix).
-            // Through v0.19.0 this branch stopped the call's
-            // shared engine — live recognizer tap installed,
-            // voice-processing unit engaged — and restarted it
-            // with try engine.start(). That restart is the one
-            // fragile operation both silent builds share and
-            // the singing pre-0.18.0 code never performed: its
-            // private engine was stopped at connect time and
-            // started exactly once, with nothing else attached.
-            // A disconnect/connect on a running engine is
-            // applied by AVAudioEngine dynamically, and the
-            // mic tap lives on the input node, untouched here.
-            // The engine is only ever started below, when it
-            // is not running at all (the player's private
-            // engine, or a call whose hearing never started
-            // it) — never stopped and restarted mid-call.
-            engine.disconnectNodeOutput(player)
-            engine.connect(player, to: engine.mainMixerNode, format: playFormat)
-            connectedFormat = playFormat
-            onDiagnostic?("Playback path: voice processing \(voiceProcessing ? "on" : "off"), samples \(Self.describe(format)) → playing \(Self.describe(playFormat)), engine \(engine.isRunning ? "running" : "stopped").")
+        // The playable-state guarantee (v0.27.0 — the crash
+        // fix). The field crash (GUS-2026-11-27-025146.ips,
+        // app 0.25.0): EXC_CRASH / SIGABRT — an NSException
+        // raised inside AVAudioPlayerNodeImpl::StartImpl,
+        // reached from -[AVAudioPlayerNode play], on the
+        // sentence pump's thread, just after the operator's
+        // first speech final, when the first reply sentence
+        // reached play(). StartImpl raises when the node is
+        // not in a playable state at that instant — not
+        // connected into the graph, or the engine not
+        // running. The v0.22.0 no-stop reconnect opened
+        // exactly that window: disconnect/connect on the
+        // running shared engine, then schedule/play on the
+        // ASSUMPTION the graph had settled — bookkeeping
+        // (connectedFormat) stood in for the graph's actual
+        // state, and nothing re-checked either the connection
+        // or the engine between the reconnect and play(). An
+        // NSException is not a Swift error: no do/catch in
+        // this path can see it, which is why the v0.22.0
+        // failure log never recorded the crash — prevention
+        // by state guarantee is the only fix. So the whole
+        // sequence below runs serialized (playLock, against
+        // stop()), and play() is reached only after
+        // ensurePlayable has PROVEN, in order, immediately
+        // beforehand: attached → connected into the graph
+        // (read back from the engine, not from bookkeeping)
+        // → engine running. A state that cannot be proven is
+        // a thrown error — the speech engine's stage-2 catch
+        // logs it and finishes the sentence — never a play()
+        // into an unproven graph.
+        playLock.lock()
+        do {
+            try ensurePlayable(playFormat: playFormat, voiceProcessing: voiceProcessing, sourceFormat: format)
+        } catch {
+            playLock.unlock()
+            throw error
         }
 
         lock.lock()
@@ -491,11 +507,70 @@ final class KokoroPlayer {
         player.scheduleBuffer(playBuffer) { [weak self] in
             self?.fireFinish()
         }
+        player.play()
+        playLock.unlock()
+        onLevelChange?(level)
+    }
+
+    /// Establish — and then prove — the state play()
+    /// requires, in the order play() will depend on it:
+    /// attached, connected into the graph, engine running.
+    /// Called under playLock from playSamples, immediately
+    /// before the buffer is scheduled and played; the final
+    /// guards re-read the connection from the ENGINE (its
+    /// own connection points, the same ground truth StartImpl
+    /// checks) and the engine's running state, after any
+    /// reconnect or start this call performed. Throws rather
+    /// than letting play() proceed on an unproven state.
+    private func ensurePlayable(playFormat: AVAudioFormat, voiceProcessing: Bool, sourceFormat: AVAudioFormat) throws {
+        if !attached {
+            engine.attach(player)
+            // Full scale, stated rather than assumed (v0.18.0):
+            // nothing in the playback path turns the call down.
+            engine.mainMixerNode.outputVolume = 1.0
+            attached = true
+        }
+        // Connect once, and keep the connection stable across
+        // sentences: a (re)connect happens only when the
+        // format actually changed or the engine no longer
+        // shows this player connected to the mixer — the
+        // graph's word, not just our connectedFormat note.
+        // The connection is still made WITHOUT stopping the
+        // engine (v0.22.0's intent stands: stopping the shared
+        // engine mid-call was the fragile operation both
+        // silent builds shared) — what v0.27.0 adds is that
+        // the reconnect must now prove itself below, before
+        // anything is scheduled or played into it.
+        if connectedFormat != playFormat || !isPlayerConnected {
+            engine.disconnectNodeOutput(player)
+            engine.connect(player, to: engine.mainMixerNode, format: playFormat)
+            connectedFormat = playFormat
+            onDiagnostic?("Playback path: voice processing \(voiceProcessing ? "on" : "off"), samples \(Self.describe(sourceFormat)) → playing \(Self.describe(playFormat)), engine \(engine.isRunning ? "running" : "stopped").")
+        }
         if !engine.isRunning {
             try engine.start()
         }
-        player.play()
-        onLevelChange?(level)
+        guard isPlayerConnected else {
+            throw NSError(domain: "GUS.Kokoro", code: 10, userInfo: [
+                NSLocalizedDescriptionKey: "The voice's player isn't connected into the call's audio — this sentence can't be played.",
+            ])
+        }
+        guard engine.isRunning else {
+            throw NSError(domain: "GUS.Kokoro", code: 11, userInfo: [
+                NSLocalizedDescriptionKey: "The call's audio engine isn't running — this sentence can't be played.",
+            ])
+        }
+    }
+
+    /// The connection as the engine itself reports it: this
+    /// player, output bus 0, landing on the main mixer. This
+    /// is the ground truth AVAudioPlayerNode's StartImpl
+    /// checks when play() is called — so it is what
+    /// ensurePlayable verifies, never our own bookkeeping
+    /// about what we connected earlier.
+    private var isPlayerConnected: Bool {
+        engine.outputConnectionPoints(for: player, outputBus: 0)
+            .contains { $0.node === engine.mainMixerNode }
     }
 
     /// A format in one short line, for the playback path's
@@ -555,7 +630,14 @@ final class KokoroPlayer {
     }
 
     func stop() {
+        // Serialized with playSamples' graph sequence
+        // (v0.27.0): a stop must never land between
+        // ensurePlayable's verification and play() — that
+        // interleave is the window the playable-state
+        // guarantee closes.
+        playLock.lock()
         if player.isPlaying { player.stop() }
+        playLock.unlock()
         fireFinish()
     }
 

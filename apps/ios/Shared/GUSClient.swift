@@ -64,6 +64,22 @@ struct PanelJob: Decodable, Identifiable {
     let updatedAt: Double
 }
 
+/// GET /api/approvals — one parked approval, exactly as the
+/// panel's own list serves it (packages/control-plane's
+/// approvals()): what job it belongs to, what it wants to
+/// do, why it needs the operator, and its two clocks in
+/// epoch milliseconds. This is the same record every
+/// operator surface reads — the Watch snapshot (v0.27.0)
+/// is filled from it, never from a second model.
+struct PanelApproval: Decodable, Identifiable {
+    let id: String
+    let jobId: String
+    let summary: String
+    let reason: String
+    let createdAt: Double
+    let expiresAt: Double
+}
+
 /// The live-call session state (v0.9.1 protocol, unchanged):
 /// phase is "listening" | "thinking" | "speaking" | "ended".
 /// sttMode/ttsMode are the call's RESOLVED engines ("local" |
@@ -353,6 +369,31 @@ actor GUSClient {
 
     func jobs() async throws -> [PanelJob] {
         try decode([PanelJob].self, await request("/api/jobs"))
+    }
+
+    // MARK: Approvals (the panel's list + resolution)
+
+    func approvals() async throws -> [PanelApproval] {
+        try decode([PanelApproval].self, await request("/api/approvals"))
+    }
+
+    /// POST /api/approvals/<id>/approve|deny — the panel's
+    /// own resolution route: the core re-validates everything
+    /// (the approval must still be pending; the kill switch
+    /// and expiry bind), so a stale id resolves nothing. The
+    /// route answers 200 when the resolution landed and 409
+    /// when it refused, with the SAME ActionResult body both
+    /// ways — the refusal's detail ("not pending", "kill
+    /// switch on") is the answer the operator must see, so
+    /// both statuses decode instead of the refusal throwing.
+    func resolveApproval(id: String, approve: Bool) async throws -> ActionResult {
+        let escaped = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+        let (data, status) = try await requestRaw(
+            "/api/approvals/\(escaped)/\(approve ? "approve" : "deny")", method: "POST")
+        guard status == 200 || status == 409 else {
+            throw ClientError.http(status, String(data: data, encoding: .utf8) ?? "")
+        }
+        return try decode(ActionResult.self, data)
     }
 
     // MARK: Chat (the panel's Chat channel, v0.6)

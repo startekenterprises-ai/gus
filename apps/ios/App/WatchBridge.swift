@@ -18,6 +18,16 @@ final class WatchBridge: NSObject, WCSessionDelegate {
     private var lastSnapshot: WatchSnapshot?
     private var activated = false
 
+    /// Performs a Watch-requested approval resolution
+    /// (v0.27.0), installed by the snapshot builder — the
+    /// component that owns the session state and the core
+    /// client. The bridge itself resolves nothing: it carries
+    /// the wrist's request to the resolver and the resolver's
+    /// answer back, verbatim. Nil until the builder starts;
+    /// a request that arrives before that is answered
+    /// honestly rather than dropped.
+    var approvalResolver: (@MainActor (String, Bool) async -> (ok: Bool, detail: String))?
+
     private override init() { super.init() }
 
     func activate() {
@@ -46,6 +56,36 @@ final class WatchBridge: NSObject, WCSessionDelegate {
     }
 
     // MARK: WCSessionDelegate
+
+    /// A resolution request from the Watch (v0.27.0). The
+    /// Watch sends it as a live message precisely so it gets
+    /// a live answer: the reply handler carries the core's
+    /// own verdict (ok + its words) back to the wrist, and
+    /// if this phone can't be reached the Watch's send fails
+    /// on its side and says so — a resolution is never queued
+    /// silently for later, because the operator decided NOW,
+    /// about the approval as it stands NOW.
+    func session(
+        _ session: WCSession,
+        didReceiveMessage message: [String: Any],
+        replyHandler: @escaping ([String: Any]) -> Void
+    ) {
+        guard let payload = message[WatchLink.resolutionKey] as? [String: Any],
+              let id = payload["id"] as? String, !id.isEmpty,
+              let approve = payload["approve"] as? Bool
+        else {
+            replyHandler(["ok": false, "detail": "That request couldn't be read — nothing was resolved."])
+            return
+        }
+        guard let approvalResolver else {
+            replyHandler(["ok": false, "detail": "Open GUS on your iPhone to resolve approvals."])
+            return
+        }
+        Task { @MainActor in
+            let result = await approvalResolver(id, approve)
+            replyHandler(["ok": result.ok, "detail": result.detail])
+        }
+    }
 
     func session(
         _ session: WCSession,
