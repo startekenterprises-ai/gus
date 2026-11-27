@@ -751,7 +751,7 @@ private struct CallControlButton: View {
 /// the tick closure is safe: nothing here publishes, so no
 /// view invalidation rides on it — the TimelineView's own
 /// clock is the redraw.
-private final class MouthFlap {
+private final class MouthFlap: ObservableObject {
     private(set) var smoothed: CGFloat = 0
 
     func advance(toward target: CGFloat) -> CGFloat {
