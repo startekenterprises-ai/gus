@@ -231,6 +231,39 @@ final class CallSession: NSObject, ObservableObject {
     @Published private(set) var watchBothSupported = false
     private let watchCapture = WatchCaptureController()
     private var watchSamplerTask: Task<Void, Never>?
+
+    // Screen viewing (v0.45.0): Watch's sibling — the
+    // operator shares their SCREEN into a Core call. The
+    // sharing itself is started from the system's own
+    // broadcast UI (CallView's Share screen control hosts
+    // the system picker; per-session consent is Apple's
+    // rule), and the frames are captured and posted by the
+    // Broadcast Upload Extension, a separate process. This
+    // session's part is the coordination: when a Core call
+    // goes live it writes the session info into the shared
+    // app group (ScreenShare.swift) so the extension knows
+    // where frames go, then polls the group state the
+    // extension maintains — that poll is how the app (and,
+    // through its screen-share posts, the core) learns
+    // sharing started and, more importantly, STOPPED: the
+    // extension process is torn down as the broadcast
+    // finishes, so its own goodbye is not the signal; the
+    // group flag it clears on the way out, or a heartbeat
+    // gone stale, is. On-device calls can't be shared into
+    // (the local brain has no vision) — the control says
+    // so in plain words and no picker is ever presented.
+    @Published private(set) var screenSharing = false
+    /// The operator's shared screen, as the extension last
+    /// posted it — the rolling preview frame from the app
+    /// group, for the call's "Your screen" tile. Memory
+    /// only, like everything the call sees.
+    @Published private(set) var screenPreview: UIImage?
+    /// A screen-share word for the call screen: the
+    /// on-device explanation, in the watchNotice shape.
+    @Published private(set) var screenNotice: String?
+    private var screenShareTask: Task<Void, Never>?
+    private var screenShareArmed = false
+    private var screenPreviewModified: Date?
     /// The app left the foreground mid-watch: the capture
     /// session is stopped (the camera is off while the app
     /// is away — the background-audio mode keeps the CALL,
@@ -827,6 +860,12 @@ final class CallSession: NSObject, ObservableObject {
             corePhase = state.phase ?? "listening"
             phase = .live
             Self.isAnyCallLive = true
+            // Screen viewing (v0.45.0): a live Core call is
+            // a call the operator CAN share their screen
+            // into — arm the extension's door (session info
+            // in the app group) and start watching the
+            // group for the broadcast's state.
+            armScreenShare(sessionId: id)
             startHearing()
             startWatchdog()
             pollTask = Task { [weak self] in await self?.pollLoop() }
@@ -944,6 +983,11 @@ final class CallSession: NSObject, ObservableObject {
         // eyes it holds — before the session end below, so
         // the drop lands while the session still exists.
         stopWatch(announce: false)
+        // Screen viewing stops with the call too (v0.45.0):
+        // the core is told sharing is off (it drops the
+        // screen frame it holds) and the extension's door
+        // is cleared — same before-the-end discipline.
+        stopScreenShare()
         removeAudioLifecycleObservers()
         pendingShieldQuarantine = nil
         resetPushToTalkCapture()
@@ -971,6 +1015,7 @@ final class CallSession: NSObject, ObservableObject {
         errorText = message
         voiceLevel = 0
         stopWatch(announce: false)
+        stopScreenShare()
         removeAudioLifecycleObservers()
         pendingShieldQuarantine = nil
         resetPushToTalkCapture()
@@ -1247,6 +1292,108 @@ final class CallSession: NSObject, ObservableObject {
     private func appendPhotoEntry(imageData: Data?, note: String) {
         photoEntries.append(CallPhotoEntry(
             imageData: imageData, note: note, turnAnchor: turns.count))
+    }
+
+    // MARK: - Screen viewing (v0.45.0)
+
+    /// A Core call went live: write the session info the
+    /// broadcast extension needs (core address, token,
+    /// session id) into the shared app group, and start
+    /// the once-a-second poll of the group state the
+    /// extension maintains. The token transits only
+    /// through the group container (ScreenShare.swift) —
+    /// it is never logged here or there.
+    private func armScreenShare(sessionId id: String) {
+        ScreenShareSessionInfo.write(
+            baseURL: GUSSettings.baseURLString,
+            token: GUSSettings.token,
+            sessionId: id)
+        screenShareArmed = true
+        screenShareTask?.cancel()
+        screenShareTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self, self.phase == .live,
+                      self.transport == .core else { return }
+                self.pollScreenShareState()
+            }
+        }
+    }
+
+    /// One poll of the extension's group state: the
+    /// broadcast's active flag with a fresh heartbeat
+    /// means sharing is on; the flag cleared (the
+    /// extension's broadcastFinished) or a heartbeat gone
+    /// stale (the extension died without finishing) means
+    /// it stopped. Transitions are the events: the core is
+    /// told (its held screen frame drops on the off post),
+    /// the transcript records them in plain words, and
+    /// while sharing runs the tile's preview follows the
+    /// rolling frame file the extension overwrites.
+    private func pollScreenShareState() {
+        let active = ScreenShareGroup.broadcastActive
+        if active, !screenSharing {
+            screenSharing = true
+            screenNotice = nil
+            appendPhotoEntry(
+                imageData: nil,
+                note: "Screen sharing on — GUS can see your screen while sharing is on. Frames aren't saved.")
+            if let id = sessionId {
+                Task { _ = try? await client.voiceSessionScreenShare(sessionId: id, on: true) }
+            }
+        } else if !active, screenSharing {
+            screenSharing = false
+            screenPreview = nil
+            screenPreviewModified = nil
+            appendPhotoEntry(imageData: nil, note: "Screen sharing off.")
+            if let id = sessionId {
+                Task { _ = try? await client.voiceSessionScreenShare(sessionId: id, on: false) }
+            }
+        }
+        if screenSharing, let url = ScreenShareGroup.previewURL {
+            let modified = (try? FileManager.default.attributesOfItem(
+                atPath: url.path))?[.modificationDate] as? Date
+            if let modified, modified != screenPreviewModified,
+               let data = try? Data(contentsOf: url),
+               let image = UIImage(data: data) {
+                screenPreview = image
+                screenPreviewModified = modified
+            }
+        }
+    }
+
+    /// The call is ending (or failed): stop watching the
+    /// group, tell the core sharing is off if it was on (it
+    /// drops the held screen frame), and clear the session
+    /// info — the extension's door closes with the call, so
+    /// a broadcast started after the call has no live
+    /// session to post into and finishes with its plain
+    /// explanation instead.
+    private func stopScreenShare() {
+        screenShareTask?.cancel()
+        screenShareTask = nil
+        if screenSharing, let id = sessionId {
+            Task { _ = try? await client.voiceSessionScreenShare(sessionId: id, on: false) }
+        }
+        screenSharing = false
+        screenPreview = nil
+        screenPreviewModified = nil
+        if screenShareArmed {
+            ScreenShareSessionInfo.clear()
+            screenShareArmed = false
+        }
+    }
+
+    /// The Share screen control on an on-device call
+    /// (CallView): there is no picker to present — the
+    /// local brain has no vision, so the control explains
+    /// itself in plain words on the call screen and in the
+    /// transcript, exactly the Watch toggle's on-device
+    /// discipline. Nothing is captured, nothing starts.
+    func screenShareRefused() {
+        let words = "Sharing your screen needs Core mode — this brain can't see yet."
+        screenNotice = words
+        appendPhotoEntry(imageData: nil, note: words)
     }
 
     private func updatePhotoEntryNote(_ id: UUID, _ note: String) {

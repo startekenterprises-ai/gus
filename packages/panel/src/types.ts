@@ -361,6 +361,9 @@ export interface PanelVoiceSessionHearingData {
 export interface PanelVoiceWatchData {
   on: boolean;
   cameras: string[];
+  /** v0.45.0: whether the operator's screen is being shared
+   *  into the call (screen viewing). The frame never rides. */
+  screen: boolean;
 }
 
 /** v0.9.1: the live call's state — what the app polls while a
@@ -1008,6 +1011,17 @@ export interface PanelBackend {
     image?: PanelChatImageData,
     hash?: string,
     turnRefresh?: boolean,
+  ): PanelActionResult;
+  /** v0.45.0: screen sharing — the app's word that the
+   *  operator's ReplayKit broadcast started or stopped.
+   *  (The extension's frames, posted to the watch-frame
+   *  route with camera "screen", arm sharing on arrival;
+   *  only the app can reliably say it ended.) Optional on
+   *  the backend, same pattern as voiceSessionWatch:
+   *  turning it off drops the session's held screen frame. */
+  voiceSessionScreenShare?(
+    sessionId: string,
+    on: boolean,
   ): PanelActionResult;
   voiceSessionState(sessionId: string): PanelVoiceSessionData;
   voiceSessionNextAudio(sessionId: string, afterSeq: number): PanelVoiceAudioSegmentData;

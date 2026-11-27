@@ -145,6 +145,23 @@
  * the app's side of the contract exactly as the microphone's
  * is: this service only ever holds frames the app chose to
  * send, only while Watch is on in a live call.
+ *
+ * Screen viewing (v0.45.0): the Watch mode sibling — the
+ * operator shares their iPhone SCREEN into the call (a
+ * ReplayKit broadcast they start from the system's own
+ * consent UI, every session; the broadcast extension posts
+ * the frames). Screen frames arrive on the same watch-frame
+ * door, flagged source "screen", and are held in their OWN
+ * slot in the same in-memory watch state: the latest screen
+ * frame, dropped the moment sharing stops or the call ends,
+ * never written to disk, never in the turn records. Turns
+ * attach it beside the camera eyes under a fixed precedence
+ * (see attachWatchEyes) and the host frames it as the
+ * operator's shared screen, not as a camera view. Screen
+ * frames never queue ambient observations — the operator is
+ * actively showing the call something; the next spoken or
+ * typed turn is the look. Sharing is independent of the
+ * camera Watch toggle: either, both, or neither can be on.
  */
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
@@ -345,8 +362,11 @@ export interface VoiceSessionStateData {
    *  the app says are live. The frames themselves NEVER ride
    *  the state: they are held in memory, attached to turns
    *  as image input, and dropped when Watch turns off or the
-   *  call ends. This summary is all a poller ever sees. */
-  watch?: { on: boolean; cameras: WatchCamera[] };
+   *  call ends. This summary is all a poller ever sees.
+   *  v0.45.0: `screen` joins the summary — whether the
+   *  operator's screen is being shared into the call. The
+   *  screen frame itself never rides the state either. */
+  watch?: { on: boolean; cameras: WatchCamera[]; screen: boolean };
   turns: VoiceSessionTurn[];
   lastLatency?: VoiceTurnLatency;
   hearing?: VoiceSessionHearingData;
@@ -448,6 +468,17 @@ interface ActiveSession {
     frames: Partial<Record<WatchCamera, MessageImage>>;
     hashes: Partial<Record<WatchCamera, string>>;
     sizes: Partial<Record<WatchCamera, number>>;
+    /** v0.45.0: screen sharing — its own state beside the
+     *  cameras, because it is a separate consent (the
+     *  system's broadcast UI) with its own lifecycle: the
+     *  extension's frames set it on, the app's screen-share
+     *  post (or Watch-off discipline it does NOT share — see
+     *  submitScreenShare) turns it off. screenFrame is the
+     *  latest shared-screen frame, memory only, exactly the
+     *  frames discipline: replaced by the next, dropped
+     *  whole when sharing stops or the call ends. */
+    screenOn: boolean;
+    screenFrame?: MessageImage;
     consumed?: WatchFrameSet;
     /** When the last ambient observation was QUEUED — the
      *  rate limit's clock (queueing, not completion, is what
@@ -795,6 +826,7 @@ export class VoiceSessionService {
         frames: {},
         hashes: {},
         sizes: {},
+        screenOn: false,
         lastAmbientAt: 0,
         lastFrameAt: 0,
       },
@@ -1271,12 +1303,36 @@ export class VoiceSessionService {
     if (this.session !== session) {
       return { ok: false, detail: "The call ended (timeout) as that frame arrived — it was dropped." };
     }
-    if (camera !== "front" && camera !== "back") {
+    if (camera !== "front" && camera !== "back" && camera !== "screen") {
       return { ok: false, detail: "That frame names a camera this call doesn't have — it was dropped." };
     }
     const clean = sanitizeVoiceImages([image]);
     if (!clean || clean.length === 0) {
       return { ok: false, detail: "That frame isn't a usable image — it was dropped, nothing was kept." };
+    }
+    if (camera === "screen") {
+      // v0.45.0: a screen frame, from the broadcast
+      // extension. The broadcast ITSELF is the consent —
+      // the operator started it in the system's own UI —
+      // so a screen frame is not gated on the camera Watch
+      // toggle: it arms sharing on arrival (the extension
+      // cannot be running otherwise) and becomes the held
+      // screen view. It refreshes the call's activity like
+      // a camera frame, but it NEVER queues an ambient
+      // observation: the operator is actively showing the
+      // call their screen, and the next turn they take is
+      // the look.
+      const wasSharing = session.watch.screenOn;
+      session.watch.screenOn = true;
+      session.watch.screenFrame = clean[0];
+      session.watch.lastFrameAt = this.now();
+      if (!wasSharing) {
+        this.appendWatchEvent(
+          session,
+          "Screen sharing started — the operator's screen now rides this call's turns, held in memory only and dropped when sharing stops or the call ends.",
+        );
+      }
+      return { ok: true, detail: "Screen frame received — it is the call's current screen view, held in memory only." };
     }
     if (!session.watch.on) {
       return { ok: false, detail: "Watch is off for this call — the frame was dropped, nothing was kept." };
@@ -1293,6 +1349,57 @@ export class VoiceSessionService {
     if (!session.watch.cameras.includes(cam)) session.watch.cameras.push(cam);
     if (!turnRefresh) this.maybeQueueAmbient(session);
     return { ok: true, detail: "Frame received — it is the call's current view, held in memory only." };
+  }
+
+  /**
+   * Screen sharing on/off (v0.45.0), from the APP — the
+   * extension's frames arm sharing on arrival, but only the
+   * app can say it ENDED: the extension process is torn
+   * down as the broadcast finishes, so its goodbye is not a
+   * reliable post. The app watches the shared group state
+   * the extension maintains and posts off when the
+   * broadcast stops; off DROPS the held screen frame whole.
+   * An "on" post with no frame yet simply records the
+   * state (the first frame is seconds behind it). Both
+   * transitions land in the durable call record as watch
+   * events, like the camera's — that sharing was on, and
+   * when, is the record; what the screen showed is not.
+   * Independent of the camera Watch toggle by design:
+   * turning Watch off closes the camera's eyes, not the
+   * operator's screen share, and vice versa.
+   */
+  submitScreenShare(
+    sessionId: string,
+    on: boolean,
+  ): { ok: boolean; detail: string } {
+    const session = this.session;
+    if (!session || session.id !== sessionId) {
+      return { ok: false, detail: "No live call by that id — nothing was changed." };
+    }
+    this.tick();
+    if (this.session !== session) {
+      return { ok: false, detail: "The call ended (timeout) as that arrived — nothing was changed." };
+    }
+    if (on) {
+      const wasSharing = session.watch.screenOn;
+      session.watch.screenOn = true;
+      if (!wasSharing) {
+        this.appendWatchEvent(
+          session,
+          "Screen sharing started — the operator's screen now rides this call's turns, held in memory only and dropped when sharing stops or the call ends.",
+        );
+      }
+      return {
+        ok: true,
+        detail: "Screen sharing on — the shared screen now rides this call's turns, held in memory only.",
+      };
+    }
+    if (session.watch.screenOn) {
+      session.watch.screenOn = false;
+      session.watch.screenFrame = undefined;
+      this.appendWatchEvent(session, "Screen sharing stopped — the held screen frame was dropped.");
+    }
+    return { ok: true, detail: "Screen sharing off — the held screen frame was dropped." };
   }
 
   /** The session's current eyes, in a fixed order (front,
@@ -1317,26 +1424,39 @@ export class VoiceSessionService {
   }
 
   /**
-   * Attach the session's eyes to a turn about to run: the
-   * operator's own submitted images first (a deliberate send
-   * outranks the ambient view), then the eyes, capped at one
-   * turn's image limit. When at least one eye rides, the set
-   * becomes the change baseline — a turn that saw the view
-   * consumes it, so no ambient observation fires later for a
-   * view a turn already answered with — and the turn is
-   * marked liveView for the host's framing.
+   * Attach the session's eyes to a turn about to run, under
+   * a fixed precedence (v0.37.0; screen added v0.45.0):
+   *   1. the operator's own submitted images — a deliberate
+   *      send outranks everything the call is merely seeing;
+   *   2. the shared SCREEN frame — the operator is actively
+   *      showing the call this; it is the likeliest subject
+   *      of what they are saying;
+   *   3. the camera eyes, front then back (watchEyes order).
+   * The merged list is capped at one turn's image limit
+   * (MAX_VOICE_IMAGES); whatever the cap cuts does not ride
+   * and is not framed as riding. When at least one CAMERA
+   * eye rides, the camera set becomes the change baseline —
+   * a turn that saw the view consumes it, so no ambient
+   * observation fires later for a view a turn already
+   * answered with. The screen is never part of that
+   * baseline: it has no ambient observations to suppress.
+   * The turn is marked liveView and/or screenView for the
+   * host's framing, per what actually rode.
    */
   private attachWatchEyes(
     session: ActiveSession,
     submitted?: MessageImage[],
-  ): { images?: MessageImage[]; liveView: boolean } {
+  ): { images?: MessageImage[]; liveView: boolean; screenView: boolean } {
     const eyes = this.watchEyes(session);
-    if (!eyes.length) return { images: submitted, liveView: false };
+    const screen = session.watch.screenOn ? session.watch.screenFrame : undefined;
+    if (!eyes.length && !screen) return { images: submitted, liveView: false, screenView: false };
     const base = submitted ?? [];
-    const merged = [...base, ...eyes].slice(0, MAX_VOICE_IMAGES);
-    const eyesRode = merged.length > base.length;
+    const withScreen = screen ? [...base, screen] : [...base];
+    const merged = [...withScreen, ...eyes].slice(0, MAX_VOICE_IMAGES);
+    const screenRode = screen !== undefined && merged.length > base.length;
+    const eyesRode = merged.length > withScreen.length;
     if (eyesRode) session.watch.consumed = this.watchSnapshot(session);
-    return { images: merged, liveView: eyesRode };
+    return { images: merged, liveView: eyesRode, screenView: screenRode };
   }
 
   /**
@@ -1559,7 +1679,7 @@ export class VoiceSessionService {
         ttsMode: session.ttsMode,
         speechNotice: session.speechNotice,
         shieldMode: session.shieldMode,
-        watch: { on: session.watch.on, cameras: session.watch.cameras },
+        watch: { on: session.watch.on, cameras: session.watch.cameras, screen: session.watch.screenOn },
         turns: session.turns,
         lastLatency: session.lastLatency,
         hearing: this.hearingData(session),
@@ -1668,6 +1788,7 @@ export class VoiceSessionService {
       const eyesTurn = this.attachWatchEyes(session, undefined);
       await this.completeTurn(session, turn, config, transcript, utteranceEndAt, sttMs, eyesTurn.images, {
         liveView: eyesTurn.liveView,
+        screenView: eyesTurn.screenView,
       });
     } finally {
       // Every path that created the turn settles here exactly
@@ -1737,6 +1858,7 @@ export class VoiceSessionService {
       const eyesTurn = this.attachWatchEyes(session, images);
       await this.completeTurn(session, turn, config, transcript, postedAt, 0, eyesTurn.images, {
         liveView: eyesTurn.liveView,
+        screenView: eyesTurn.screenView,
       });
     } finally {
       this.appendTurnRecord(turn);
@@ -1760,7 +1882,7 @@ export class VoiceSessionService {
     utteranceEndAt: number,
     sttMs: number,
     images?: MessageImage[],
-    opts?: { liveView?: boolean; silentReply?: string },
+    opts?: { liveView?: boolean; silentReply?: string; screenView?: boolean },
   ): Promise<void> {
     // v0.40.0: the session's persona context rides the turn —
     // the same ordinary-job door as the words, so a spoken turn
@@ -1785,6 +1907,7 @@ export class VoiceSessionService {
     try {
       result = await this.calls.processTranscript(transcript, images, {
         liveView: opts?.liveView === true,
+        screenView: opts?.screenView === true,
         personaContext,
       });
     } finally {
@@ -1824,6 +1947,13 @@ export class VoiceSessionService {
     // happened to its reply, in words.
     if (opts?.liveView && images?.length) {
       turn.detail += " (Watch: the call camera's live view rode this turn.)";
+    }
+    // v0.45.0: a turn that carried the shared screen says so
+    // on its record, the same discipline — that the answer
+    // was grounded in the operator's screen is a fact about
+    // the turn; what the screen showed is never recorded.
+    if (opts?.screenView && images?.length) {
+      turn.detail += " (Screen: the operator's shared screen rode this turn.)";
     }
     if (silenced) {
       turn.detail += " (Watch: the model looked and had nothing worth saying — nothing was spoken.)";
@@ -2166,7 +2296,7 @@ export class VoiceSessionService {
       ttsMode: session.ttsMode,
       speechNotice: session.speechNotice,
       shieldMode: session.shieldMode,
-      watch: { on: false, cameras: [] },
+      watch: { on: false, cameras: [], screen: false },
       turns: session.turns,
       lastLatency: session.lastLatency,
       hearing: this.hearingData(session),

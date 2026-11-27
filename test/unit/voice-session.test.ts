@@ -678,6 +678,11 @@ const FRAME_BACK_A = {
   mediaType: "image/jpeg",
   data: "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgFBgcGBQgHBgcJCAgJDBMMDAsLDBgREg4THBgSFhUmJJUmJSgjGhgaHBwJCAsJCg8PDw4NDg0PDw/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMv/AAB",
 };
+/** v0.45.0: a screen frame — same JPEG shape, different
+ *  bytes (a suffix on the same body, like the changed-view
+ *  frames elsewhere in this file). */
+const FRAME_SCREEN = { ...FRAME_BACK_A, data: `${FRAME_BACK_A.data}U0NSRUVO` };
+
 /** Two 64-bit aHashes: A and its bitwise complement (distance
  *  64 — a wholly different view), and a one-bit neighbour of
  *  A (distance 1 — the same view, shimmering). */
@@ -730,7 +735,7 @@ test("watch (v0.37.0): a spoken turn carries the session's eyes as image input, 
 
   const on = r.sessions.submitWatch(id, true, ["back"]);
   assert.equal(on.ok, true, on.detail);
-  assert.deepEqual(r.sessions.state(id).watch, { on: true, cameras: ["back"] },
+  assert.deepEqual(r.sessions.state(id).watch, { on: true, cameras: ["back"], screen: false },
     "the state poll carries the watch summary — never the frames");
 
   // A turn-refresh frame: the fresh grab as the operator
@@ -879,7 +884,7 @@ test("watch (v0.37.0): Watch off drops the eyes — later turns carry nothing, a
 
   const off = r.sessions.submitWatch(id, false);
   assert.equal(off.ok, true, off.detail);
-  assert.deepEqual(r.sessions.state(id).watch, { on: false, cameras: [] });
+  assert.deepEqual(r.sessions.state(id).watch, { on: false, cameras: [], screen: false });
 
   const refused = r.sessions.submitWatchFrame(id, "back", FRAME_BACK_A, HASH_A, true);
   assert.equal(refused.ok, false, "a frame outside Watch is refused, never held");
@@ -928,6 +933,134 @@ test("watch (v0.37.0): an unusable frame refuses the post and changes nothing", 
     undefined,
     "no frame was ever held, so the turn carries none",
   );
+  r.sessions.end(id);
+});
+
+test("screen (v0.45.0): a screen frame arms sharing without Watch, rides the next turn framed as the screen, and queues no ambient look", async () => {
+  const r = await sessionRig({ sttEngine: "local", ttsEngine: "local" });
+  const id = await startCall(r);
+
+  // Watch (camera) was never turned on — the broadcast is
+  // its own consent, so the frame is held, not refused.
+  const framed = r.sessions.submitWatchFrame(id, "screen", FRAME_SCREEN);
+  assert.equal(framed.ok, true, framed.detail);
+  assert.deepEqual(
+    r.sessions.state(id).watch,
+    { on: false, cameras: [], screen: true },
+    "the state poll carries the sharing summary — never the frame",
+  );
+
+  const posted = r.sessions.submitTranscript(id, "what does this error say?");
+  assert.equal(posted.ok, true, posted.detail);
+  await driveJob(r, "It says the disk is full.", 0);
+  await r.sessions.drain();
+
+  const pushed = r.pushed[0] as unknown as { text: string; images?: unknown };
+  assert.deepEqual(pushed.images, [FRAME_SCREEN], "the screen frame rode the turn as image input");
+  assert.match(pushed.text, /Screen sharing/, "the framing names the shared screen");
+  assert.match(pushed.text, /what their screen shows right now/);
+  assert.doesNotMatch(pushed.text, /Live view/, "the screen is not framed as the camera's view");
+  assert.doesNotMatch(pushed.text, /attached 1 photo/, "the screen is not framed as an attachment");
+
+  const turn = r.sessions.state(id).turns[0];
+  assert.equal(turn.photos, undefined, "the record's photo count stays the operator's sends only");
+  assert.match(turn.detail, /shared screen rode this turn/, "the turn's record names the screen");
+  assert.equal(
+    r.sessions.state(id).turns.length,
+    1,
+    "no ambient observation turn was queued for the screen frame",
+  );
+
+  const events = readFileSync(join(r.dir, "voice-turns.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l) as Record<string, unknown>)
+    .filter((l) => l.kind === "watch");
+  assert.equal(events.length, 1, "the sharing start is on the durable record");
+  assert.match(String(events[0].detail), /Screen sharing started/);
+  r.sessions.end(id);
+});
+
+test("screen (v0.45.0): sharing off drops the held frame — later turns carry nothing — and Watch off does NOT end a share", async () => {
+  const r = await sessionRig({ sttEngine: "local", ttsEngine: "local" });
+  const id = await startCall(r);
+  r.sessions.submitWatch(id, true, ["back"]);
+  r.sessions.submitWatchFrame(id, "back", FRAME_BACK_A, HASH_A, true);
+  r.sessions.submitWatchFrame(id, "screen", FRAME_SCREEN);
+
+  // Precedence, in the merged turn: the screen outranks
+  // the camera eyes (attachWatchEyes: submitted, screen,
+  // front, back).
+  r.sessions.submitTranscript(id, "look at both");
+  await driveJob(r, "Both, seen.", 0);
+  await r.sessions.drain();
+  const both = r.pushed[0] as unknown as { text: string; images?: unknown };
+  assert.deepEqual(both.images, [FRAME_SCREEN, FRAME_BACK_A], "screen first, then the camera's eyes");
+  assert.match(both.text, /Live view \+ screen sharing/, "a turn carrying both gets the combined framing");
+
+  // Watch off closes the camera's eyes only: the share
+  // (a separate consent) keeps riding.
+  r.sessions.submitWatch(id, false);
+  assert.deepEqual(
+    r.sessions.state(id).watch,
+    { on: false, cameras: [], screen: true },
+    "Watch off leaves the screen share standing",
+  );
+  r.sessions.submitTranscript(id, "still there?");
+  await driveJob(r, "Still there.", 1);
+  await r.sessions.drain();
+  assert.deepEqual(
+    (r.pushed[1] as unknown as { images?: unknown }).images,
+    [FRAME_SCREEN],
+    "the screen still rides after Watch off",
+  );
+
+  const off = r.sessions.submitScreenShare(id, false);
+  assert.equal(off.ok, true, off.detail);
+  assert.deepEqual(
+    r.sessions.state(id).watch,
+    { on: false, cameras: [], screen: false },
+  );
+  r.sessions.submitTranscript(id, "and now?");
+  await driveJob(r, "Nothing now.", 2);
+  await r.sessions.drain();
+  assert.equal(
+    (r.pushed[2] as unknown as { images?: unknown }).images,
+    undefined,
+    "with the share ended and its frame dropped, the next turn carries no images",
+  );
+
+  const events = readFileSync(join(r.dir, "voice-turns.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l) as Record<string, unknown>)
+    .filter((l) => l.kind === "watch")
+    .map((l) => String(l.detail));
+  assert.ok(
+    events.some((d) => /Screen sharing stopped/.test(d)),
+    "the sharing stop is on the durable record",
+  );
+  r.sessions.end(id);
+});
+
+test("screen (v0.45.0): an unusable screen frame refuses the post and arms nothing", async () => {
+  const r = await sessionRig({ sttEngine: "local", ttsEngine: "local" });
+  const id = await startCall(r);
+
+  const refused = r.sessions.submitWatchFrame(id, "screen", {
+    mediaType: "text/plain",
+    data: "aGVsbG8=",
+  });
+  assert.equal(refused.ok, false);
+  assert.match(refused.detail, /isn't a usable image/);
+  assert.deepEqual(
+    r.sessions.state(id).watch,
+    { on: false, cameras: [], screen: false },
+    "a refused frame never arms sharing",
+  );
+
+  const noCall = r.sessions.submitScreenShare("no-such-call", true);
+  assert.equal(noCall.ok, false, "screen-share for a dead session refuses in words");
   r.sessions.end(id);
 });
 

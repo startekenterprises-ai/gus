@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+	GUS iOS — the Broadcast Upload Extension's Info.plist
+	(v0.45.0).
+
+	Like the app's own plist, this file lives at apps/ios/,
+	OUTSIDE every file-system-synchronized group (the
+	Broadcast/ group holds only SampleHandler.swift), and
+	the extension target's INFOPLIST_FILE points here. The
+	v0.17.3 lesson is the reason: a physical plist inside a
+	synchronized group is ALSO copied as a bundle resource,
+	and the copy collides with the processed plist
+	("Multiple commands produce …/Info.plist") — the
+	v0.17.2 archive failed on exactly that. Nothing may
+	move this file into Broadcast/.
+
+	The NSExtension dict is the documented minimal set for
+	a ReplayKit broadcast upload extension: the upload
+	point identifier, the principal class (the target's
+	SampleHandler), and the sample-buffer process mode.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>GUS Screen Share</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.broadcast-services-upload</string>
+		<key>NSExtensionPrincipalClass</key>
+		<string>$(PRODUCT_MODULE_NAME).SampleHandler</string>
+		<key>RPBroadcastProcessMode</key>
+		<string>RPBroadcastProcessModeSampleBuffer</string>
+	</dict>
+</dict>
+</plist>

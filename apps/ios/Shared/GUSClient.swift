@@ -125,6 +125,11 @@ struct VoiceSessionState: Decodable {
     struct Watch: Decodable {
         let on: Bool
         let cameras: [String]
+        /// v0.45.0: whether the operator's screen is being
+        /// shared into the call. Optional in the decode: a
+        /// core older than screen viewing simply doesn't
+        /// send it, and the call reads that as not sharing.
+        let screen: Bool?
     }
 }
 
@@ -626,6 +631,22 @@ actor GUSClient {
                 "hash": hash,
                 "turnRefresh": turnRefresh,
             ]))
+    }
+
+    /// Screen sharing (v0.45.0): the app's word that the
+    /// operator's ReplayKit broadcast started or stopped.
+    /// The broadcast extension posts the frames themselves
+    /// to the watch-frame route (camera "screen"); this
+    /// route carries no image data — it is how the core
+    /// learns sharing ENDED, because the extension process
+    /// is torn down as the broadcast finishes and its own
+    /// goodbye can't be relied on. Turning it off drops
+    /// the screen frame the core holds.
+    @discardableResult
+    func voiceSessionScreenShare(sessionId: String, on: Bool) async throws -> ActionResult {
+        try decode(ActionResult.self, await request(
+            "/api/voice/session/screen-share", method: "POST",
+            jsonBody: ["sessionId": sessionId, "on": on]))
     }
 
     /// A raw PCM16 audio chunk, for calls whose resolved STT

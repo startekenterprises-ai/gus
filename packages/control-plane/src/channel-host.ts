@@ -83,6 +83,30 @@ export function liveViewNote(count: number, hasText: boolean): string {
     : `(Live view: this voice call's camera is on (Watch mode). The ${noun} included with this message ${count === 1 ? "is" : "are"} what the camera sees right now — the operator is showing you their current view. Describe what you see and answer any question the view implies.)`;
 }
 
+/** v0.45.0 (screen viewing): the screen sibling of
+ *  liveViewNote — appended when a voice turn's images are
+ *  the operator's SHARED SCREEN (a ReplayKit broadcast they
+ *  started from the system's consent UI), attached by the
+ *  voice session service. The framing names the source
+ *  plainly: this is the operator's screen, right now — not
+ *  a camera, not an attachment. When a turn carries BOTH
+ *  the camera's live view and the screen, the combined note
+ *  below frames them together, in attach order (submitted
+ *  photos first when present, then the screen, then the
+ *  camera views — the session's precedence). */
+export function screenViewNote(count: number, hasText: boolean): string {
+  const noun = count === 1 ? "image" : "images";
+  return hasText
+    ? `\n\n(Screen sharing: the operator is sharing their iPhone screen with this voice call, and the ${noun} included with this message ${count === 1 ? "is" : "are"} what their screen shows right now. Treat ${count === 1 ? "it" : "them"} as the operator's current screen — what they are showing you as they speak — and use ${count === 1 ? "it" : "them"} as part of answering.)`
+    : `(Screen sharing: the operator is sharing their iPhone screen with this voice call. The ${noun} included with this message ${count === 1 ? "is" : "are"} what their screen shows right now — the operator is showing you their screen. Describe what you see and answer any question the screen implies.)`;
+}
+
+export function liveAndScreenViewNote(count: number, hasText: boolean): string {
+  return hasText
+    ? `\n\n(Live view + screen sharing: this voice call's camera is on (Watch mode) AND the operator is sharing their iPhone screen. The images included with this message include the operator's shared screen and what the camera sees right now. Treat them as the operator's current screen and current view — what they are showing you as they speak — and use them as part of answering.)`
+    : `(Live view + screen sharing: this voice call's camera is on (Watch mode) AND the operator is sharing their iPhone screen. The images included with this message include the operator's shared screen and what the camera sees right now. Describe what you see and answer any question the screen and view imply.)`;
+}
+
 /** v0.40.0 (persona context): the framing the HOST wraps the
  *  phone-supplied persona context in at the HEAD of a job's
  *  runtime prompt — the persona position. The core's own
@@ -923,10 +947,17 @@ export class ChannelHost {
       // live view gets the live-view framing instead — the
       // operator didn't attach a photo; the call is showing the
       // model its eyes.
+      // v0.45.0: a turn carrying the operator's shared screen
+      // gets the screen framing; one carrying BOTH the screen
+      // and the camera's live view gets the combined framing.
       (images
-        ? msg.liveView
-          ? liveViewNote(images.length, text.length > 0)
-          : photoNote(images.length, text.length > 0)
+        ? msg.liveView && msg.screenView
+          ? liveAndScreenViewNote(images.length, text.length > 0)
+          : msg.screenView
+            ? screenViewNote(images.length, text.length > 0)
+            : msg.liveView
+              ? liveViewNote(images.length, text.length > 0)
+              : photoNote(images.length, text.length > 0)
         : "");
     this.pendingDeliveries.set(job.id, jobText);
     this.comm.pushUserMessage({

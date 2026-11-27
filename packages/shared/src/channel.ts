@@ -103,6 +103,19 @@ export interface InboundMessage {
    *  eyes. The frames themselves are never recorded — the
    *  durable transcript keeps the count, as for photos. */
   liveView?: boolean;
+  /** v0.45.0: this message's images include the operator's
+   *  SHARED SCREEN — screen viewing in a voice call (the
+   *  ReplayKit sibling of Watch mode). The voice session
+   *  attaches the latest screen frame it holds to the turn
+   *  and sets this flag alongside liveView (a turn can carry
+   *  both: camera eyes AND the screen). The ChannelHost
+   *  frames the images with the screen-view note (or a
+   *  combined note when both ride) instead of the photo
+   *  note: the operator didn't SEND a picture, they are
+   *  showing the call their screen. The frame itself is
+   *  never recorded — it lives in the core's memory only,
+   *  exactly like the Watch frames. */
+  screenView?: boolean;
   /** v0.40.0: the persona context the operator's phone composed
    *  for this conversation — the picked persona's prompt, the
    *  house style, and that persona's remembered lines, exactly

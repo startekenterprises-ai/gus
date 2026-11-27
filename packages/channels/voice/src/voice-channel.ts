@@ -210,6 +210,11 @@ export class VoiceAdapter implements ChannelAdapter {
    * host frames the images as a live view instead of an
    * attachment. Only meaningful alongside images.
    *
+   * v0.45.0: `screenView` is the same mark for the operator's
+   * shared screen (screen viewing in the call) — it rides the
+   * message as the screenView flag, alone or alongside
+   * liveView, and the host frames accordingly.
+   *
    * v0.40.0: `personaContext` is the session's held persona
    * context (the phone's composed persona prompt for the
    * call), attached by the session service to every ordinary
@@ -223,6 +228,7 @@ export class VoiceAdapter implements ChannelAdapter {
     images?: MessageImage[],
     liveView = false,
     personaContext?: string,
+    screenView = false,
   ): { ok: boolean; detail: string } {
     const trimmed = text.trim();
     const photos = images?.length ? images : undefined;
@@ -239,6 +245,7 @@ export class VoiceAdapter implements ChannelAdapter {
         text: trimmed,
         ...(photos ? { images: photos } : {}),
         ...(photos && liveView ? { liveView: true } : {}),
+        ...(photos && screenView ? { screenView: true } : {}),
         ...(personaContext ? { personaContext } : {}),
         receivedAt: Date.now(),
         // v0.9.8: every submit from this adapter is a voice
@@ -394,7 +401,7 @@ export class VoiceCallService {
   async processTranscript(
     transcript: string,
     images?: MessageImage[],
-    opts?: { liveView?: boolean; personaContext?: string },
+    opts?: { liveView?: boolean; personaContext?: string; screenView?: boolean },
   ): Promise<VoiceCallResult> {
     this.adapter.drainStale();
     const phrase = classifyTranscript(transcript);
@@ -460,7 +467,7 @@ export class VoiceCallService {
     // v0.40.0: the session's persona context rides it too —
     // the same ordinary-job door, so a spoken turn is answered
     // by the same persona a typed one is.
-    const sent = this.adapter.submit(transcript, images, opts?.liveView === true, opts?.personaContext);
+    const sent = this.adapter.submit(transcript, images, opts?.liveView === true, opts?.personaContext, opts?.screenView === true);
     if (!sent.ok) return { ok: false, kind: "unavailable", transcript, detail: sent.detail };
     const reply = await this.adapter.waitForReply(this.replyTimeoutMs);
     if (reply === undefined) {

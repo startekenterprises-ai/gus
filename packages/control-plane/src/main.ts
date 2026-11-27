@@ -604,7 +604,7 @@ function toPanelVoiceSession(s: VoiceSessionStateData): PanelVoiceSessionData {
     sttMode: s.sttMode,
     ttsMode: s.ttsMode,
     speechNotice: s.speechNotice,
-    watch: s.watch ? { on: s.watch.on, cameras: s.watch.cameras } : undefined,
+    watch: s.watch ? { on: s.watch.on, cameras: s.watch.cameras, screen: s.watch.screen } : undefined,
     turns: s.turns.map((t) => ({
       index: t.index,
       startedAt: t.startedAt,
@@ -1260,6 +1260,8 @@ const panelBackend: PanelBackend = {
     voiceSessions.submitWatch(sessionId, on, cameras),
   voiceSessionWatchFrame: (sessionId, camera, image, hash, turnRefresh) =>
     voiceSessions.submitWatchFrame(sessionId, camera, image, hash, turnRefresh),
+  voiceSessionScreenShare: (sessionId, on) =>
+    voiceSessions.submitScreenShare(sessionId, on),
   voiceSessionState: (sessionId) => toPanelVoiceSession(voiceSessions.state(sessionId)),
   voiceSessionNextAudio: (sessionId, afterSeq) => voiceSessions.nextAudio(sessionId, afterSeq),
   voiceSessionInterrupt: (sessionId) => voiceSessions.interrupt(sessionId),

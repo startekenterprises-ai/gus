@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+	GUS iOS — the app's entitlements (v0.45.0).
+
+	One entitlement: the app group the app shares with
+	its Broadcast Upload Extension (screen viewing in
+	calls). The group container is the two processes'
+	only shared ground — the app writes the live call's
+	session info there for the extension, and the
+	extension keeps the broadcast's state and one rolling
+	preview frame there for the app (Shared/ScreenShare
+	.swift tells the whole story).
+
+	This file lives at apps/ios/, outside every
+	file-system-synchronized group, like the app's
+	Info.plist: CODE_SIGN_ENTITLEMENTS points here by
+	path, and nothing may move it into App/.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.startekenterprises.gus</string>
+	</array>
+</dict>
+</plist>

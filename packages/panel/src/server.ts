@@ -512,6 +512,26 @@ export class PanelServer {
       );
       return json(result.ok ? 200 : 409, result);
     }
+    // v0.45.0: screen sharing — the app's word that the
+    // operator's ReplayKit broadcast started or stopped.
+    // The extension's frames ride the watch-frame route
+    // above (camera "screen"); this route carries no image
+    // data, just the fact. Turning it off drops the held
+    // screen frame in the core.
+    if (method === "POST" && path === "/api/voice/session/screen-share") {
+      const body = await this.readJson(req);
+      if (!this.backend.voiceSessionScreenShare) {
+        return json(501, {
+          ok: false,
+          detail: "Screen sharing isn't wired in this deployment. Nothing was changed.",
+        });
+      }
+      const result = this.backend.voiceSessionScreenShare(
+        typeof body.sessionId === "string" ? body.sessionId : "",
+        body.on === true,
+      );
+      return json(result.ok ? 200 : 409, result);
+    }
     if (method === "POST" && path === "/api/voice/session/audio") {
       const audio = await this.readRaw(req, MAX_SESSION_CHUNK_BYTES);
       const result = this.backend.voiceSessionAudio(

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+	GUS iOS — the Broadcast Upload Extension's
+	entitlements (v0.45.0).
+
+	The same single app group as the app's entitlements:
+	the extension reads the live call's session info from
+	the group container and keeps the broadcast's state
+	and one rolling preview frame there. Lives at
+	apps/ios/, outside every synchronized group;
+	CODE_SIGN_ENTITLEMENTS points here by path.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.startekenterprises.gus</string>
+	</array>
+</dict>
+</plist>

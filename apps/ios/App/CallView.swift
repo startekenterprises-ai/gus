@@ -1,6 +1,7 @@
 import SwiftUI
 import AVKit
 import AVFoundation
+import ReplayKit
 import UIKit
 
 /// The front door: a live call with GUS. Tap Call and talk —
@@ -186,18 +187,28 @@ struct CallView: View {
         // screen at once; the persona is never
         // replaced by the camera. Off, the face is
         // the screen again.
-        if call.watchOn {
+        // Screen viewing (v0.45.0): screen sharing
+        // takes the same FaceTime shape — the "Your
+        // screen" tile joins the camera's tile beside
+        // the persona, never replacing it.
+        if call.watchOn || call.screenSharing {
             HStack(alignment: .top, spacing: 12) {
                 personaFaceButton(side: 104)
                 VStack(alignment: .leading, spacing: 8) {
-                    onAirPill
-                    WatchPreviewHost(view: call.watchPreviewView)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 118)
-                        .background(Color.black)
-                        .cornerRadius(10)
-                        .clipped()
-                    watchControlsRow
+                    if call.watchOn {
+                        onAirPill
+                        WatchPreviewHost(view: call.watchPreviewView)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 118)
+                            .background(Color.black)
+                            .cornerRadius(10)
+                            .clipped()
+                        watchControlsRow
+                    }
+                    if call.screenSharing {
+                        screenSharingPill
+                        screenTile
+                    }
                 }
                 .frame(maxWidth: .infinity)
             }
@@ -274,6 +285,16 @@ struct CallView: View {
                 .frame(maxWidth: .infinity)
                 .fixedSize(horizontal: false, vertical: true)
         }
+        if let notice = call.screenNotice {
+            Text(notice)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .lineLimit(3)
+                .minimumScaleFactor(0.8)
+                .frame(maxWidth: .infinity)
+                .fixedSize(horizontal: false, vertical: true)
+        }
         if let error = call.errorText {
             Text(error)
                 .font(.caption)
@@ -300,6 +321,13 @@ struct CallView: View {
             }
 
             callControlsRow
+
+            // Screen viewing (v0.45.0): the Share
+            // screen row — its own row, not a seventh
+            // circle in the control row above (six is
+            // already the row's limit). See
+            // screenShareSection.
+            screenShareSection
         } else {
             startCallButton
         }
@@ -516,6 +544,132 @@ struct CallView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title)
+    }
+
+    // MARK: - Screen viewing (v0.45.0)
+
+    /// The sharing indicator: while the operator's screen
+    /// is being shared, this pill is on screen beside the
+    /// tile — the app's own word, next to the system's red
+    /// indicator that iOS keeps up the whole time. There
+    /// is no state in which the screen is shared without
+    /// both.
+    private var screenSharingPill: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(Color.red)
+                .frame(width: 8, height: 8)
+            Text("Sharing your screen")
+                .font(.caption)
+                .fontWeight(.semibold)
+            Text("— frames aren't saved")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    /// The "Your screen" tile: the rolling preview frame
+    /// the broadcast extension posts into the app group —
+    /// the operator sees exactly what the call sees. Until
+    /// the first frame lands it says so, in words.
+    private var screenTile: some View {
+        ZStack {
+            Color.black
+            if let preview = call.screenPreview {
+                Image(uiImage: preview)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                Text("Your screen — waiting for the first frame…")
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.7))
+                    .multilineTextAlignment(.center)
+                    .padding(8)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 118)
+        .cornerRadius(10)
+        .clipped()
+        .accessibilityLabel("Your shared screen")
+    }
+
+    /// The Share screen row (v0.45.0), under the control
+    /// row. What it holds depends on the call:
+    ///  - Core, not sharing: the SYSTEM broadcast picker.
+    ///    Tapping it opens iOS's own broadcast UI, and the
+    ///    operator starts the broadcast THERE — per-session
+    ///    consent is Apple's rule, so this app never starts
+    ///    a broadcast itself, and the row says so before
+    ///    the tap, not after.
+    ///  - Core, sharing: the state and the way out (the
+    ///    system's indicator / Control Center — the app
+    ///    cannot stop a broadcast either).
+    ///  - On-device: a plain button that explains itself
+    ///    (CallSession.screenShareRefused) — no picker is
+    ///    ever presented, because there is nothing that
+    ///    could see the screen.
+    /// The explainer under the row is always there, in
+    /// plain words, BEFORE any sharing starts: what GUS
+    /// will see, the red indicator, and how sharing ends.
+    @ViewBuilder
+    private var screenShareSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if call.callMode == .onDevice {
+                Button { call.screenShareRefused() } label: {
+                    screenShareRow
+                }
+                .buttonStyle(.plain)
+            } else {
+                screenShareRow
+            }
+            Text("GUS sees your screen only while sharing is on. iOS shows a red indicator the whole time you share, and sharing stops the moment you stop the broadcast.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var screenShareRow: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                Circle()
+                    .fill(call.screenSharing ? Color.red : Color.secondary.opacity(0.12))
+                    .frame(width: 50, height: 50)
+                if call.callMode == .core && !call.screenSharing {
+                    // The picker IS the button — the system
+                    // draws its broadcast glyph in the circle.
+                    BroadcastPickerHost()
+                        .frame(width: 50, height: 50)
+                } else {
+                    Image(systemName: "rectangle.on.rectangle")
+                        .font(.title3)
+                        .foregroundColor(call.screenSharing ? .white : .secondary)
+                }
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(call.screenSharing ? "Sharing your screen" : "Share screen")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.primary)
+                Text(screenShareCaption)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .contentShape(Rectangle())
+    }
+
+    private var screenShareCaption: String {
+        if call.screenSharing {
+            return "GUS can see your screen now. Stop any time from the red indicator or Control Center."
+        }
+        if call.callMode == .onDevice {
+            return "Screen sharing needs Core mode — tap to hear why."
+        }
+        return "Tap the button, then start the broadcast in the system's prompt — you start it there, every time."
     }
 
     // MARK: - Transcript (v0.23.0)
@@ -1065,4 +1219,24 @@ private struct WatchPreviewHost: UIViewRepresentable {
     func makeUIView(context: Context) -> UIView { view }
 
     func updateUIView(_ uiView: UIView, context: Context) {}
+}
+
+/// The system broadcast picker's SwiftUI host (v0.45.0):
+/// RPSystemBroadcastPickerView is the ONLY door to a
+/// ReplayKit broadcast — tapping it presents iOS's own
+/// broadcast UI (the consent surface), with our extension
+/// preselected via preferredExtension, and the operator
+/// starts the broadcast there. The microphone button is
+/// off: the call already has the operator's voice through
+/// its own hearing path; the broadcast is for the screen.
+private struct BroadcastPickerHost: UIViewRepresentable {
+    func makeUIView(context: Context) -> RPSystemBroadcastPickerView {
+        let picker = RPSystemBroadcastPickerView(
+            frame: CGRect(x: 0, y: 0, width: 50, height: 50))
+        picker.preferredExtension = "com.startekenterprises.gus.broadcast"
+        picker.showsMicrophoneButton = false
+        return picker
+    }
+
+    func updateUIView(_ uiView: RPSystemBroadcastPickerView, context: Context) {}
 }
