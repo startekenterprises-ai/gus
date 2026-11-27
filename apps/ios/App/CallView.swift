@@ -38,6 +38,14 @@ struct CallView: View {
     let autoStart: Bool
     @Environment(\.dismiss) private var dismiss
     @StateObject private var call = CallSession()
+    /// The persona pick, observed (v0.32.0): the name under
+    /// the face and the face itself derive from LocalBrain
+    /// at render time; this is what makes a mid-visit
+    /// carousel pick land on this screen the moment the
+    /// sheet closes — through v0.31.0 the pick only showed
+    /// once the call's own state happened to redraw things,
+    /// and no name was shown here at all (Glenn, 2026-11-27).
+    @ObservedObject private var personaSelection = PersonaSelection.shared
     @State private var didAutoStart = false
     @State private var showPersonaPicker = false
 
@@ -85,6 +93,23 @@ struct CallView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Choose persona")
                 .padding(.top, 12)
+
+                // Who you're talking to (v0.32.0): the
+                // active persona's name under the face,
+                // always on this screen — a call is the one
+                // place the operator couldn't tell whose
+                // voice they were hearing (Glenn, 2026-11-27).
+                // The name is LocalBrain.activeDisplayName,
+                // the one derivation every surface shares,
+                // and it moves with the pick (see
+                // personaSelection above).
+                Text(LocalBrain.activeDisplayName)
+                    .font(.title3)
+                    .fontWeight(.semibold)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .frame(maxWidth: .infinity)
 
                 // Layout discipline (v0.17.0): every text on
                 // this screen is width-flexible — it wraps or
@@ -446,10 +471,44 @@ private struct CallControlButton: View {
 /// transforms. If any of this ever threatened the call,
 /// the face goes, not the call (Glenn's hard rule).
 ///
+/// v0.32.0 polish (Glenn: the flap was "not very pretty"):
+/// the mouth no longer chases the raw level. A MouthFlap
+/// smoother sits between the published level and the
+/// ellipse — fast attack, slower decay, advanced once per
+/// tick — so the mouth moves at a syllable-like cadence
+/// instead of jittering with every RMS step; the vertical
+/// travel is shorter; the opening is eased (small levels
+/// barely part the lips); and the patch itself is softer —
+/// lower opacity, a whisper of blur on its edge — so it
+/// reads as part of the face rather than pasted on. The
+/// mouth centers are measured now, too (LocalBrain's
+/// PersonaFace note). Still an amplitude flap, honestly:
+/// prettier, not a viseme engine.
+///
 /// Each face's crop and mouth calibration lives in
 /// PersonaFace (LocalBrain.swift, beside the persona it
 /// belongs to); every constant is eyeballed until Glenn
 /// sees it on his phone and says it is right.
+/// The flap's memory (v0.32.0): one smoothed level,
+/// advanced once per TimelineView tick toward the live
+/// target. Attack (target above the smoothed value) takes
+/// a big step per tick — a syllable's onset lands at once;
+/// decay takes a small one, so the mouth settles shut over
+/// several ticks instead of snapping. Mutating this inside
+/// the tick closure is safe: nothing here publishes, so no
+/// view invalidation rides on it — the TimelineView's own
+/// clock is the redraw.
+private final class MouthFlap {
+    private(set) var smoothed: CGFloat = 0
+
+    func advance(toward target: CGFloat) -> CGFloat {
+        let step: CGFloat = target > smoothed ? 0.55 : 0.24
+        smoothed += (target - smoothed) * step
+        if abs(target - smoothed) < 0.002 { smoothed = target }
+        return smoothed
+    }
+}
+
 private struct AvatarFaceView: View {
     let level: Float
     let speaking: Bool
@@ -457,12 +516,17 @@ private struct AvatarFaceView: View {
 
     @State private var breathe = false
     @State private var pulse = false
+    @StateObject private var flap = MouthFlap()
+    /// The pick, observed (v0.32.0) — the face re-derives
+    /// the moment a persona is picked, like every other
+    /// surface (see CallView's note).
+    @ObservedObject private var personaSelection = PersonaSelection.shared
 
     /// v0.20.0: the stock avatar pick (Settings → Avatar),
     /// the same key the Mac keeps — "girl" shows AvatarGirl,
     /// anything else is the boy in Avatar, the default.
     /// v0.31.0: it only decides the face when no persona is
-    /// active (or the everyday assistant, who shares the
+    /// active (or the Gus persona, who shares the
     /// boy) — a persona's own portrait outranks it.
     @AppStorage("gus.avatar.stock") private var stockAvatar = "boy"
     private var face: PersonaFace {
@@ -521,10 +585,19 @@ private struct AvatarFaceView: View {
                     .frame(width: rendered, height: rendered)
                     .offset(x: -face.cropOriginX * rendered, y: -face.cropOriginY * rendered)
                 TimelineView(.periodic(from: .now, by: 1.0 / 12.0)) { context in
+                    // One smoother step per tick (v0.32.0):
+                    // the ellipse follows the flap's memory,
+                    // never the raw published level — and the
+                    // spring that used to animate the raw
+                    // level's steps is gone; it was half the
+                    // jitter.
+                    let tickLevel = flap.advance(toward: speaking ? CGFloat(level) : 0)
                     ZStack {
                         Ellipse()
-                            .fill(Color(red: 0.25, green: 0.13, blue: 0.04).opacity(0.85))
-                            .frame(width: s * face.mouthWidth, height: mouthHeight(at: context.date))
+                            .fill(Color(red: 0.25, green: 0.13, blue: 0.04).opacity(0.78))
+                            .frame(width: s * face.mouthWidth,
+                                   height: mouthHeight(at: context.date, level: tickLevel))
+                            .blur(radius: max(1, s * 0.008))
                             .position(x: s * face.mouthCenterX, y: s * face.mouthCenterY)
                     }
                     .frame(width: s, height: s)
@@ -533,21 +606,23 @@ private struct AvatarFaceView: View {
         }
         .frame(width: side, height: side)
         .clipShape(Circle())
-        .animation(.spring(response: 0.16, dampingFraction: 0.5), value: level)
     }
 
-    /// Mouth height for a tick: closed is a thin line; the
-    /// published level opens it proportionally (the
-    /// fractions scale with the face), with a gentle
-    /// flutter while speech is sounding so a long sentence
-    /// does not hold a statue's mouth. Pure view math on
-    /// the published level — the audio path never hears
-    /// about any of this.
-    private func mouthHeight(at date: Date) -> CGFloat {
-        let open = CGFloat(level)
-        guard open > 0.01 else { return side * 0.021 }
-        let flutter = 0.94 + 0.06 * sin(date.timeIntervalSinceReferenceDate * 11)
-        return side * (0.021 + open * 0.085 * CGFloat(flutter))
+    /// Mouth height for a tick, from the SMOOTHED level:
+    /// closed is a thinner line than v0.31.0's, the travel
+    /// is shorter (0.058 of the face over the line, was
+    /// 0.085), and the opening is eased — a smoothstep over
+    /// the level, so quiet syllables barely part the lips
+    /// and only real volume opens the mouth. A slow, small
+    /// flutter rides on top so a held vowel doesn't freeze
+    /// the mouth mid-shape. Pure view math — the audio path
+    /// never hears about any of this.
+    private func mouthHeight(at date: Date, level tickLevel: CGFloat) -> CGFloat {
+        guard tickLevel > 0.004 else { return side * 0.018 }
+        let clamped = min(max(tickLevel, 0), 1)
+        let eased = clamped * clamped * (3 - 2 * clamped)
+        let flutter = 0.97 + 0.03 * sin(date.timeIntervalSinceReferenceDate * 7)
+        return side * (0.018 + eased * 0.058 * CGFloat(flutter))
     }
 }
 

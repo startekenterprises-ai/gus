@@ -84,7 +84,8 @@ struct SettingsView: View {
                 // what the brain loads with (LocalBrain's
                 // customPrompt, read at brain load like the
                 // demo-pitch choice). The shelf's order is
-                // Glenn's: security personas first.
+                // Glenn's: Gus first, the Devil last (the
+                // roster consolidated to six in v0.32.0).
                 Section {
                     ForEach(LocalBrain.personaStarters) { starter in
                         Button {

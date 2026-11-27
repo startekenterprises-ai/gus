@@ -143,7 +143,10 @@ fi
 # its own imageset (PersonaFace in LocalBrain.swift names them:
 # the active persona's face is what the call screen and the
 # picker show). One loop, the established pattern per face.
-for PERSONA_FACE in Priest Devil Therapist Debbie Doctor Email Shield; do
+# v0.32.0: the roster consolidated — the Email and Shield faces
+# retired with their starters (folded into the one Gus persona,
+# who wears the stock boy above); five persona portraits remain.
+for PERSONA_FACE in Priest Devil Therapist Debbie Doctor; do
   PERSONA_B64="$PROJECT_DIR/App/Assets.xcassets/Avatar$PERSONA_FACE.imageset/Avatar$PERSONA_FACE.png.b64"
   if [ -f "$PERSONA_B64" ]; then
     base64 -d < "$PERSONA_B64" > "$PROJECT_DIR/App/Assets.xcassets/Avatar$PERSONA_FACE.imageset/Avatar$PERSONA_FACE.png" \

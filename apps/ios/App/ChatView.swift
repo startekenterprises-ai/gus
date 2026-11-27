@@ -45,6 +45,14 @@ struct ChatView: View {
     private static let tabBarClearance: CGFloat = 72
 
     @StateObject private var model = ChatModel()
+    /// The persona pick, observed (v0.32.0): the header's
+    /// face and name derive from LocalBrain at render time,
+    /// and this observation is what makes a carousel pick
+    /// redraw them the moment it lands — through v0.31.0
+    /// nothing here watched the pick, so the name lagged
+    /// until the next message forced a redraw (Glenn,
+    /// 2026-11-27).
+    @ObservedObject private var personaSelection = PersonaSelection.shared
     @State private var expandedExchanges: Set<UUID> = []
     @FocusState private var composerFocused: Bool
     /// The call, presented as a full-screen cover from the
@@ -215,9 +223,14 @@ struct ChatView: View {
         }
     }
 
+    /// Who is on, in the name every surface shows — the
+    /// one derivation in LocalBrain (v0.32.0): the starter's
+    /// name, "Gus" for General, "Custom" for edited words.
+    /// (Through v0.31.0 this view kept its own copy of the
+    /// rule and called the no-persona state "General"; the
+    /// call screen showed no name at all.)
     private var activePersonaDisplayName: String {
-        if let starter = LocalBrain.activeStarter { return starter.name }
-        return LocalBrain.customPrompt == nil ? "General" : "Custom"
+        LocalBrain.activeDisplayName
     }
 
     private func debaterFace(slot: Int) -> some View {
@@ -1078,7 +1091,7 @@ final class ChatModel: ObservableObject {
 
     /// The two debaters, resolved from the slot ids —
     /// exactly two while debate is on (the defaults are
-    /// Glenn's pairing: the AI priest and the Devil).
+    /// Glenn's pairing: the Priest and the Devil).
     private var debateStarters: [PersonaStarter]? {
         guard debateActive else { return nil }
         let pair = [debateLeftID, debateRightID].compactMap { LocalBrain.starter(id: $0) }

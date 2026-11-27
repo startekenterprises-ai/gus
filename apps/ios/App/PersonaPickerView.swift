@@ -38,8 +38,18 @@ struct PersonaPickerView: View {
     var dismissOnSelect = false
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var library = ModelLibrary.shared
+    /// v0.32.0: the pick is observed, not snapshotted. This
+    /// view used to copy LocalBrain.customPrompt into @State
+    /// on appear — its own cells stayed right, but every
+    /// OTHER surface kept its stale copy. The picker now
+    /// reads the same observable the headers and the call
+    /// screen read, so one pick moves every highlight, face,
+    /// and name in the same beat.
+    @ObservedObject private var selection = PersonaSelection.shared
     @AppStorage("gus.avatar.stock") private var stockAvatar = "boy"
-    @State private var currentPrompt: String? = LocalBrain.customPrompt
+
+    /// The stored pick, mirrored live by PersonaSelection.
+    private var currentPrompt: String? { selection.prompt }
     /// A paired brain the picked persona wants that isn't
     /// on the phone yet — drives the download card.
     @State private var downloadOffer: ModelDownloadEntry?
@@ -86,7 +96,6 @@ struct PersonaPickerView: View {
             }
             .padding(16)
         }
-        .onAppear { currentPrompt = LocalBrain.customPrompt }
         // The offered download landed: if the persona that
         // wanted this brain is still picked, switch to it
         // on our own — the operator shouldn't have to come
@@ -153,8 +162,11 @@ struct PersonaPickerView: View {
     // MARK: - Picking
 
     private func choose(_ starter: PersonaStarter?) {
+        // The write publishes through PersonaSelection (the
+        // setter's job since v0.32.0), so this view's
+        // highlight — and every other surface's face and
+        // name — moves with the pick, no local copy to sync.
         LocalBrain.customPrompt = starter?.prompt
-        currentPrompt = LocalBrain.customPrompt
         switchNote = nil
         downloadOffer = nil
         if let starter {
@@ -301,8 +313,12 @@ struct PersonaAvatarView: View {
 /// The face the app wears right now — the active persona's
 /// own portrait, or the stock pick when no starter is on
 /// (PersonaFace.current holds the rule). Chat's top-center
-/// avatar is this view, large.
+/// avatar is this view, large. v0.32.0: it observes
+/// PersonaSelection, so the face changes in the same beat
+/// as the pick — through v0.31.0 it only re-derived when
+/// some unrelated state redrew the host.
 struct ActivePersonaAvatarView: View {
+    @ObservedObject private var selection = PersonaSelection.shared
     @AppStorage("gus.avatar.stock") private var stockAvatar = "boy"
     var side: CGFloat = 30
 

@@ -34,24 +34,55 @@ struct RootView: View {
                 // the Settings doors to them stay where they
                 // were. Tabs: Chat, Activity, Shield,
                 // Personas, Settings.
+                //
+                // Tab-bar visibility (v0.32.0): nothing in
+                // this app ever asks to hide the bar — no
+                // toolbar placement, no appearance hack —
+                // yet on 0.30.0+ it sometimes vanished and
+                // only a fresh presentation cycle (Glenn's
+                // photo-picker open-and-cancel) brought it
+                // back. The bar is the floating iOS 26-style
+                // bar, which the system minimizes
+                // contextually; after the call's
+                // full-screen cover (or a stack of sheets)
+                // dismisses, that minimized state can stick
+                // instead of restoring, and a new
+                // presentation forces the toolbar
+                // reconciliation that unsticks it — which is
+                // exactly why the picker trick worked. The
+                // fix pins both ends: the TabView refuses
+                // contextual minimizing outright (iOS 26+;
+                // older systems have no minimize behavior
+                // to refuse), and every tab root asserts the
+                // bar visible, so whichever tab the operator
+                // returns to re-asserts it the moment a
+                // presentation leaves it hidden. The
+                // assertions live here, on the five roots —
+                // the only places they're set, on purpose.
                 TabView {
                     ChatView()
+                        .toolbar(.visible, for: .tabBar)
                         .tabItem { Label("Chat", systemImage: "message") }
                     ActivityView()
+                        .toolbar(.visible, for: .tabBar)
                         .tabItem { Label("Activity", systemImage: "list.bullet.rectangle") }
                     NavigationStack {
                         ShieldLogView()
                     }
+                    .toolbar(.visible, for: .tabBar)
                     .tabItem { Label("Shield", systemImage: "shield") }
                     NavigationStack {
                         PersonaPickerView()
                             .navigationTitle("Personas")
                             .navigationBarTitleDisplayMode(.inline)
                     }
+                    .toolbar(.visible, for: .tabBar)
                     .tabItem { Label("Personas", systemImage: "person.2") }
                     SettingsView(model: session)
+                        .toolbar(.visible, for: .tabBar)
                         .tabItem { Label("Settings", systemImage: "gearshape") }
                 }
+                .tabBarNeverMinimizes()
                 // Kokoro prepares itself (Glenn, 2026-11-20 —
                 // no "Prepare voice" tap): warm-up starts the
                 // moment the signed-in shell opens, on the
@@ -93,5 +124,30 @@ struct RootView: View {
                 watchBuilder.refreshNow()
             }
         }
+    }
+}
+
+/// The TabView half of the v0.32.0 tab-bar fix (see the
+/// TabView comment in RootView): the floating bar's
+/// contextual minimize behavior is iOS 26's, and the app
+/// deploys to iOS 17, so the refusal is availability-
+/// wrapped — on older systems there is no minimize
+/// behavior and the modifier is a pass-through. `.never`
+/// is the whole point: the bar is this app's way home,
+/// and it does not get to wander off on scroll or after a
+/// presentation dismisses.
+private struct TabBarNeverMinimizes: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.tabBarMinimizeBehavior(.never)
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    fileprivate func tabBarNeverMinimizes() -> some View {
+        modifier(TabBarNeverMinimizes())
     }
 }
