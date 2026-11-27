@@ -24,10 +24,13 @@ final class GusAppDelegate: NSObject, NSApplicationDelegate {
     private var setupWindow: SetupWindowController?
     private var mainWindow: MainWindowController?
     private var statusTimer: Timer?
-    /// v0.15.6: the periodic auto-update check, and the guard
-    /// that keeps two update prompts from stacking.
+    /// The periodic auto-update check (first prompt v0.15.6;
+    /// the full Sparkle-shaped flow v0.19.0), the guard that
+    /// keeps two update prompts from stacking, and the guard
+    /// that keeps two background downloads from racing.
     private var updateTimer: Timer?
     private var updatePromptVisible = false
+    private var updateDownloadInFlight = false
 
     private let labels = [
         "com.startekenterprises.gus.control-plane",
@@ -92,6 +95,22 @@ final class GusAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Install-on-quit (v0.19.0): an update the operator
+        // armed from the prompt (or automatic updates armed
+        // silently) swaps in now, synchronously, and the new
+        // app opens as this one exits. The cached DMG is
+        // re-verified against the release checksum before
+        // anything moves; a failed verification or swap leaves
+        // the current install exactly as it was, and the record
+        // is cleared either way — a quit never loops on a
+        // broken update.
+        if let armed = armedInstallOnQuit() {
+            clearInstallOnQuit()
+            if verifyDMG(at: armed.dmg, sha256: armed.info.sha256),
+               swapInVerifiedUpdate(armed.info, dmg: armed.dmg) == nil {
+                relaunchAfterSwap()
+            }
+        }
         helperProcess?.terminate()
     }
 
@@ -347,35 +366,154 @@ final class GusAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// v0.15.6: the Muse-style update prompt (Glenn's ask,
-    /// 2026-11-19) — when a check finds a newer release, GUS
-    /// offers it unasked: a new version is ready, Install and
-    /// Relaunch or Later. Install runs the EXISTING one-click
-    /// machinery (installUpdate below: download, sha256 verify,
-    /// swap, relaunch — state never touched); nothing new was
-    /// built to install with. Later records the version in
-    /// UserDefaults and that version is never offered again —
-    /// a still-newer release offers itself normally. Unlike
-    /// the menu's manual check, an automatic check that finds
-    /// nothing (or can't reach GitHub) stays silent.
+    // MARK: Automatic updates (v0.19.0 — the Sparkle shape,
+    // Glenn's ask 2026-11-27, modeled on the Muse updater
+    // dialog in his screenshot; the v0.15.6 prompt it replaces
+    // offered the install before anything was downloaded).
+    // A check that finds a newer release downloads the DMG in
+    // the background and verifies its checksum FIRST; only a
+    // verified DMG already on disk in the cache is ever
+    // offered, in a prompt with Skip This Version / Install
+    // on Quit / Install and Relaunch and the "Automatically
+    // download and install updates in the future" checkbox.
+    // With that preference on (default off), there is no
+    // prompt at all: the verified download is armed to swap
+    // in when the app quits (applicationWillTerminate above).
+    // Every failure in this path — network, missing assets,
+    // checksum mismatch — is silent: no prompt, no nagging.
+    // The menu's manual check still reports in words.
+
+    private var skippedUpdateVersion: String? {
+        get { UserDefaults.standard.string(forKey: "gus.updateSkippedVersion") }
+        set { UserDefaults.standard.set(newValue, forKey: "gus.updateSkippedVersion") }
+    }
+
+    private var automaticUpdates: Bool {
+        get { UserDefaults.standard.bool(forKey: "gus.updateAutomatically") }
+        set { UserDefaults.standard.set(newValue, forKey: "gus.updateAutomatically") }
+    }
+
+    private var updateCacheDir: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("GUS/updates", isDirectory: true)
+    }
+
+    private func cachedDMGURL(for version: String) -> URL {
+        updateCacheDir.appendingPathComponent(version, isDirectory: true)
+            .appendingPathComponent("GUS-\(version).dmg")
+    }
+
+    private func pruneUpdateCache(keeping version: String) {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(at: updateCacheDir, includingPropertiesForKeys: nil) else { return }
+        for entry in entries where entry.lastPathComponent != version {
+            try? fm.removeItem(at: entry)
+        }
+    }
+
+    /// The install-on-quit record: a verified update's version,
+    /// cached DMG path and checksum, persisted so the arm
+    /// survives relaunches until it lands (or is cleared by
+    /// any successful install).
+    private func armInstallOnQuit(_ info: ReleaseInfo, dmg: URL) {
+        UserDefaults.standard.set(
+            ["version": info.version, "path": dmg.path, "sha256": info.sha256],
+            forKey: "gus.updateInstallOnQuit")
+    }
+
+    private func clearInstallOnQuit() {
+        UserDefaults.standard.removeObject(forKey: "gus.updateInstallOnQuit")
+    }
+
+    private func armedInstallOnQuit() -> (info: ReleaseInfo, dmg: URL)? {
+        guard let record = UserDefaults.standard.dictionary(forKey: "gus.updateInstallOnQuit"),
+              let version = record["version"] as? String,
+              let path = record["path"] as? String,
+              let sha = record["sha256"] as? String else { return nil }
+        let dmg = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: dmg.path) else { return nil }
+        return (ReleaseInfo(version: version, dmgURL: "", sha256: sha), dmg)
+    }
+
     private func autoCheckForUpdates() {
-        guard !updatePromptVisible else { return }
+        guard !updatePromptVisible, !updateDownloadInFlight else { return }
         fetchLatestRelease { [weak self] info in
             guard let self, let info else { return }
             guard self.isNewer(info.version, than: self.appVersion) else { return }
-            guard UserDefaults.standard.string(forKey: "gus.updateDismissedVersion") != info.version else { return }
+            // A skipped version is never offered again; a
+            // still-newer release offers itself normally.
+            guard self.skippedUpdateVersion != info.version else { return }
+            // The control plane's staged update owns this
+            // version if it staged one — never double-prompt.
+            guard self.stagedUpdate()?.version != info.version else { return }
+            // Already armed to install on quit: nothing to do.
+            guard self.armedInstallOnQuit()?.info.version != info.version else { return }
+            let cached = self.cachedDMGURL(for: info.version)
+            if FileManager.default.fileExists(atPath: cached.path) {
+                // A cache entry is only ever offered after it
+                // re-verifies (hashed off the main queue).
+                DispatchQueue.global(qos: .utility).async { [weak self] in
+                    guard let self, self.verifyDMG(at: cached, sha256: info.sha256) else { return }
+                    self.offerVerifiedUpdate(info, dmg: cached)
+                }
+                return
+            }
+            self.updateDownloadInFlight = true
+            self.pruneUpdateCache(keeping: info.version)
+            self.downloadAndVerify(info, into: cached.deletingLastPathComponent()) { [weak self] dmg in
+                guard let self else { return }
+                self.updateDownloadInFlight = false
+                guard let dmg else { return } // silent: no prompt, no nagging
+                self.offerVerifiedUpdate(info, dmg: dmg)
+            }
+        }
+    }
+
+    /// A newer release's DMG is on disk and verified: act on
+    /// it. Automatic updates arm it for quit with no prompt;
+    /// otherwise the Sparkle-shaped prompt asks.
+    private func offerVerifiedUpdate(_ info: ReleaseInfo, dmg: URL) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            guard !self.updatePromptVisible else { return }
+            guard self.armedInstallOnQuit()?.info.version != info.version else { return }
+            if self.automaticUpdates {
+                self.armInstallOnQuit(info, dmg: dmg)
+                return
+            }
             self.updatePromptVisible = true
             let alert = NSAlert()
-            alert.messageText = "A new version of GUS is ready"
-            alert.informativeText = "GUS \(info.version) is ready to install — you are running GUS \(self.appVersion). GUS.app will download the release, verify its checksum, swap itself, and relaunch. The services restart on the new version; your state (vault, policy, jobs, receipts) is never touched by an update."
+            alert.messageText = "A new version of GUS is ready to install!"
+            alert.informativeText = "GUS \(info.version) has been downloaded and is ready to use. Would you like to install it and relaunch GUS now?"
+            let autoCheckbox = NSButton(checkboxWithTitle: "Automatically download and install updates in the future", target: nil, action: nil)
+            autoCheckbox.state = self.automaticUpdates ? .on : .off
+            alert.accessoryView = autoCheckbox
+            // NSAlert buttons stack right-to-left in the order
+            // added (the first added is the default, at the
+            // right edge), so adding in this order makes the
+            // row read Skip This Version / Install on Quit /
+            // Install and Relaunch, as in Sparkle's dialog.
             alert.addButton(withTitle: "Install and Relaunch")
-            alert.addButton(withTitle: "Later")
+            alert.addButton(withTitle: "Install on Quit")
+            alert.addButton(withTitle: "Skip This Version")
             let response = alert.runModal()
             self.updatePromptVisible = false
-            if response == .alertFirstButtonReturn {
-                self.installUpdate(info)
-            } else {
-                UserDefaults.standard.set(info.version, forKey: "gus.updateDismissedVersion")
+            // The checkbox is a standing preference, saved
+            // whichever way the prompt was answered.
+            self.automaticUpdates = autoCheckbox.state == .on
+            switch response {
+            case .alertFirstButtonReturn:
+                if let failure = self.swapInVerifiedUpdate(info, dmg: dmg) {
+                    self.showAlert(title: "Update failed", text: "\(failure) Nothing was changed.")
+                    return
+                }
+                self.clearInstallOnQuit()
+                self.relaunchAfterSwap()
+                NSApp.terminate(nil)
+            case .alertSecondButtonReturn:
+                self.armInstallOnQuit(info, dmg: dmg)
+            default:
+                self.skippedUpdateVersion = info.version
             }
         }
     }
@@ -429,86 +567,132 @@ final class GusAppDelegate: NSObject, NSApplicationDelegate {
         }.resume()
     }
 
-    /// Download → verify sha256 → mount → stage the new app beside
-    /// the old one → swap → boot the services out (the relaunched
-    /// app bootstraps them onto the new payload) → relaunch. Any
-    /// failure before the swap leaves the running install exactly
-    /// as it was; a backup copy survives until the new app exists.
-    private func installUpdate(_ info: ReleaseInfo) {
-        guard let dmgURL = URL(string: info.dmgURL) else { return }
+    /// Install stage 1 (split out v0.19.0): download the
+    /// release DMG into `directory` and verify its sha256
+    /// against the release's published checksum. The completion
+    /// fires on a background queue with the verified file's
+    /// URL, or nil on ANY failure — no UI in here; each caller
+    /// decides whether a failure deserves an alert (the manual
+    /// and staged flows) or silence (automatic checks).
+    private func downloadAndVerify(_ info: ReleaseInfo, into directory: URL,
+                                   completion: @escaping (URL?) -> Void) {
+        guard let dmgURL = URL(string: info.dmgURL) else { completion(nil); return }
         let fm = FileManager.default
-        let work = fm.temporaryDirectory.appendingPathComponent("gus-update-\(info.version)")
-        try? fm.removeItem(at: work)
-        do { try fm.createDirectory(at: work, withIntermediateDirectories: true) } catch {
-            showAlert(title: "Update failed", text: "Couldn't create a work folder: \(error.localizedDescription). Nothing was changed.")
-            return
-        }
-        statusMenuItem.title = "GUS: downloading update v\(info.version)…"
-        URLSession.shared.downloadTask(with: dmgURL) { [weak self] tmp, _, error in
-            guard let self else { return }
-            func fail(_ why: String) {
-                DispatchQueue.main.async {
-                    self.refreshStatus()
-                    self.showAlert(title: "Update failed", text: "\(why) Nothing was changed.")
-                }
-            }
-            guard error == nil, let tmp else { fail("The download didn't complete."); return }
-            let dmg = work.appendingPathComponent("GUS-\(info.version).dmg")
+        try? fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        URLSession.shared.downloadTask(with: dmgURL) { tmp, _, error in
+            guard error == nil, let tmp else { completion(nil); return }
+            let dmg = directory.appendingPathComponent("GUS-\(info.version).dmg")
             do {
+                if fm.fileExists(atPath: dmg.path) { try fm.removeItem(at: dmg) }
                 try fm.moveItem(at: tmp, to: dmg)
                 let data = try Data(contentsOf: dmg)
                 let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-                guard digest == info.sha256.lowercased() else {
-                    fail("The downloaded DMG's checksum does not match the release's published sha256 (\(info.sha256.prefix(12))…).")
-                    return
-                }
+                guard digest == info.sha256.lowercased() else { completion(nil); return }
             } catch {
-                fail("Couldn't verify the download: \(error.localizedDescription).")
-                return
+                completion(nil); return
             }
-            // Mount read-only at a known mountpoint.
-            let mount = work.appendingPathComponent("mount")
-            try? fm.createDirectory(at: mount, withIntermediateDirectories: true)
-            let attach = self.runProcess("/usr/bin/hdiutil", ["attach", "-nobrowse", "-readonly", "-mountpoint", mount.path, dmg.path])
-            guard attach.status == 0 else { fail("Couldn't open the disk image."); return }
-            defer { _ = self.runProcess("/usr/bin/hdiutil", ["detach", mount.path, "-force"]) }
-            let newApp = mount.appendingPathComponent("GUS.app")
-            guard fm.fileExists(atPath: newApp.path) else { fail("The disk image doesn't contain GUS.app."); return }
-            // Stage beside the target, keep a backup, then swap.
-            let target = Bundle.main.bundlePath
-            let staged = work.appendingPathComponent("GUS.app")
-            let backup = work.appendingPathComponent("GUS-backup.app")
+            completion(dmg)
+        }.resume()
+    }
+
+    /// Verify a DMG already on disk (the automatic flow's
+    /// cache) against a release checksum.
+    private func verifyDMG(at url: URL, sha256: String) -> Bool {
+        guard let data = try? Data(contentsOf: url) else { return false }
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        return digest == sha256.lowercased()
+    }
+
+    /// Install stage 2 (split out v0.19.0): mount a VERIFIED
+    /// DMG → stage the new app beside the old one → swap →
+    /// boot the services out (the relaunched app bootstraps
+    /// them onto the new payload). Synchronous; returns nil on
+    /// success or the failure in words. Any failure before the
+    /// swap leaves the running install exactly as it was; a
+    /// backup copy survives until the new app exists.
+    /// Relaunching is the caller's job.
+    private func swapInVerifiedUpdate(_ info: ReleaseInfo, dmg: URL) -> String? {
+        let fm = FileManager.default
+        let work = fm.temporaryDirectory.appendingPathComponent("gus-update-swap-\(info.version)")
+        try? fm.removeItem(at: work)
+        do { try fm.createDirectory(at: work, withIntermediateDirectories: true) } catch {
+            return "Couldn't create a work folder: \(error.localizedDescription)."
+        }
+        // Mount read-only at a known mountpoint.
+        let mount = work.appendingPathComponent("mount")
+        try? fm.createDirectory(at: mount, withIntermediateDirectories: true)
+        let attach = runProcess("/usr/bin/hdiutil", ["attach", "-nobrowse", "-readonly", "-mountpoint", mount.path, dmg.path])
+        guard attach.status == 0 else { return "Couldn't open the disk image." }
+        defer { _ = runProcess("/usr/bin/hdiutil", ["detach", mount.path, "-force"]) }
+        let newApp = mount.appendingPathComponent("GUS.app")
+        guard fm.fileExists(atPath: newApp.path) else { return "The disk image doesn't contain GUS.app." }
+        // Stage beside the target, keep a backup, then swap.
+        let target = Bundle.main.bundlePath
+        let staged = work.appendingPathComponent("GUS.app")
+        let backup = work.appendingPathComponent("GUS-backup.app")
+        do {
+            try fm.copyItem(at: newApp, to: staged)
+            if fm.fileExists(atPath: target) { try fm.copyItem(at: URL(fileURLWithPath: target), to: backup) }
+            try fm.removeItem(at: URL(fileURLWithPath: target))
             do {
-                try fm.copyItem(at: newApp, to: staged)
-                if fm.fileExists(atPath: target) { try fm.copyItem(at: URL(fileURLWithPath: target), to: backup) }
-                try fm.removeItem(at: URL(fileURLWithPath: target))
-                do {
-                    try fm.moveItem(at: staged, to: URL(fileURLWithPath: target))
-                } catch {
-                    // Restore the backup — never leave /Applications empty.
-                    if fm.fileExists(atPath: backup.path) {
-                        try? fm.moveItem(at: backup, to: URL(fileURLWithPath: target))
-                    }
-                    throw error
-                }
+                try fm.moveItem(at: staged, to: URL(fileURLWithPath: target))
             } catch {
-                fail("Couldn't swap in the new app: \(error.localizedDescription).")
-                return
+                // Restore the backup — never leave /Applications empty.
+                if fm.fileExists(atPath: backup.path) {
+                    try? fm.moveItem(at: backup, to: URL(fileURLWithPath: target))
+                }
+                throw error
             }
-            try? fm.removeItem(atPath: self.pendingUpdatePath)
-            // Boot the services out; the relaunched app bootstraps
-            // them onto the new payload (ensureServicesRunning).
-            for label in self.labels {
-                _ = self.launchctl(["bootout", "\(self.domain)/\(label)"])
+        } catch {
+            return "Couldn't swap in the new app: \(error.localizedDescription)."
+        }
+        try? fm.removeItem(atPath: pendingUpdatePath)
+        // Boot the services out; the relaunched app bootstraps
+        // them onto the new payload (ensureServicesRunning).
+        for label in labels {
+            _ = launchctl(["bootout", "\(domain)/\(label)"])
+        }
+        return nil
+    }
+
+    /// The relaunch half of every install path: a detached
+    /// shell reopens the (new) app once this process is gone.
+    private func relaunchAfterSwap() {
+        let target = Bundle.main.bundlePath
+        let relaunch = Process()
+        relaunch.executableURL = URL(fileURLWithPath: "/bin/sh")
+        relaunch.arguments = ["-c", "sleep 1; open \"\(target)\""]
+        try? relaunch.run()
+    }
+
+    /// The one-click install the menu's manual check and the
+    /// staged-update flow run: stage 1 into a scratch folder,
+    /// then stage 2, then relaunch — failures in words, and
+    /// any failure before the swap leaves the running install
+    /// exactly as it was.
+    private func installUpdate(_ info: ReleaseInfo) {
+        let work = FileManager.default.temporaryDirectory.appendingPathComponent("gus-update-\(info.version)")
+        statusMenuItem.title = "GUS: downloading update v\(info.version)…"
+        downloadAndVerify(info, into: work) { [weak self] dmg in
+            guard let self else { return }
+            guard let dmg else {
+                DispatchQueue.main.async {
+                    self.refreshStatus()
+                    self.showAlert(title: "Update failed", text: "The download didn't complete, or the downloaded DMG's checksum does not match the release's published sha256 (\(info.sha256.prefix(12))…). Nothing was changed.")
+                }
+                return
             }
             DispatchQueue.main.async {
-                let relaunch = Process()
-                relaunch.executableURL = URL(fileURLWithPath: "/bin/sh")
-                relaunch.arguments = ["-c", "sleep 1; open \"\(target)\""]
-                try? relaunch.run()
+                if let failure = self.swapInVerifiedUpdate(info, dmg: dmg) {
+                    self.refreshStatus()
+                    self.showAlert(title: "Update failed", text: "\(failure) Nothing was changed.")
+                    return
+                }
+                self.clearInstallOnQuit()
+                self.relaunchAfterSwap()
                 NSApp.terminate(nil)
             }
-        }.resume()
+        }
     }
 
     private func runProcess(_ path: String, _ args: [String]) -> (status: Int32, output: String) {

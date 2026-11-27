@@ -300,6 +300,40 @@ final class KokoroPlayer {
             }
         }
 
+        // The format this engine can actually render (v0.19.0 —
+        // the silent-call fix). Since v0.18.0 playback rides the
+        // call's shared engine, whose input node has voice
+        // processing enabled (CallSession.startHearing): the
+        // Voice Processing I/O unit then owns the engine's
+        // input AND output and fixes the whole graph's I/O
+        // format. A player connection at Kokoro's native
+        // 24 kHz does not match that format, so the graph
+        // cannot render it — the engine refuses to restart
+        // after the reconnect below and every sentence dies at
+        // engine.start(), silently (the throw lands in the
+        // speech engine's catch, which finishes the sentence
+        // and moves on: text renders, no sound, no crash).
+        // Before v0.18.0 the identical connection sang because
+        // the player's PRIVATE engine had no voice processing
+        // and the standard output path sample-rate-converts at
+        // the mixer. So: on a voice-processing engine, convert
+        // the samples to the graph's own output format and
+        // connect with THAT — playback still rides the same
+        // engine through the same output unit, so the echo
+        // canceller keeps its reference; only the format the
+        // samples are handed over in changes. Any other engine
+        // (private, or voice processing failed to enable)
+        // keeps the proven native-format path untouched.
+        var playBuffer = buffer
+        var playFormat = format
+        if engine.inputNode.isVoiceProcessingEnabled {
+            let graphFormat = engine.mainMixerNode.outputFormat(forBus: 0)
+            if graphFormat.sampleRate > 0, graphFormat != format {
+                playBuffer = try Self.convertBuffer(buffer, to: graphFormat)
+                playFormat = graphFormat
+            }
+        }
+
         if !attached {
             engine.attach(player)
             // Full scale, stated rather than assumed (v0.18.0):
@@ -307,7 +341,7 @@ final class KokoroPlayer {
             engine.mainMixerNode.outputVolume = 1.0
             attached = true
         }
-        if connectedFormat != format {
+        if connectedFormat != playFormat {
             // One-time (the first buffer): on the call's shared
             // engine this stop/start also pauses the mic tap
             // for a beat, before the first sentence is heard —
@@ -315,8 +349,8 @@ final class KokoroPlayer {
             // the engine immediately below.
             if engine.isRunning { engine.stop() }
             engine.disconnectNodeOutput(player)
-            engine.connect(player, to: engine.mainMixerNode, format: format)
-            connectedFormat = format
+            engine.connect(player, to: engine.mainMixerNode, format: playFormat)
+            connectedFormat = playFormat
         }
 
         lock.lock()
@@ -324,7 +358,7 @@ final class KokoroPlayer {
         playing = true
         lock.unlock()
 
-        player.scheduleBuffer(buffer) { [weak self] in
+        player.scheduleBuffer(playBuffer) { [weak self] in
             self?.fireFinish()
         }
         if !engine.isRunning {
@@ -332,6 +366,45 @@ final class KokoroPlayer {
         }
         player.play()
         onLevelChange?(level)
+    }
+
+    /// One-shot sample-rate/channel conversion of a whole
+    /// buffer (v0.19.0): Kokoro's 24 kHz mono floats into the
+    /// shared engine's graph format, so the player can connect
+    /// at a format the voice-processing output can render.
+    /// The input buffer is handed over exactly once, then the
+    /// stream is ended — the sentence is finite by design.
+    private static func convertBuffer(_ buffer: AVAudioPCMBuffer, to format: AVAudioFormat) throws -> AVAudioPCMBuffer {
+        guard let converter = AVAudioConverter(from: buffer.format, to: format) else {
+            throw NSError(domain: "GUS.Kokoro", code: 5, userInfo: [
+                NSLocalizedDescriptionKey: "Couldn't build an audio converter for the call's format.",
+            ])
+        }
+        let ratio = format.sampleRate / buffer.format.sampleRate
+        let capacity = AVAudioFrameCount((Double(buffer.frameLength) * ratio).rounded(.up)) + 1024
+        guard let out = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else {
+            throw NSError(domain: "GUS.Kokoro", code: 6, userInfo: [
+                NSLocalizedDescriptionKey: "Couldn't build a converted audio buffer.",
+            ])
+        }
+        var supplied = false
+        var conversionError: NSError?
+        let status = converter.convert(to: out, error: &conversionError) { _, inputStatus in
+            if supplied {
+                inputStatus.pointee = .endOfStream
+                return nil
+            }
+            supplied = true
+            inputStatus.pointee = .haveData
+            return buffer
+        }
+        if let conversionError { throw conversionError }
+        guard status != .error else {
+            throw NSError(domain: "GUS.Kokoro", code: 7, userInfo: [
+                NSLocalizedDescriptionKey: "Audio conversion for the call failed.",
+            ])
+        }
+        return out
     }
 
     func stop() {
