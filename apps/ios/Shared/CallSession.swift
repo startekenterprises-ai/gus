@@ -209,6 +209,11 @@ final class CallSession: NSObject, ObservableObject {
     // Speaking (audio segments).
     private var audioPlayer: AVAudioPlayer?
     private var segmentContinuation: CheckedContinuation<Void, Never>?
+    // Playback failures this call (v0.22.0): speakText counts
+    // what VoiceFailureLog gained while a sentence was being
+    // spoken; at two, the call screen says so in plain words
+    // instead of letting the call run silent to its end.
+    private var playbackFailuresThisCall = 0
 
     // MARK: - Lifecycle
 
@@ -219,6 +224,7 @@ final class CallSession: NSObject, ObservableObject {
         liveTranscript = ""
         turns = []
         lastSeq = 0
+        playbackFailuresThisCall = 0
         callMode = CallMode.preferred
         // The call's ONE audio engine (v0.18.0): this session's
         // hearing engine is handed to the speech engine, so
@@ -299,6 +305,22 @@ final class CallSession: NSObject, ObservableObject {
             // cancellation from the engine. Both, not either.
             try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
             try session.setActive(true)
+            // Speaker means speaker (v0.22.0): .defaultToSpeaker
+            // is a preference the system can quietly drop —
+            // engaging the engine's voice processing puts the
+            // session on the handset-voice path, and nothing in
+            // the call ever reasserted the route, so output
+            // could land in the receiver while every screen
+            // said "speaker" (at arm's length: silence, with
+            // the level meter still moving). Assert the port
+            // outright when speaker is on; startHearing
+            // reasserts it at every hearing start, and the
+            // route the system reports is written to the voice
+            // log, so a field report can see where sound went.
+            if isSpeakerOn {
+                try? session.overrideOutputAudioPort(.speaker)
+            }
+            VoiceFailureLog.shared.recordInfo("Call route: \(session.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ", ")) — speaker \(isSpeakerOn ? "on" : "off").")
         } catch {
             fail("The call's audio couldn't be set up: \(error.localizedDescription)")
             return false
@@ -395,6 +417,15 @@ final class CallSession: NSObject, ObservableObject {
 
     private func startHearing() {
         guard phase == .live, !isMuted else { return }
+        // Route reassertion (v0.22.0): hearing restarts ride
+        // session reactivations and route changes that can
+        // reset the output port — the speaker choice is
+        // restated here so it survives them (see
+        // prepareCallAudio for why the category option alone
+        // was never enough).
+        if isSpeakerOn {
+            try? AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
+        }
         recognitionGeneration += 1
         let generation = recognitionGeneration
         let input = audioEngine.inputNode
@@ -414,7 +445,13 @@ final class CallSession: NSObject, ObservableObject {
                 try input.setVoiceProcessingEnabled(true)
                 voiceProcessingEnabled = true
             } catch {
-                // Fall through with unprocessed input.
+                // Fall through with unprocessed input — but
+                // SAY so (v0.22.0): through v0.21.0 this catch
+                // was empty, so no field report could ever tell
+                // whether voice processing had engaged, which
+                // playback path that left the call on, or why
+                // the echo canceller was absent.
+                VoiceFailureLog.shared.recordInfo("Voice processing couldn't be enabled (\(error.localizedDescription)) — echo cancellation off for this call.")
             }
         }
         let format = input.outputFormat(forBus: 0)
@@ -944,10 +981,25 @@ final class CallSession: NSObject, ObservableObject {
         // sentence can never confirm against this one's first
         // partials.
         bargeCandidateText = ""
+        let failuresBefore = VoiceFailureLog.shared.failureCount
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             segmentContinuation = c
             speaker.speak(text) { [weak self] in
                 Task { @MainActor in self?.resumeSegment() }
+            }
+        }
+        // Playback-failure surfacing (v0.22.0): if the voice
+        // path recorded failures while this sentence was being
+        // spoken, count them; at two in one call, the call
+        // screen says so in plain words — with the actual
+        // error — instead of pretending the sentences played.
+        // One failure stays a log line (a single cut sentence
+        // can have innocent causes); two is a broken path.
+        let newFailures = VoiceFailureLog.shared.failureCount - failuresBefore
+        if newFailures > 0 {
+            playbackFailuresThisCall += newFailures
+            if playbackFailuresThisCall >= 2 {
+                speechNotice = "Voice playback failed: \(VoiceFailureLog.shared.latestFailure ?? "unknown error") The details are in Settings → About."
             }
         }
         lastSpokenText = text

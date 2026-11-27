@@ -15,6 +15,8 @@ struct SettingsView: View {
     @State private var kokoroVoice: KokoroVoice = KokoroVoice.selected
     @State private var callMode: CallMode = CallMode.preferred
     @State private var demoPitch: Bool = LocalBrain.demoPitchEnabled
+    @State private var personaText: String = LocalBrain.customPrompt ?? ""
+    @State private var voiceLogLines: [String] = []
     @State private var stockAvatar: String = UserDefaults.standard.string(forKey: "gus.avatar.stock") ?? "boy"
     @State private var shieldEnabled: Bool = ShieldSettings.enabled
     @State private var shieldPosture: ShieldPosture = ShieldSettings.posture
@@ -74,6 +76,43 @@ struct SettingsView: View {
                     Text("Call mode")
                 } footer: {
                     Text("On-device is the default: the call's brain and voice run on this iPhone and work with no network at all. Core mode hands the call to your GUS core — the workshop, with tools and the big model — exactly as before.")
+                }
+
+                // v0.22.0: persona starters — beginnings, not
+                // locks. A starter fills the prompt field; the
+                // field stays editable and whatever it holds is
+                // what the brain loads with (LocalBrain's
+                // customPrompt, read at brain load like the
+                // demo-pitch choice). The shelf's order is
+                // Glenn's: security personas first.
+                Section {
+                    ForEach(LocalBrain.personaStarters) { starter in
+                        Button {
+                            personaText = starter.prompt
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(starter.name)
+                                    .foregroundColor(.primary)
+                                Text(starter.blurb)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    TextEditor(text: $personaText)
+                        .frame(minHeight: 110)
+                        .onChange(of: personaText) { newValue in
+                            LocalBrain.customPrompt = newValue
+                        }
+                    if !personaText.isEmpty {
+                        Button("Use the general assistant instead") {
+                            personaText = ""
+                        }
+                    }
+                } header: {
+                    Text("Persona starters")
+                } footer: {
+                    Text("Tap a starter to fill the prompt, then make the words your own — nothing here is locked or hidden. Empty means the general assistant. The brain reads the prompt when the app starts, so a change lands on the next launch; while the Gmail demo pitch above is on, it wins.")
                 }
 
                 Section {
@@ -163,6 +202,53 @@ struct SettingsView: View {
                          : "Shield is off: on-device calls are not scanned and no receipts are written.")
                 }
 
+                // v0.22.0: About — "which version is this
+                // phone running?" had no answer anywhere in
+                // the app. Three plain rows: the app version
+                // and build from the bundle, and the brain a
+                // call would load. The voice path's own record
+                // rides here too (VoiceFailureLog): when a
+                // call goes silent, these lines — the path,
+                // the route, and any failure with its error —
+                // are what a report can quote.
+                Section {
+                    HStack {
+                        Text("Version")
+                        Spacer()
+                        Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?")
+                            .foregroundColor(.secondary)
+                    }
+                    HStack {
+                        Text("Build")
+                        Spacer()
+                        Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?")
+                            .foregroundColor(.secondary)
+                    }
+                    HStack {
+                        Text("Brain")
+                        Spacer()
+                        Text(ActiveBrain.resolved()?.plainName ?? "None downloaded")
+                            .foregroundColor(.secondary)
+                    }
+                    if !voiceLogLines.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Voice playback — the last things it did")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            ForEach(Array(voiceLogLines.suffix(6).enumerated()), id: \.offset) { _, line in
+                                Text(line)
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                } header: {
+                    Text("About")
+                } footer: {
+                    Text("The voice lines are the call path's own record — formats, route, and any playback failure with its error — kept so a silent call can say why.")
+                }
+
                 Section {
                     Button(role: .destructive) {
                         Task { await model.signOut() }
@@ -175,6 +261,7 @@ struct SettingsView: View {
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
+            .onAppear { voiceLogLines = VoiceFailureLog.shared.recentLines }
         }
     }
 

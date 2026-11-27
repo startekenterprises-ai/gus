@@ -120,6 +120,11 @@ final class KokoroSpeechEngine: SpeechEngine {
     /// own, exactly as before.
     init(engine: AVAudioEngine = AVAudioEngine()) {
         player = KokoroPlayer(engine: engine)
+        // Playback diagnostics (v0.22.0): the player's
+        // per-connection path note lands in the shared voice
+        // log — the record the call screen and Settings →
+        // About read when a call goes silent.
+        player.onDiagnostic = { line in VoiceFailureLog.shared.recordInfo(line) }
     }
     private let lock = NSLock()
     private var generation = 0
@@ -201,21 +206,19 @@ final class KokoroSpeechEngine: SpeechEngine {
 
         synthTask = Task { [weak self] in
             guard let self else { return }
+            // Stage 1 — synthesis. A failure here is the
+            // runtime's business, as it has always been: it
+            // marks Kokoro failed, so the failure surfaces in
+            // words (Settings shows it) instead of the engine
+            // being retried sentence after sentence.
+            let speech: PreparedSpeech
             do {
-                let speech: PreparedSpeech
                 if let preparation {
                     speech = try await preparation.value
                 } else {
                     let result = try await KokoroRuntime.shared.synthesize(text)
                     speech = PreparedSpeech(samples: result.samples, sampleRate: result.sampleRate)
                 }
-                guard self.isCurrent(gen) else { return }
-                try self.player.playSamples(speech.samples, sampleRate: speech.sampleRate) { [weak self] in
-                    self?.finish(gen)
-                }
-                // The sentence is making sound — tell the
-                // session, so it can line up the next one.
-                self.onPlaybackStarted?()
             } catch {
                 // A barge-in cancel is not an engine failure —
                 // never let it mark the runtime broken.
@@ -223,7 +226,33 @@ final class KokoroSpeechEngine: SpeechEngine {
                     KokoroRuntime.shared.noteSynthesisFailure(error)
                 }
                 self.finish(gen)
+                return
             }
+            guard self.isCurrent(gen) else { return }
+            // Stage 2 — playback (v0.22.0). A failure here is
+            // NOT a synthesis failure, and through v0.21.0 it
+            // was treated as one: playSamples' throw landed in
+            // the same catch as synthesis, noteSynthesisFailure
+            // poisoned the runtime, and every later sentence's
+            // synthesis then threw instantly in awaitReady —
+            // one playback hiccup silenced the whole call while
+            // the text kept flowing, with the reason visible
+            // nowhere. Now a playback failure is recorded with
+            // its error and this sentence finishes; the runtime
+            // stays healthy, and the next sentence plays — or
+            // fails logged, never silently.
+            do {
+                try self.player.playSamples(speech.samples, sampleRate: speech.sampleRate) { [weak self] in
+                    self?.finish(gen)
+                }
+            } catch {
+                VoiceFailureLog.shared.recordFailure("Playback failed: \(error.localizedDescription)")
+                self.finish(gen)
+                return
+            }
+            // The sentence is making sound — tell the
+            // session, so it can line up the next one.
+            self.onPlaybackStarted?()
         }
     }
 

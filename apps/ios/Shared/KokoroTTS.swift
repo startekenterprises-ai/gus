@@ -208,6 +208,75 @@ private actor SynthGate {
     }
 }
 
+// MARK: - Voice failure log
+
+/// The voice path's memory (v0.22.0): a tiny in-app record of
+/// what the playback path did and how it failed — the fix for
+/// two builds of silent calls that left no evidence anywhere.
+/// Before this, a playback error was caught, the sentence was
+/// finished as if spoken, and the only trace sat in a Settings
+/// row nobody opens mid-call. Now every playback failure is
+/// recorded here WITH its error; the first connection of a
+/// call records the path it took (voice processing on or off,
+/// the formats involved, the route); the call screen speaks
+/// up after repeated failures; and Settings → About shows the
+/// last lines verbatim — so a field report can carry the
+/// reason instead of "still silent." In-memory only, capped;
+/// no framework, no file.
+final class VoiceFailureLog {
+    static let shared = VoiceFailureLog()
+
+    private let lock = NSLock()
+    private var lines: [String] = []
+    private var failures = 0
+    private var lastFailure: String?
+
+    private static let clock: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
+
+    /// A path note: what the voice path did, for the record.
+    func recordInfo(_ line: String) {
+        append(line)
+    }
+
+    /// A failure: counted, kept as the latest, and recorded.
+    func recordFailure(_ line: String) {
+        lock.lock()
+        failures += 1
+        lastFailure = line
+        lock.unlock()
+        append(line)
+    }
+
+    var failureCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return failures
+    }
+
+    var latestFailure: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return lastFailure
+    }
+
+    var recentLines: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return lines
+    }
+
+    private func append(_ line: String) {
+        lock.lock()
+        lines.append("\(Self.clock.string(from: Date()))  \(line)")
+        if lines.count > 30 { lines.removeFirst(lines.count - 30) }
+        lock.unlock()
+    }
+}
+
 // MARK: - Sample playback
 
 /// Plays Kokoro's float samples through an AVAudioEngine
@@ -251,6 +320,17 @@ final class KokoroPlayer {
     /// and the call never waits on it (Glenn's hard rule:
     /// the face must not slow the call).
     var onLevelChange: ((Float) -> Void)?
+
+    /// The playback path's one note per connection (v0.22.0):
+    /// fired when the player (re)connects, carrying the path
+    /// it took — voice processing on or off, the sample
+    /// format it was handed, the format it will play, and
+    /// whether the engine was running. The speech engine
+    /// wires this into VoiceFailureLog, so a silent call's
+    /// report shows the path instead of nothing. Failures
+    /// themselves travel as thrown errors (the speech
+    /// engine's stage-2 catch records them); this is context.
+    var onDiagnostic: ((String) -> Void)?
 
     var isPlaying: Bool {
         lock.lock()
@@ -300,33 +380,43 @@ final class KokoroPlayer {
             }
         }
 
+        // Silence is a failure, not a sentence (v0.22.0): if
+        // synthesis handed over all-zero samples — a voice
+        // pack that failed to load on a fresh install is the
+        // shape to fear — scheduling them would "play"
+        // perfectly and say nothing, indistinguishable from
+        // success in every signal the call watches. Name it
+        // and throw it, so it lands in the failure log.
+        guard peak > 0 else {
+            throw NSError(domain: "GUS.Kokoro", code: 8, userInfo: [
+                NSLocalizedDescriptionKey: "The voice produced silence instead of speech — its samples were all zero.",
+            ])
+        }
+
         // The format this engine can actually render (v0.19.0 —
-        // the silent-call fix). Since v0.18.0 playback rides the
-        // call's shared engine, whose input node has voice
-        // processing enabled (CallSession.startHearing): the
-        // Voice Processing I/O unit then owns the engine's
+        // the first silent-call fix). Since v0.18.0 playback
+        // rides the call's shared engine, whose input node has
+        // voice processing enabled (CallSession.startHearing):
+        // the Voice Processing I/O unit then owns the engine's
         // input AND output and fixes the whole graph's I/O
         // format. A player connection at Kokoro's native
         // 24 kHz does not match that format, so the graph
-        // cannot render it — the engine refuses to restart
-        // after the reconnect below and every sentence dies at
-        // engine.start(), silently (the throw lands in the
-        // speech engine's catch, which finishes the sentence
-        // and moves on: text renders, no sound, no crash).
-        // Before v0.18.0 the identical connection sang because
-        // the player's PRIVATE engine had no voice processing
-        // and the standard output path sample-rate-converts at
-        // the mixer. So: on a voice-processing engine, convert
-        // the samples to the graph's own output format and
-        // connect with THAT — playback still rides the same
-        // engine through the same output unit, so the echo
-        // canceller keeps its reference; only the format the
-        // samples are handed over in changes. Any other engine
-        // (private, or voice processing failed to enable)
-        // keeps the proven native-format path untouched.
+        // cannot render it. Before v0.18.0 the identical
+        // connection sang because the player's PRIVATE engine
+        // had no voice processing and the standard output path
+        // sample-rate-converts at the mixer. So: on a
+        // voice-processing engine, convert the samples to the
+        // graph's own output format and connect with THAT —
+        // playback still rides the same engine through the
+        // same output unit, so the echo canceller keeps its
+        // reference; only the format the samples are handed
+        // over in changes. Any other engine (private, or voice
+        // processing failed to enable) keeps the proven
+        // native-format path untouched.
         var playBuffer = buffer
         var playFormat = format
-        if engine.inputNode.isVoiceProcessingEnabled {
+        let voiceProcessing = engine.inputNode.isVoiceProcessingEnabled
+        if voiceProcessing {
             let graphFormat = engine.mainMixerNode.outputFormat(forBus: 0)
             if graphFormat.sampleRate > 0, graphFormat != format {
                 playBuffer = try Self.convertBuffer(buffer, to: graphFormat)
@@ -342,15 +432,27 @@ final class KokoroPlayer {
             attached = true
         }
         if connectedFormat != playFormat {
-            // One-time (the first buffer): on the call's shared
-            // engine this stop/start also pauses the mic tap
-            // for a beat, before the first sentence is heard —
-            // the tap rides through it and playback restarts
-            // the engine immediately below.
-            if engine.isRunning { engine.stop() }
+            // The connection is made WITHOUT stopping the
+            // engine (v0.22.0 — the second silent-call fix).
+            // Through v0.19.0 this branch stopped the call's
+            // shared engine — live recognizer tap installed,
+            // voice-processing unit engaged — and restarted it
+            // with try engine.start(). That restart is the one
+            // fragile operation both silent builds share and
+            // the singing pre-0.18.0 code never performed: its
+            // private engine was stopped at connect time and
+            // started exactly once, with nothing else attached.
+            // A disconnect/connect on a running engine is
+            // applied by AVAudioEngine dynamically, and the
+            // mic tap lives on the input node, untouched here.
+            // The engine is only ever started below, when it
+            // is not running at all (the player's private
+            // engine, or a call whose hearing never started
+            // it) — never stopped and restarted mid-call.
             engine.disconnectNodeOutput(player)
             engine.connect(player, to: engine.mainMixerNode, format: playFormat)
             connectedFormat = playFormat
+            onDiagnostic?("Playback path: voice processing \(voiceProcessing ? "on" : "off"), samples \(Self.describe(format)) → playing \(Self.describe(playFormat)), engine \(engine.isRunning ? "running" : "stopped").")
         }
 
         lock.lock()
@@ -366,6 +468,12 @@ final class KokoroPlayer {
         }
         player.play()
         onLevelChange?(level)
+    }
+
+    /// A format in one short line, for the playback path's
+    /// diagnostic record (v0.22.0).
+    private static func describe(_ format: AVAudioFormat) -> String {
+        "\(Int(format.sampleRate)) Hz, \(format.channelCount) ch"
     }
 
     /// One-shot sample-rate/channel conversion of a whole
@@ -402,6 +510,17 @@ final class KokoroPlayer {
         guard status != .error else {
             throw NSError(domain: "GUS.Kokoro", code: 7, userInfo: [
                 NSLocalizedDescriptionKey: "Audio conversion for the call failed.",
+            ])
+        }
+        // An empty conversion is a failure, not a sentence
+        // (v0.22.0): through v0.21.0 the converted buffer's
+        // frame count was never checked, so a conversion that
+        // produced zero frames would have been scheduled,
+        // "finished" instantly, and counted as speech — one
+        // more way to be silent with every signal green.
+        guard out.frameLength > 0 else {
+            throw NSError(domain: "GUS.Kokoro", code: 9, userInfo: [
+                NSLocalizedDescriptionKey: "Audio conversion produced no samples (\(buffer.frameLength) frames in at \(Int(buffer.format.sampleRate)) Hz, 0 out at \(Int(format.sampleRate)) Hz).",
             ])
         }
         return out
