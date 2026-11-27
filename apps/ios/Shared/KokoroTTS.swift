@@ -537,7 +537,7 @@ final class KokoroPlayer {
             self?.fireFinish()
         }
         do {
-            try startPlayback(playBuffer: playBuffer, playFormat: playFormat, voiceProcessing: voiceProcessing, sourceFormat: format)
+            try startPlayback(playBuffer: playBuffer, playFormat: playFormat, voiceProcessing: voiceProcessing, sourceFormat: format, sourceBuffer: buffer)
         } catch {
             playLock.unlock()
             throw error
@@ -558,20 +558,65 @@ final class KokoroPlayer {
     ///    records it in VoiceFailureLog), whether or not the
     ///    sentence is then saved. This is the diagnostic the
     ///    crash-only reports never carried.
-    /// 2. RECOVERY — exactly ONE rebuild: the player's queued
+    /// 2. SETTLING (v0.28.1) — if the exception is the field-
+    ///    captured "player did not see an IO cycle" (Glenn's
+    ///    About log, v0.27.3: every sentence, every structural
+    ///    check green), the player simply hasn't been through
+    ///    a render cycle yet — nothing about the graph is
+    ///    wrong, so nothing is rebuilt or flushed. The shim
+    ///    play is retried after short increasing waits
+    ///    (~120/300/600 ms, ~1 s worst case) on the existing
+    ///    connection, giving the voice-processing graph's IO
+    ///    cycle time to actually run through the player. A
+    ///    success here is the whole recovery: the already-
+    ///    scheduled buffer plays and fires its own finish.
+    ///    Any OTHER exception skips the waits entirely, as
+    ///    does an IO-cycle raise that outlasts them.
+    /// 3. RECOVERY — exactly ONE rebuild: the player's queued
     ///    buffer is flushed (reset), the connection is forced
-    ///    through ensurePlayable again, the buffer is
-    ///    re-scheduled, and the shim play is retried ONCE.
-    /// 3. GIVE-UP — a second catch, or a rebuild whose own
+    ///    through ensurePlayable again — on a format re-
+    ///    derived from the LIVE graph at that moment rather
+    ///    than the sentence's captured one (v0.28.1: the VP
+    ///    unit may have renegotiated the graph format between
+    ///    synthesis and playback; when it has, the buffer is
+    ///    re-converted from the source samples to match) —
+    ///    the buffer is re-scheduled, and the shim play is
+    ///    retried ONCE.
+    /// 4. GIVE-UP — a second catch, or a rebuild whose own
     ///    proof throws, clears the pending finish WITHOUT
     ///    firing it and throws, so the speech engine's stage-2
     ///    catch records the failure and finishes the sentence
     ///    — the same contract ensurePlayable's throws already
     ///    had. The app never aborts, and this never loops:
-    ///    one rebuild, one retry, then the sentence is over.
-    private func startPlayback(playBuffer: AVAudioPCMBuffer, playFormat: AVAudioFormat, voiceProcessing: Bool, sourceFormat: AVAudioFormat) throws {
+    ///    settling waits, one rebuild, one retry, then the
+    ///    sentence is over.
+    private func startPlayback(playBuffer: AVAudioPCMBuffer, playFormat: AVAudioFormat, voiceProcessing: Bool, sourceFormat: AVAudioFormat, sourceBuffer: AVAudioPCMBuffer) throws {
         guard let caught = GUSAudioPlayerPlayCatching(player) else { return }
         onPlaybackException?("play() raised \(caught)")
+        // SETTLING (v0.28.1) — step 2 in the doc comment
+        // above. The waits run on the sentence pump's thread
+        // under playLock: bounded (~1 s worst case, and only
+        // on a sentence whose first play already failed), and
+        // a stop() queues behind them rather than interleaving
+        // with a half-recovered graph.
+        if caught.contains("did not see an IO cycle") {
+            let waits: [TimeInterval] = [0.12, 0.30, 0.60]
+            var settled = false
+            for (index, wait) in waits.enumerated() {
+                Thread.sleep(forTimeInterval: wait)
+                guard let retryCaught = GUSAudioPlayerPlayCatching(player) else {
+                    onDiagnostic?("play() succeeded on settling retry \(index + 1) of \(waits.count) — the player saw its IO cycle after a \(Int((wait * 1000).rounded())) ms wait.")
+                    settled = true
+                    break
+                }
+                onPlaybackException?("play() raised on settling retry \(index + 1): \(retryCaught)")
+                // Waiting only cures the IO-cycle state; a
+                // different failure ends the settling early
+                // and falls through to the rebuild.
+                if !retryCaught.contains("did not see an IO cycle") { break }
+            }
+            if settled { return }
+        }
         // Flush whatever the failed start left queued: a
         // stale buffer rendering under a later sentence would
         // speak the wrong words, and a queue whose state the
@@ -583,13 +628,31 @@ final class KokoroPlayer {
         player.reset()
         do {
             connectedFormat = nil
-            try ensurePlayable(playFormat: playFormat, voiceProcessing: voiceProcessing, sourceFormat: sourceFormat)
+            // Re-derive the format from the LIVE graph
+            // (v0.28.1): the sentence's captured playFormat
+            // was read at synthesis time, and the voice-
+            // processing unit may have renegotiated the
+            // graph's format since. When it has, reconnect on
+            // the live format and re-convert the source
+            // samples to match; when it hasn't, the captured
+            // buffer is reused untouched.
+            var rebuildBuffer = playBuffer
+            var rebuildFormat = playFormat
+            if voiceProcessing {
+                let liveFormat = engine.mainMixerNode.outputFormat(forBus: 0)
+                if liveFormat.sampleRate > 0, liveFormat != playFormat {
+                    rebuildBuffer = try Self.convertBuffer(sourceBuffer, to: liveFormat)
+                    rebuildFormat = liveFormat
+                    onDiagnostic?("Rebuild re-derived the play format from the live graph: \(Self.describe(playFormat)) → \(Self.describe(liveFormat)).")
+                }
+            }
+            try ensurePlayable(playFormat: rebuildFormat, voiceProcessing: voiceProcessing, sourceFormat: sourceFormat)
+            player.scheduleBuffer(rebuildBuffer) { [weak self] in
+                self?.fireFinish()
+            }
         } catch {
             clearPendingFinish()
             throw error
-        }
-        player.scheduleBuffer(playBuffer) { [weak self] in
-            self?.fireFinish()
         }
         if let caughtAgain = GUSAudioPlayerPlayCatching(player) {
             onPlaybackException?("play() raised again after one reconnect: \(caughtAgain)")
@@ -639,6 +702,20 @@ final class KokoroPlayer {
             engine.mainMixerNode.outputVolume = 1.0
             attached = true
         }
+        // Start BEFORE connecting (v0.28.1): through v0.28.0
+        // the connect below was made into a stopped engine and
+        // the engine started after — so the connection was
+        // born into a graph that had never rendered, and the
+        // field error that produced was exact about it:
+        // "player did not see an IO cycle" (Glenn's About log,
+        // v0.27.3 — every sentence, with every check below
+        // passing). A connection made into an already-cycling
+        // graph is the state play() expects; the start moves
+        // here so that is the only order this function builds.
+        // The running guard at the end still re-proves it.
+        if !engine.isRunning {
+            try engine.start()
+        }
         // Connect once, and keep the connection stable across
         // sentences: a (re)connect happens only when the
         // format actually changed or the engine no longer
@@ -669,9 +746,6 @@ final class KokoroPlayer {
         // with it.
         if !isMixerConnectedToOutput {
             engine.connect(engine.mainMixerNode, to: engine.outputNode, format: nil)
-        }
-        if !engine.isRunning {
-            try engine.start()
         }
         guard isPlayerConnected else {
             throw NSError(domain: "GUS.Kokoro", code: 10, userInfo: [
