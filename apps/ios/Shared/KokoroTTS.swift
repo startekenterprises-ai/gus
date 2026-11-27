@@ -583,7 +583,7 @@ final class KokoroPlayer {
         player.reset()
         do {
             connectedFormat = nil
-            try ensurePlayable(playFormat: playFormat, voiceProcessing: voiceProcessing, sourceFormat: format)
+            try ensurePlayable(playFormat: playFormat, voiceProcessing: voiceProcessing, sourceFormat: sourceFormat)
         } catch {
             clearPendingFinish()
             throw error
