@@ -8,6 +8,7 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var model: SessionModel
     @ObservedObject private var library = ModelLibrary.shared
+    @ObservedObject private var customBrains = CustomBrainStore.shared
     @ObservedObject private var kokoro = KokoroRuntime.shared
     /// The voice audition's state (v0.33.0) — observed so
     /// a failed preview's words land under the voice list.
@@ -221,11 +222,17 @@ struct SettingsView: View {
                     ForEach(GUSModelManifest.downloads, id: \.id) { entry in
                         BrainRowView(entry: entry)
                     }
+                    ForEach(customBrains.entries, id: \.id) { entry in
+                        BrainRowView(entry: entry)
+                    }
+                    NavigationLink("Find a brain (advanced)") {
+                        BrainSearchView()
+                    }
                     kokoroRow
                 } header: {
                     Text("On-device models")
                 } footer: {
-                    Text("Brains are downloaded once, verified against the model manifest before use, and stored on this iPhone. You can keep more than one and switch freely — switching never deletes anything, and the switch takes effect right away: the new brain loads in this same app run with your next message or call (v0.31.0), no restart needed. The brain marked Active is the one that loads. Nothing about a call leaves the phone in on-device mode. Deleting every brain turns on-device calls off (Core mode still works) and brings the setup prompt back at the next launch.")
+                    Text("Brains are downloaded once, verified against the model manifest before use, and stored on this iPhone. You can keep more than one and switch freely — switching never deletes anything, and the switch takes effect right away: the new brain loads in this same app run with your next message or call (v0.31.0), no restart needed. The brain marked Active is the one that loads. Nothing about a call leaves the phone in on-device mode. Deleting every brain turns on-device calls off (Core mode still works) and brings the setup prompt back at the next launch. Brains marked Custom came from Find a brain (v0.38.0): they come straight from Hugging Face, are size-checked — and checksum-checked when the repo publishes one — before use, and aren't vetted by GUS.")
                 }
 
                 Section {

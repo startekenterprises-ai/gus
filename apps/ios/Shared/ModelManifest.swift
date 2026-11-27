@@ -30,7 +30,14 @@ struct ModelDownloadEntry: Equatable {
     let fileName: String
     let url: URL
     let bytes: Int64
-    let sha256: String
+    /// The sha256 the download is verified against before
+    /// use. Curated entries always carry one (the manifest
+    /// pins it). A custom entry (BrainSearch.swift) carries
+    /// the repo-published hash when Hugging Face has one —
+    /// and nil when the repo publishes none, in which case
+    /// verification is by size alone and the entry's own
+    /// description says so (v0.38.0).
+    let sha256: String?
     /// The name a person sees in the library and the setup
     /// prompt — plain words, never a repo name or a file name.
     let plainName: String
@@ -103,7 +110,12 @@ enum GUSModelManifest {
     static let downloads: [ModelDownloadEntry] = [brain, brainAbliterated, brainAggressive]
 
     static func entry(id: String) -> ModelDownloadEntry? {
-        downloads.first(where: { $0.id == id })
+        // The curated manifest first; a custom brain the
+        // person found through search (v0.38.0) resolves
+        // through the same door, so every holder of an id —
+        // the library, the download delegate, ActiveBrain —
+        // sees one library, not two.
+        downloads.first(where: { $0.id == id }) ?? CustomBrainStore.shared.entry(id: id)
     }
 }
 
@@ -139,7 +151,14 @@ enum ActiveBrain {
         if ModelStore.isPresent(GUSModelManifest.brain) {
             return GUSModelManifest.brain
         }
-        return GUSModelManifest.downloads.first(where: { ModelStore.isPresent($0) })
+        if let curated = GUSModelManifest.downloads.first(where: { ModelStore.isPresent($0) }) {
+            return curated
+        }
+        // Last resort (v0.38.0): a custom brain the person
+        // found through search, when no curated brain is on
+        // the phone at all — its presence is a real brain,
+        // and the setup prompt must not claim otherwise.
+        return CustomBrainStore.shared.entries.first(where: { ModelStore.isPresent($0) })
     }
 
     /// Any brain at all on this phone — the first-launch

@@ -23,6 +23,15 @@ struct BrainRowView: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(entry.plainName)
                     .font(.callout)
+                if entry.id.hasPrefix(CustomBrainStore.idPrefix) {
+                    // A brain found through search (v0.38.0),
+                    // marked everywhere it appears so it is
+                    // never mistaken for a curated one.
+                    Text("Custom")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                        .foregroundColor(.secondary)
+                }
                 if isActive {
                     Text("Active")
                         .font(.caption)
@@ -33,9 +42,15 @@ struct BrainRowView: View {
             Text(entry.plainDescription)
                 .font(.caption)
                 .foregroundColor(.secondary)
-            Text("\(entry.sizeText) download, checked before use.")
-                .font(.caption)
-                .foregroundColor(.secondary)
+            if entry.sha256 == nil {
+                Text("\(entry.sizeText) download, size-checked before use — this repo publishes no checksum.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                Text("\(entry.sizeText) download, checked before use.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
             switch library.state(of: entry) {
             case .notDownloaded:
                 Button("Download") { library.download(entry) }

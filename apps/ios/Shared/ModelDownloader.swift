@@ -64,7 +64,11 @@ final class ModelLibrary: NSObject, ObservableObject {
     private struct DownloadRecord: Codable {
         var taskIdentifier: Int
         var bytes: Int64
-        var sha256: String
+        /// The expected sha256 at download start. Optional
+        /// since v0.38.0: a custom brain whose repo publishes
+        /// no checksum records nil (old records, which always
+        /// carry one, decode unchanged).
+        var sha256: String?
     }
 
     enum EntryState: Equatable {
@@ -215,6 +219,16 @@ final class ModelLibrary: NSObject, ObservableObject {
                 states[entry.id] = ModelStore.isPresent(entry) ? .ready : .notDownloaded
             }
         }
+        // Custom brains (v0.38.0) settle the same way, so
+        // their rows are truthful after a relaunch too.
+        for entry in CustomBrainStore.shared.entries {
+            switch states[entry.id] {
+            case .downloading, .verifying:
+                continue
+            default:
+                states[entry.id] = ModelStore.isPresent(entry) ? .ready : .notDownloaded
+            }
+        }
         activeEntryID = ActiveBrain.resolved()?.id
     }
 
@@ -222,6 +236,7 @@ final class ModelLibrary: NSObject, ObservableObject {
     /// prompt's dismissal cue once its download lands.
     var anyBrainReady: Bool {
         GUSModelManifest.downloads.contains { state(of: $0) == .ready }
+            || CustomBrainStore.shared.entries.contains { state(of: $0) == .ready }
     }
 
     // MARK: - The standard brain (the pre-library call sites)
@@ -306,9 +321,17 @@ final class ModelLibrary: NSObject, ObservableObject {
             return
         }
         states[entry.id] = .verifying
+        // A custom brain whose repo publishes no checksum
+        // (v0.38.0) has nothing to hash against: presence —
+        // which is itself the size gate — is the whole
+        // check, and the entry's description says so.
+        guard let expected = entry.sha256 else {
+            states[entry.id] = .ready
+            return
+        }
         let url = ModelStore.fileURL(for: entry)
         Task.detached(priority: .utility) {
-            let ok = (try? Self.sha256Hex(of: url)) == entry.sha256
+            let ok = (try? Self.sha256Hex(of: url)) == expected
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 if ok {
@@ -365,7 +388,15 @@ final class ModelLibrary: NSObject, ObservableObject {
         let partial = ModelStore.directory.appendingPathComponent(entry.fileName + ".partial")
         Task.detached(priority: .utility) {
             let sizeOK = ((try? FileManager.default.attributesOfItem(atPath: partial.path))?[.size] as? NSNumber)?.int64Value == entry.bytes
-            let hashOK = (try? Self.sha256Hex(of: partial)) == entry.sha256
+            // Size is ALWAYS checked. The hash is checked
+            // when the entry carries one; a custom brain
+            // whose repo publishes no checksum (v0.38.0)
+            // passes on size alone — the honest degradation,
+            // named in the entry's own description, never a
+            // silent skip dressed up as a verification.
+            let hashOK = entry.sha256.map { expected in
+                (try? Self.sha256Hex(of: partial)) == expected
+            } ?? true
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 if sizeOK && hashOK {
