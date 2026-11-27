@@ -143,6 +143,15 @@ base64 -d < "$SCRIPT_DIR/Resources/DefaultAvatarA.png.b64" > "$APP/Contents/Reso
 # same way — the Identity tab picks between them
 # (DesktopModel.stockAvatarChoice, gus.avatar.stock).
 base64 -d < "$SCRIPT_DIR/Resources/DefaultAvatarGirl.png.b64" > "$APP/Contents/Resources/DefaultAvatarGirl.png" || fail "decoding the bundled second stock avatar failed"
+# v0.43.0: the persona portraits — the same masters the
+# iPhone's imagesets carry, copied byte-for-byte into
+# Resources/ as base64 text (Persona.swift's faces load
+# them by these names; Gus's own portrait is
+# DefaultAvatar.png above, byte-identical to the iPhone's
+# Avatar master, so he needs no second copy).
+for persona in Priest Therapist Doctor Debbie Devil; do
+  base64 -d < "$SCRIPT_DIR/Resources/Persona$persona.png.b64" > "$APP/Contents/Resources/Persona$persona.png" || fail "decoding the bundled persona portrait ($persona) failed"
+done
 
 PAYLOAD="$APP/Contents/Resources/gus"
 cp "$REPO_DIR/package.json" "$PAYLOAD/package.json"

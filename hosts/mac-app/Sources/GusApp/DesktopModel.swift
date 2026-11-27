@@ -354,6 +354,27 @@ final class DesktopModel: ObservableObject {
     /// plane. The Identity tab's picker writes it through
     /// setStockAvatar below.
     @Published var stockAvatarChoice = "boy"
+    /// v0.43.0 (Personas): the operator's persona pick for
+    /// this Mac's own conversations — the saved prompt
+    /// itself (MacPersona.personaPromptKey, the same key
+    /// the iPhone uses, in this app's own defaults), nil
+    /// for General. The observable copy of MacPersona's
+    /// store: pickPersona writes both, loadIdentity reads
+    /// the store, and every derivation (who is on, whose
+    /// memory bucket, what context rides a turn) goes
+    /// through MacPersona, so the surfaces can never
+    /// disagree about who they're showing.
+    @Published var personaPrompt: String?
+    /// v0.43.0: a redraw beat for persona state that lives
+    /// in defaults rather than published storage (a
+    /// persona's voice assignment) — bumped by
+    /// setPersonaVoice so the voice card re-reads the
+    /// assignment in the beat it changes.
+    @Published var personaVoiceTick = 0
+    /// v0.43.0: the persona preview's player — separate
+    /// from the call's player and queues, so a preview
+    /// never queues behind (or cuts into) a call's speech.
+    private var personaPreviewPlayer: AVAudioPlayer?
     /// v0.11.0: the operator's chosen BUILT-IN speech voice —
     /// an AVSpeechSynthesisVoice identifier from the voices
     /// installed on this Mac, or "" for the Mac's default
@@ -507,7 +528,17 @@ final class DesktopModel: ObservableObject {
         let text = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         composerText = ""
-        client.post("/api/chat", jsonBody: ["text": text]) { [weak self] result in
+        var body: [String: Any] = ["text": text]
+        // v0.43.0: the composed persona context rides the
+        // submission when there is one — composed fresh
+        // here, so a persona pick or a memory write lands
+        // on this very message. The core frames it as the
+        // turn's persona layer, exactly as it has framed
+        // the iPhone's since v0.40.0.
+        if let context = composedPersonaContext() {
+            body["personaContext"] = context
+        }
+        client.post("/api/chat", jsonBody: body) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
                 switch result {
@@ -519,6 +550,164 @@ final class DesktopModel: ObservableObject {
                     self.composerText = text
                 }
                 self.refreshChat()
+            }
+        }
+    }
+
+    // MARK: Personas (v0.43.0)
+
+    /// The starter on right now, if any — MacPersona's
+    /// derivation over the saved prompt.
+    var activePersona: MacPersonaStarter? {
+        MacPersona.activeStarter(for: personaPrompt)
+    }
+
+    /// Who the surfaces name: the starter's name, or
+    /// "Gus" for General, or "Custom" for saved words no
+    /// starter matches.
+    var activePersonaDisplayName: String {
+        MacPersona.activeDisplayName(for: personaPrompt)
+    }
+
+    /// The memory bucket the persona on carries —
+    /// MacPersona's one derivation (the starter's id, or
+    /// "general", or "custom").
+    var activePersonaBucketID: String {
+        MacPersona.activeMemoryPersonaID(for: personaPrompt)
+    }
+
+    /// The persona context the next Mac turn submits:
+    /// the picked starter's composed prompt (its prompt +
+    /// the shared style block + its memory block), or
+    /// General's composition when its bucket holds
+    /// memories, or nil — no field rides, and the core
+    /// frames the turn as it always has. Composed fresh
+    /// at each use, so a pick or a memory write lands on
+    /// the very next turn.
+    func composedPersonaContext() -> String? {
+        MacPersona.personaContext(for: personaPrompt)
+    }
+
+    /// Pick a persona — or General (nil). A pick is a
+    /// package, as on the iPhone: the prompt (saved here
+    /// and in MacPersona's store, in the same beat), the
+    /// VOICE (a starter's assigned voice is written to
+    /// voice.json through setTtsVoice — the same full-body
+    /// save Settings → Voice makes; General leaves
+    /// voice.json alone, so the global voice there is
+    /// General's fallback), and, in a live call, the
+    /// session's persona context (posted as an update; it
+    /// frames subsequent turns). The pick takes effect
+    /// for the next turn — nothing already running is
+    /// re-framed.
+    func pickPersona(_ starter: MacPersonaStarter?) {
+        personaPrompt = starter?.prompt
+        MacPersona.savedPrompt = starter?.prompt
+        if let starter {
+            setTtsVoice(starter.assignedVoiceID)
+            notice = "Persona: \(starter.name) — their prompt and voice apply from the next turn."
+        } else {
+            notice = "Persona cleared — General GUS, with the voice from Settings → Voice."
+        }
+        syncVoiceSessionPersonaContext()
+    }
+
+    /// Reassign a persona's voice (nil = back to the
+    /// shipped voice): the assignment persists per
+    /// persona in this Mac's defaults, and when the
+    /// persona reassigned is the one on, the new voice is
+    /// applied to voice.json in the same beat — a live
+    /// call speaks it from the next segment the core
+    /// synthesizes.
+    func setPersonaVoice(_ voiceID: String?, for starter: MacPersonaStarter) {
+        MacPersonaVoiceAssignment.setVoiceID(voiceID, forPersona: starter.id)
+        personaVoiceTick += 1
+        if activePersona?.id == starter.id {
+            setTtsVoice(starter.assignedVoiceID)
+        }
+        notice = voiceID == nil
+            ? "\(starter.name)'s voice: back to the shipped \(MacKokoroVoices.displayName(for: starter.voiceID))."
+            : "\(starter.name)'s voice: \(MacKokoroVoices.displayName(for: starter.assignedVoiceID))."
+    }
+
+    /// Post the current composed context to a live call's
+    /// session — the mid-call half of a pick (and of a
+    /// memory write made from the Identity tab while a
+    /// call runs; the Memory sheet's dismissal calls this
+    /// too). Not in a call, it does nothing: the next
+    /// call's start carries the context instead. A failed
+    /// post says so in the notice rather than letting the
+    /// call run on a persona the operator left.
+    func syncVoiceSessionPersonaContext() {
+        guard voiceInCall, let sessionId = voiceSessionId else { return }
+        client.voiceSessionContext(sessionId: sessionId, personaContext: composedPersonaContext()) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if case .failure = result {
+                    self.notice = "The persona change couldn't reach the live call — it applies from the next call instead."
+                }
+            }
+        }
+    }
+
+    /// Hear a persona's voice without a call (v0.43.0):
+    /// the persona's own preview line, in its assigned
+    /// voice, synthesized by the Kokoro engine on file —
+    /// Built-in Kokoro at its loopback address, or the
+    /// endpoint at its configured one — through the same
+    /// test-speech route Settings → Voice's speaker test
+    /// uses, and played on the preview's own player. The
+    /// iPhone's preview parity, by the Mac's plumbing.
+    /// Honest edges, stated in the notice rather than
+    /// papered over: during a call the preview waits (it
+    /// never talks over a call), and with Built-in
+    /// (AVSpeech) speech selected there is no Kokoro
+    /// voice to preview — the Mac's system voices are not
+    /// persona voices, and faking one would audition the
+    /// wrong mouth.
+    func previewPersonaVoice(_ starter: MacPersonaStarter) {
+        guard !voiceInCall else {
+            notice = "The preview waits until the call ends — it won't talk over a call."
+            return
+        }
+        guard let settings = voiceSettings else {
+            notice = "Voice settings haven't loaded yet — the preview needs the speech engine's address; try again in a moment."
+            return
+        }
+        let engine = settings.ttsEngine ?? "local"
+        guard engine != "local" else {
+            notice = "Previews speak with a Kokoro voice — switch Speech to Built-in Kokoro or Endpoint in Settings → Voice to hear \(starter.name)'s voice. Built-in speech uses the Mac's system voices, which aren't persona voices."
+            return
+        }
+        let bundled = engine == "bundled"
+        let baseUrl = bundled ? (settings.bundled?.baseUrl ?? "") : settings.ttsBaseUrl
+        guard !baseUrl.isEmpty else {
+            notice = bundled
+                ? "Built-in Kokoro isn't reporting yet — its status line in Settings → Voice has the latest; the preview can run once it's ready."
+                : "The speech endpoint has no address on file — set one in Settings → Voice first."
+            return
+        }
+        let voice = starter.assignedVoiceID
+        notice = "Asking \(bundled ? "built-in Kokoro" : "the speech endpoint") for \(starter.name)'s line…"
+        client.testVoiceSpeech(
+            baseUrl: baseUrl,
+            model: bundled ? "kokoro" : settings.ttsModel,
+            voice: voice
+        ) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch result {
+                case .success(let r):
+                    if r.ok, let b64 = r.audioBase64, let data = Data(base64Encoded: b64) {
+                        self.personaPreviewPlayer = try? AVAudioPlayer(data: data)
+                        self.personaPreviewPlayer?.play()
+                        self.notice = "Playing \(starter.name)'s line in \(MacKokoroVoices.displayName(for: voice)) — listen for it."
+                    } else {
+                        self.notice = "Preview failed: \(r.detail)"
+                    }
+                case .failure(let e):
+                    self.notice = "Preview couldn't run: \(e.localizedDescription)"
+                }
             }
         }
     }
@@ -800,7 +989,12 @@ final class DesktopModel: ObservableObject {
     /// stash is dropped, not sent — it was a level check, not a
     /// first sentence.
     private func openVoiceSession() {
-        client.startVoiceSession { [weak self] result in
+        // v0.43.0: the call opens with the composed persona
+        // context, the same field the iPhone's call start
+        // has carried since v0.40.0 — the session holds it
+        // in memory and frames every turn of the call with
+        // it, Watch turns included.
+        client.startVoiceSession(personaContext: composedPersonaContext()) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.voiceCallStarting = false
@@ -2088,6 +2282,9 @@ final class DesktopModel: ObservableObject {
         if let savedStock = UserDefaults.standard.string(forKey: Self.stockAvatarDefaultsKey) {
             stockAvatarChoice = savedStock == "girl" ? "girl" : "boy"
         }
+        // v0.43.0: the persona pick rides the same load —
+        // the saved prompt, or nil for General.
+        personaPrompt = MacPersona.savedPrompt
         if let data = try? Data(contentsOf: URL(fileURLWithPath: avatarFilePath)),
            let image = NSImage(data: data) {
             avatarImage = image

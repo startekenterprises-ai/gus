@@ -340,6 +340,13 @@ struct IdentityTabView: View {
                 nameEditor
                 statusBlock
                 Divider()
+                // v0.43.0: the persona block — the picker,
+                // the persona's voice card, and its memory
+                // door (PersonaViews.swift). Identity is
+                // where who-GUS-is lives on the Mac; the
+                // persona is part of that answer now.
+                PersonaBlockView(model: model)
+                Divider()
                 voiceBlock
                 Divider()
                 memoryBlock

@@ -669,9 +669,30 @@ final class PanelClient {
 
     /// Open the live call. The answer is the fresh session's
     /// state — or the refusal, in the same shape.
-    func startVoiceSession(completion: @escaping (Result<PanelVoiceSession, Error>) -> Void) {
-        perform(request(path: "/api/voice/session/start", method: "POST", jsonBody: [:]),
+    /// Start a voice session. v0.43.0: the Mac's composed
+    /// persona context may ride the start body — the same
+    /// optional field the iPhone has sent since v0.40.0;
+    /// the session holds it in memory only, and a nil
+    /// context posts the empty body older apps posted, so
+    /// their starts are unchanged.
+    func startVoiceSession(personaContext: String? = nil, completion: @escaping (Result<PanelVoiceSession, Error>) -> Void) {
+        let body: [String: Any] = personaContext.map { ["personaContext": $0] } ?? [:]
+        perform(request(path: "/api/voice/session/start", method: "POST", jsonBody: body),
                 as: PanelVoiceSession.self, completion: completion)
+    }
+
+    /// v0.43.0: a persona-context update for a live call —
+    /// the Mac posts its newly composed prompt when the
+    /// persona changes mid-session (a pick, a voice-driven
+    /// recomposition, a memory write); the session applies
+    /// it to subsequent turns only. A nil context clears
+    /// the session's held context. The body carries the
+    /// context itself; the route never logs or stores it.
+    func voiceSessionContext(sessionId: String, personaContext: String?, completion: @escaping (Result<PanelActionResult, Error>) -> Void) {
+        var body: [String: Any] = ["sessionId": sessionId]
+        if let personaContext { body["personaContext"] = personaContext }
+        perform(request(path: "/api/voice/session/context", method: "POST", jsonBody: body),
+                as: PanelActionResult.self, completion: completion)
     }
 
     /// The session poll: phase, transcript, latency, endings.

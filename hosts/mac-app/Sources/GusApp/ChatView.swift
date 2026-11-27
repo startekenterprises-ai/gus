@@ -93,6 +93,16 @@ struct ChatView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color(nsColor: .controlBackgroundColor))
             }
+            // v0.43.0: the persona strip — who is on, at the
+            // top of the conversation, and the picker
+            // itself (PersonaViews.swift): the active
+            // persona's face ringed, a tap away from
+            // switching. The same component the Identity
+            // tab hosts in full; here it rides compact.
+            PersonaStripView(model: model, compact: true)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+            Divider()
             transcript
             if !model.chatApprovals.isEmpty {
                 Divider()
@@ -437,6 +447,14 @@ struct ChatView: View {
                     .foregroundColor(.red)
                 Text(model.voicePhase == "thinking" ? "Thinking…" : model.voicePhase == "speaking" ? "Speaking…" : "Listening…")
                     .font(.callout)
+                // v0.43.0: whose call this is — the persona
+                // on, named in the strip, so the voice being
+                // heard has its owner in view.
+                if let persona = model.activePersona {
+                    Text("with \(persona.name)")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                }
                 Text(Self.callClock(model.voiceElapsedMs))
                     .font(.callout)
                     .foregroundColor(.secondary)
