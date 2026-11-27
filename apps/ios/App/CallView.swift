@@ -382,7 +382,8 @@ struct CallView: View {
             CallControlButton(
                 title: "Camera",
                 systemImage: "camera.fill",
-                filled: false
+                filled: false,
+                fillColor: .accentColor
             ) { openCamera() }
 
             CallControlButton(
@@ -742,10 +743,17 @@ private struct CallControlButton: View {
     let title: String
     let systemImage: String
     let filled: Bool
-    // Defaulted (v0.41.1): a button that is never filled
-    // (Camera) has no use for a fill color, and requiring
-    // one let a call site omit it and break the archive.
-    let fillColor: Color = .accentColor
+    // Required, and declared before `action` (v0.43.1):
+    // v0.40.1's archive failed because the Camera call
+    // site omitted this argument — but the v0.41.1 fix
+    // (a default here) broke the call sites that DO pass
+    // it: a defaulted parameter immediately before the
+    // trailing-closure `action` breaks trailing-closure
+    // matching (the Speaker site failed with extra /
+    // missing argument errors). So every call site
+    // passes fillColor explicitly, even Camera, whose
+    // button is never filled and never reads the value.
+    let fillColor: Color
     let action: () -> Void
 
     var body: some View {

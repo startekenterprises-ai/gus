@@ -89,17 +89,40 @@ test("CallSession.isAnyCallLive is readable off-actor (the v0.38.1 archive fix)"
   );
 });
 
-// GUS v0.41.1 — the missing-argument pin. CallControlButton
-// declared `let fillColor: Color` with no default, and the
-// Camera call site (v0.36.0) — a button that is never
-// filled, so the value is inert there — omitted it; the
-// v0.40.1 archive failed on that one line, the only error
-// in the log (CallView itself type-checked by then). The
-// fix is the default on the declaration, so no call site
-// can repeat the defect. Pin the exact declaration.
-test("CallControlButton.fillColor carries a default (the v0.41.1 archive fix)", () => {
-  assert.match(
-    allSource,
-    /let fillColor: Color = \.accentColor/
+// GUS v0.43.1 — the fillColor pins, corrected. The
+// v0.40.1 archive failed because the Camera call site
+// (v0.36.0) omitted fillColor, which CallControlButton
+// declared with no default. The v0.41.1 "fix" — a default
+// on the declaration — was WRONG: a defaulted parameter
+// immediately before the trailing-closure `action`
+// parameter breaks trailing-closure matching at the call
+// sites that DO pass it, and the v0.41.1 archive failed
+// at the Speaker site (extra arguments / missing
+// `action` / cannot infer `.accentColor`). The real fix:
+// fillColor stays REQUIRED, and every call site passes
+// it explicitly — Camera included, though its button is
+// never filled and never reads the value. These pins
+// guard that shape, so a future "helpful default"
+// refactor fails this suite instead of Glenn's archive.
+test("CallControlButton.fillColor is declared WITHOUT a default (the v0.43.1 correction)", () => {
+  assert.match(allSource, /let fillColor: Color\n/);
+  assert.doesNotMatch(allSource, /let fillColor: Color\s*=/);
+});
+
+test("every CallControlButton call site in callControlsRow passes fillColor", () => {
+  const rowStart = allSource.indexOf("private var callControlsRow");
+  assert.ok(rowStart >= 0, "callControlsRow not found");
+  const rowEnd = allSource.indexOf("private var ", rowStart + 1);
+  const row = allSource.slice(rowStart, rowEnd > rowStart ? rowEnd : undefined);
+  const callSites = [...row.matchAll(/CallControlButton\(/g)].length;
+  const fillArgs = [...row.matchAll(/fillColor:/g)].length;
+  assert.ok(
+    callSites >= 5,
+    `expected at least 5 CallControlButton call sites in callControlsRow, got ${callSites}`
+  );
+  assert.equal(
+    fillArgs,
+    callSites,
+    `callControlsRow has ${callSites} CallControlButton call sites but only ${fillArgs} fillColor arguments`
   );
 });
