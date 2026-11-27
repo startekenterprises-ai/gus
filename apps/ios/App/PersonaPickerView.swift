@@ -50,6 +50,10 @@ struct PersonaPickerView: View {
     /// the voice card's error line lands when a preview
     /// fails, not on some later redraw.
     @ObservedObject private var preview = VoicePreviewPlayer.shared
+    /// The persona memory store (v0.39.0) — observed so
+    /// the memory card's count moves the beat a line is
+    /// remembered or forgotten, wherever it happened.
+    @ObservedObject private var memoryStore = PersonaMemoryStore.shared
     @AppStorage("gus.avatar.stock") private var stockAvatar = "boy"
 
     /// The stored pick, mirrored live by PersonaSelection.
@@ -95,6 +99,7 @@ struct PersonaPickerView: View {
                 if let starter = LocalBrain.activeStarter {
                     voiceCard(starter)
                 }
+                memoryCard
                 if let offer = downloadOffer {
                     downloadCard(offer)
                 }
@@ -103,7 +108,7 @@ struct PersonaPickerView: View {
                         .font(.callout)
                         .foregroundColor(.secondary)
                 }
-                Text("A pick is a package: the persona's words, its voice, and its face change together, and they land right away — the brain reloads in this same app run with your next message or call. While the Gmail demo pitch is on (Settings → Call mode), it wins over any persona. Making a starter's words your own still happens in Settings — nothing here is locked. A persona's voice can be changed in the card above (the Personas tab is its home — a pick made from the avatar sheet closes the sheet first): tap the play button to hear a voice say the persona's line before you choose it.")
+                Text("A pick is a package: the persona's words, its voice, its face, and its memory change together, and they land right away — the brain reloads in this same app run with your next message or call. While the Gmail demo pitch is on (Settings → Call mode), it wins over any persona. Making a starter's words your own still happens in Settings — nothing here is locked. A persona's voice can be changed in the card above (the Personas tab is its home — a pick made from the avatar sheet closes the sheet first): tap the play button to hear a voice say the persona's line before you choose it.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -282,6 +287,52 @@ struct PersonaPickerView: View {
                 Text(error)
                     .font(.caption)
                     .foregroundColor(.orange)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.08))
+        .cornerRadius(12)
+    }
+
+    // MARK: - The memory card
+
+    /// Whose memory the card below opens: the id is
+    /// LocalBrain.activeMemoryPersonaID — the one
+    /// derivation injection and Remember also use — and
+    /// the name is the picker's own word for that state
+    /// (the general bucket's owner is "General" here,
+    /// though the same state answers to Gus in a chat).
+    private var memoryBucket: (id: String, name: String) {
+        let id = LocalBrain.activeMemoryPersonaID
+        if let starter = LocalBrain.activeStarter { return (id, starter.name) }
+        return (id, id == "general" ? "General" : "Custom")
+    }
+
+    /// The memory door (v0.39.0): one card for whoever is
+    /// on, naming their bucket and its size, opening the
+    /// page where the lines are kept and cured. Memory is
+    /// per persona, so its home is beside the voice card —
+    /// the other half of what makes this persona this
+    /// persona — and the pick decides whose memory this
+    /// is, exactly as it decides whose voice is above.
+    private var memoryCard: some View {
+        let bucket = memoryBucket
+        let count = memoryStore.lines(for: bucket.id).count
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("Memory for \(bucket.name)")
+                .font(.callout)
+                .fontWeight(.semibold)
+            Text(count == 0
+                 ? "Nothing remembered yet — \(bucket.name) starts every conversation fresh. Save one of your messages with Remember, or add lines on the memory page."
+                 : "\(count) \(count == 1 ? "thing" : "things") remembered — background \(bucket.name) carries into every chat and call, on this iPhone only.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            NavigationLink {
+                PersonaMemoryView(personaID: bucket.id, personaName: bucket.name)
+            } label: {
+                Label("Open \(bucket.name)'s memory", systemImage: "brain.head.profile")
+                    .font(.callout)
             }
         }
         .padding(12)

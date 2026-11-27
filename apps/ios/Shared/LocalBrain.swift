@@ -500,14 +500,21 @@ final class LocalBrain {
     }
 
     /// Which prompt the brain loads with: demo mode's pitch
-    /// wins while it's on (it's a mode, not a persona); below
-    /// that, the operator's own prompt when one is saved;
-    /// otherwise the general default. Whichever base wins,
-    /// the shared style block rides along (composedPrompt) —
-    /// the precedence among the bases is unchanged.
+    /// wins while it's on (it's a mode, not a persona);
+    /// below that, the operator's own prompt when one is
+    /// saved; otherwise the general default. Whichever base
+    /// wins, the shared style block rides along
+    /// (composedPrompt) — the precedence among the bases is
+    /// unchanged.
+    ///
+    /// v0.39.0: the active persona's memories ride its
+    /// composition (the personaID door below) — except the
+    /// demo pitch, which carries none: a pitch is a mode,
+    /// and nobody is being remembered at it.
     static var activePrompt: String {
         if demoPitchEnabled { return composedPrompt(emailDemoPrompt) }
-        return composedPrompt(customPrompt ?? generalPrompt)
+        return composedPrompt(customPrompt ?? generalPrompt,
+                              personaID: activeMemoryPersonaID)
     }
 
     /// The starter the operator has picked, if the saved
@@ -525,6 +532,20 @@ final class LocalBrain {
     /// attribution) — nil for an id the shelf doesn't carry.
     static func starter(id: String) -> PersonaStarter? {
         personaStarters.first { $0.id == id }
+    }
+
+    /// The memory bucket the active persona carries
+    /// (v0.39.0): the picked starter's own bucket; "general"
+    /// when no persona is picked (the no-persona state —
+    /// it displays as Gus, but its memories are its own,
+    /// not the Gus starter's); "custom" for the operator's
+    /// own edited words, which match no starter. One
+    /// derivation, here, so prompt injection, the Remember
+    /// action, and the Personas tab's memory card can never
+    /// disagree about whose memory is whose.
+    static var activeMemoryPersonaID: String {
+        if let starter = activeStarter { return starter.id }
+        return customPrompt == nil ? "general" : "custom"
     }
 
     /// The shared conversational style (v0.31.0; deepened
@@ -564,8 +585,22 @@ final class LocalBrain {
     /// the brain between turns — the same mechanism a
     /// persona pick has used since v0.31.0, so a decline or
     /// a "more detail" lands on the very next answer.
-    static func composedPrompt(_ base: String) -> String {
-        base + "\n\n" + styleBlock + PersonaSessionStyle.composedAppendix()
+    ///
+    /// v0.39.0: when a persona id is given, that persona's
+    /// memory block (PersonaMemoryStore) is appended last —
+    /// after the session style, as the freshest background
+    /// the persona carries. An empty bucket appends nothing,
+    /// so a persona with no memories composes byte-identical
+    /// to before memory existed. A memory write therefore
+    /// changes the composed prompt, and the same staleness
+    /// reload lands it on the next turn, in-process.
+    static func composedPrompt(_ base: String, personaID: String? = nil) -> String {
+        var prompt = base + "\n\n" + styleBlock + PersonaSessionStyle.composedAppendix()
+        if let personaID,
+           let block = PersonaMemoryStore.shared.memoryBlock(for: personaID) {
+            prompt += "\n\n" + block
+        }
+        return prompt
     }
 
     /// The general-purpose default (v0.20.0): spoken answers,

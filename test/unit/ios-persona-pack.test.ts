@@ -206,8 +206,11 @@ test("style: one shared style block at the composition layer", () => {
   // activePrompt's precedence survives composition: demo
   // pitch first, then the persona prompt, then general —
   // and every branch goes through composedPrompt.
+  // v0.39.0: the persona branch also passes the active
+  // memory bucket's persona id (the demo pitch passes
+  // none — see ios-persona-memory.test.ts).
   assert.ok(localBrain.includes("return composedPrompt(emailDemoPrompt)"));
-  assert.ok(localBrain.includes("composedPrompt(customPrompt ?? generalPrompt)"));
+  assert.ok(localBrain.includes("composedPrompt(customPrompt ?? generalPrompt,"));
   // The block's jobs, in its own words: short by default,
   // conversational, the person can ask for more detail —
   // and (v0.33.0) anti-template: no repeated stock phrases.

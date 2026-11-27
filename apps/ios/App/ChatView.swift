@@ -518,6 +518,12 @@ struct ChatView: View {
     /// only (ChatModel.isRecordBacked) — it tombstones the
     /// record: gone from this phone in the same beat, gone
     /// from the Mac on the next sync.
+    /// v0.39.0: Remember joins it, on the operator's OWN
+    /// messages only — the words move into the ACTIVE
+    /// persona's memory bucket (ChatModel.remember). Never
+    /// in incognito (incognito writes nothing, anywhere),
+    /// and never on a held or blocked message: words Shield
+    /// stopped have not earned a road into a system prompt.
     @ViewBuilder
     private func messageMenu(_ message: ChatMessage) -> some View {
         let text = message.shareText
@@ -529,6 +535,14 @@ struct ChatView: View {
             }
             ShareLink(item: text) {
                 Label("Share", systemImage: "square.and.arrow.up")
+            }
+        }
+        if message.role == .user, !message.text.isEmpty,
+           !message.held, !message.blocked, !incognitoMode.isOn {
+            Button {
+                model.remember(message)
+            } label: {
+                Label("Remember for \(LocalBrain.activeDisplayName)", systemImage: "brain.head.profile")
             }
         }
         if model.isRecordBacked(message) {
@@ -1619,7 +1633,7 @@ final class ChatModel: ObservableObject {
         guard let entry,
               let passBrain = LocalBrain(
                 modelURL: ModelStore.fileURL(for: entry),
-                systemPrompt: LocalBrain.composedPrompt(starter.prompt))
+                systemPrompt: LocalBrain.composedPrompt(starter.prompt, personaID: starter.id))
         else {
             appendNotice(exchangeID: exchangeID,
                 text: "\(starter.name) couldn't answer — its brain isn't downloaded or wouldn't load.")
@@ -1836,6 +1850,31 @@ final class ChatModel: ObservableObject {
         removeViewMessages(forRecordIds: [targetId])
         builtStoreRevision = store.revision
         syncWithCore()
+    }
+
+    // MARK: Memory (v0.39.0)
+
+    /// Remember one of the operator's own messages for the
+    /// ACTIVE persona: the words move into that persona's
+    /// bucket in PersonaMemoryStore — on this iPhone only,
+    /// never part of chat history, never synced — and a
+    /// notice in the conversation names where they went.
+    /// The write changes the persona's composed prompt, so
+    /// the holders' staleness check reloads the brain
+    /// between turns and the memory is live from the next
+    /// answer. The menu offers this only for the operator's
+    /// own, unheld, unblocked messages and never in
+    /// incognito; the guards repeat here so the door has
+    /// one lock, not two copies of it.
+    func remember(_ message: ChatMessage) {
+        guard message.role == .user, !incognito,
+              !message.held, !message.blocked else { return }
+        let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        PersonaMemoryStore.shared.add(text, to: LocalBrain.activeMemoryPersonaID)
+        let name = LocalBrain.activeDisplayName
+        appendNotice(exchangeID: message.exchangeID,
+            text: "Remembered for \(name). It lives in \(name)'s memory on this iPhone only — not in your chat history, and it never syncs to your Mac.")
     }
 
     /// Take record-backed bubbles off the screen — a local
