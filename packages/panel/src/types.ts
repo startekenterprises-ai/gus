@@ -576,6 +576,55 @@ export interface PanelChatMessageData {
   /** v0.24.0: photos sent with this (inbound) entry — the count
    *  only; image data is never part of the transcript. */
   photos?: number;
+  /** v0.26.0: the entry's sync identity (chat-history sync) —
+   *  the creating device's ID, its per-device sequence, and the
+   *  causal pointer to the previous message. */
+  id?: string;
+  deviceId?: string;
+  seq?: number;
+  prevId?: string | null;
+}
+
+/** v0.26.0: the sync identity a chat submission may carry,
+ *  minted by the creating device (the iOS chat). The core
+ *  records the submission under this identity rather than
+ *  minting its own. */
+export interface PanelChatSubmitIdentityData {
+  id: string;
+  deviceId: string;
+  seq: number;
+  prevId: string | null;
+  ts: number;
+}
+
+/** v0.26.0: one synced chat record — mirrors @gus/shared's
+ *  SyncedChatMessage. The wire shape of chat-history sync. */
+export interface PanelChatSyncMessageData {
+  id: string;
+  deviceId: string;
+  seq: number;
+  prevId: string | null;
+  ts: number;
+  direction: "in" | "out";
+  text: string;
+  photos?: number;
+}
+
+/** v0.26.0: one chat-sync exchange. The caller names the
+ *  record IDs it holds and may push records the core lacks;
+ *  the answer carries the records the caller lacks and the
+ *  caller's IDs the core still wants. */
+export interface PanelChatSyncRequestData {
+  deviceId: string;
+  haveIds: string[];
+  messages?: PanelChatSyncMessageData[];
+}
+
+export interface PanelChatSyncResultData {
+  deviceId: string;
+  missing: PanelChatSyncMessageData[];
+  wantIds: string[];
+  conflicts: number;
 }
 
 /** v0.24.0: one photo attached to a chat submission — mirrors
@@ -799,9 +848,18 @@ export interface PanelBackend {
    *  chat is a channel adapter, not a side door. v0.24.0: a
    *  submission may carry photos, which ride the same pipeline
    *  to the model as image input. */
-  submitChat(text: string, images?: PanelChatImageData[]): Promise<PanelActionResult>;
+  submitChat(
+    text: string,
+    images?: PanelChatImageData[],
+    identity?: PanelChatSubmitIdentityData,
+  ): Promise<PanelActionResult>;
   /** v0.6: the Chat view's read model, from durable state. */
   chatHistory(): PanelChatData;
+  /** v0.26.0: one chat-history sync exchange with a device —
+   *  ingest its pushed records (history only, never emitted
+   *  as channel events) and answer with the records it lacks
+   *  plus the IDs this store still wants from it. */
+  chatSync(req: PanelChatSyncRequestData): PanelChatSyncResultData;
   /** v0.6: the latest Watch frame, fetched on demand from the Mac
    *  bridge's observation path (throttled by the backend to ~1 fps;
    *  nothing is captured while nobody asks). ok:false with an

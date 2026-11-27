@@ -1017,7 +1017,11 @@ const panelBackend: PanelBackend = {
   // the ordinary channel event; history is the adapter's durable
   // transcript plus this conversation's jobs from the same store
   // /api/jobs reads.
-  submitChat: async (text, images) => panelChat.submit(text, images),
+  submitChat: async (text, images, identity) => panelChat.submit(text, images, identity),
+  // v0.26.0: chat-history sync — the adapter's exchange,
+  // verbatim. Ingested records are history only; the adapter
+  // never emits them as channel events.
+  chatSync: (req) => panelChat.syncExchange(req),
   chatHistory: () => {
     const urls = shieldVerifyUrls();
     return {

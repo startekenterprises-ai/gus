@@ -217,6 +217,7 @@ async function rig(opts?: { shieldGate?: unknown; macHost?: MacHostAdapter }): P
         .reverse()
         .map(toJobData),
     }),
+    chatSync: (req) => panelChat.syncExchange(req),
     watchFrame: () => frames.frame(),
     watchTimeline: () => readWatchTimeline(dir, 60),
     voiceSettings: () => ({

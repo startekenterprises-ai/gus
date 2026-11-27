@@ -23,6 +23,15 @@ import UIKit
 /// note on the message says so in plain words at send time —
 /// never a silent drop, never a pretend delivery. The photo
 /// button stays disabled until a core is connected.
+///
+/// History is ONE conversation across phone and Mac
+/// (v0.26.0): every message is born as a record in the
+/// phone's durable sync store (ChatHistoryStore) and merges
+/// with the core's transcript by union — per-message IDs,
+/// causal ordering, no duplicates, nothing lost. Offline
+/// chats are simply store records that haven't synced yet;
+/// they flow to the desk on the next exchange with no
+/// action from the operator.
 struct ChatView: View {
     /// Extra bottom room that clears the floating tab
     /// bar's pill (v0.17.4) — the Call screen's figure,
@@ -404,9 +413,50 @@ final class ChatModel: ObservableObject {
         didSet { isReplying = replyingCount > 0 }
     }
     private var corePollTask: Task<Void, Never>?
-    private var coreBaselineTaken = false
-    private var coreSeenCount = 0
     private var pendingCoreExchanges: [UUID] = []
+    /// v0.26.0: the durable sync store — the ONE conversation,
+    /// shared with the core by union merge. The view's
+    /// record-backed messages ARE store records (same UUID);
+    /// notices and the streaming reply bubble stay session
+    /// ephemera and are never stored or synced.
+    private let store = ChatHistoryStore()
+    /// Record UUID → the exchange the view groups it under.
+    private var exchangeByRecordId: [UUID: UUID] = [:]
+    /// Exchange → the operator's store record for it, so a
+    /// Core dispatch carries the record's birth identity.
+    private var userRecordByExchange: [UUID: SyncedChatRecord] = [:]
+    private var syncInFlight = false
+
+    init() {
+        loadStoredHistory()
+    }
+
+    /// The view's opening state is the store's canonical
+    /// history — the same merged order the core renders.
+    /// Exchanges derive causally: an "in" record opens an
+    /// exchange; the "out" records that follow join it.
+    private func loadStoredHistory() {
+        var currentExchange: UUID?
+        for record in store.ordered {
+            guard let rid = UUID(uuidString: record.id) else { continue }
+            let exchange: UUID
+            if record.direction == "in" {
+                exchange = rid
+                currentExchange = rid
+            } else {
+                exchange = currentExchange ?? rid
+            }
+            exchangeByRecordId[rid] = exchange
+            var message = ChatMessage(
+                id: rid, exchangeID: exchange,
+                role: record.direction == "in" ? .user : .assistant,
+                text: record.text)
+            if record.direction == "in", let photos = record.photos, photos > 0 {
+                message.photoNote = photos == 1 ? "1 photo" : "\(photos) photos"
+            }
+            messages.append(message)
+        }
+    }
     /// Exchanges where a reply sentence was already replaced
     /// by the canned line (one per exchange, as on the call).
     private var cannedReplyExchanges: Set<UUID> = []
@@ -419,6 +469,10 @@ final class ChatModel: ObservableObject {
 
     func refreshMode() {
         mode = CallMode.preferred
+        // Appearing is a sync moment: whatever the desk said
+        // while this screen was away folds in, and whatever
+        // this phone said offline flows out.
+        syncWithCore()
     }
 
     func receipts(for exchangeID: UUID) -> [ShieldReceipt] {
@@ -477,7 +531,22 @@ final class ChatModel: ObservableObject {
         let photo = photoData
         clearPhoto()
         let exchangeID = UUID()
-        let message = ChatMessage(exchangeID: exchangeID, role: .user, text: text, photoData: photo)
+        // v0.26.0: the message is BORN as a sync record —
+        // in the durable store, chained to the conversation
+        // head, before the Shield gate runs. The gate governs
+        // whether the words are DISPATCHED to a brain, never
+        // whether they exist: a blocked or held message is
+        // still the operator's own history on his own devices,
+        // exactly as the core's transcript records a panel
+        // submission before its pipeline scan.
+        let syncRecord = store.appendLocal(
+            direction: "in", text: text, photos: photo != nil ? 1 : 0)
+        let recordUUID = UUID(uuidString: syncRecord.id) ?? UUID()
+        exchangeByRecordId[recordUUID] = exchangeID
+        userRecordByExchange[exchangeID] = syncRecord
+        let message = ChatMessage(
+            id: recordUUID, exchangeID: exchangeID, role: .user,
+            text: text, photoData: photo)
         messages.append(message)
         // The Shield gate — the same one the call runs
         // (v0.15.7): your words are scanned BEFORE any brain
@@ -592,8 +661,25 @@ final class ChatModel: ObservableObject {
             if reply.isEmpty,
                !self.messages.contains(where: { $0.exchangeID == exchangeID && $0.role == .assistant }) {
                 self.appendNotice(exchangeID: exchangeID, text: "GUS didn't reply to that.")
+            } else if let assembled = self.messages.last(where: {
+                $0.exchangeID == exchangeID && $0.role == .assistant
+            })?.text, !assembled.isEmpty {
+                // v0.26.0: the reply joins the durable history
+                // as a phone-born record — the SHOWN text,
+                // post-scan (a stopped sentence's record is
+                // the canned line: the stopped words were
+                // never delivered, so they are not the
+                // message). It syncs to the desk like
+                // everything else in the store.
+                let replyRecord = self.store.appendLocal(direction: "out", text: assembled)
+                if let rid = UUID(uuidString: replyRecord.id) {
+                    self.exchangeByRecordId[rid] = exchangeID
+                }
             }
             self.replyingCount -= 1
+            // Share the finished exchange with the desk
+            // promptly when a core is configured.
+            self.syncWithCore()
         }
     }
 
@@ -642,17 +728,17 @@ final class ChatModel: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             do {
-                // Baseline first: the transcript is
-                // append-only, and the poll below tells new
-                // replies from old ones by position — the
-                // count must be taken before our own message
-                // is recorded in it.
-                if !self.coreBaselineTaken {
-                    let history = try await self.client.chatHistory()
-                    self.coreSeenCount = history.messages.count
-                    self.coreBaselineTaken = true
+                // v0.26.0: the submission carries the message's
+                // sync identity — the core records it under its
+                // birth identity (this phone is the creating
+                // device) and the reply comes back through sync,
+                // recognized by ID, never by transcript position.
+                let identity = self.userRecordByExchange[exchangeID].map {
+                    ChatSubmitSync(
+                        id: $0.id, deviceId: $0.deviceId, seq: $0.seq,
+                        prevId: $0.prevId, ts: $0.ts)
                 }
-                let result = try await self.client.chat(text: text, images: images)
+                let result = try await self.client.chat(text: text, images: images, sync: identity)
                 guard result.ok else {
                     if !images.isEmpty {
                         self.setPhotoNote(exchangeID: exchangeID,
@@ -680,41 +766,131 @@ final class ChatModel: ObservableObject {
         }
     }
 
-    /// Polls the core's chat history while any Core exchange
-    /// is waiting: replies arrive as "out" messages in the
-    /// transcript, because the channel is asynchronous (the
-    /// Mac's own Chat view reads the same transcript). The
-    /// loop makes no request while nothing is pending and
-    /// dies with the model.
+    /// Polls sync while any Core exchange is waiting: the
+    /// channel is asynchronous, and the reply arrives as a
+    /// core-born "out" record in a sync exchange. The loop
+    /// makes no request while nothing is pending and dies
+    /// with the model.
     private func startCorePolling() {
         guard corePollTask == nil else { return }
         corePollTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                if !self.pendingCoreExchanges.isEmpty,
-                   let history = try? await self.client.chatHistory() {
-                    let fresh = history.messages.dropFirst(self.coreSeenCount)
-                    self.coreSeenCount = history.messages.count
-                    for message in fresh where message.direction == "out" {
-                        self.deliverCoreReply(message.text)
-                    }
+                if !self.pendingCoreExchanges.isEmpty {
+                    self.syncWithCore()
                 }
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
         }
     }
 
-    private func deliverCoreReply(_ text: String) {
-        if pendingCoreExchanges.isEmpty {
-            // An answer to something asked on another surface
-            // (the Mac's Chat view shares this transcript):
-            // show it as its own exchange rather than eating it.
-            appendScannedReply(exchangeID: UUID(), text: text)
+    // MARK: Sync (v0.26.0)
+
+    /// One sync exchange with the core, in the design's two
+    /// steps: name every record ID this phone holds and fold
+    /// in what it lacks; then push the records the core still
+    /// wants. Best-effort by design — offline is a normal
+    /// state for this app, a failed exchange changes nothing,
+    /// and the stores converge on the next one that lands.
+    func syncWithCore() {
+        guard coreConnected, !syncInFlight else { return }
+        syncInFlight = true
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.syncInFlight = false }
+            do {
+                let first = try await self.client.chatSync(
+                    deviceId: self.store.deviceId,
+                    haveIds: self.store.allIds,
+                    messages: [])
+                let arrivals = self.store.ingest(
+                    first.missing.map { SyncedChatRecord(wire: $0) })
+                self.processArrivals(arrivals.added)
+                if !first.wantIds.isEmpty {
+                    let wanted = self.store.messages(forIds: first.wantIds)
+                    _ = try await self.client.chatSync(
+                        deviceId: self.store.deviceId,
+                        haveIds: self.store.allIds,
+                        messages: wanted.map { $0.wire })
+                }
+            } catch {
+                // Unreachable core: nothing folded, nothing
+                // lost — every record is durable on this side.
+            }
+        }
+    }
+
+    /// Fold newly arrived records into the view, at their
+    /// canonical positions. "out" records get the arrival
+    /// scan a Core reply has always gotten (below); "in"
+    /// records are the operator's own words from another
+    /// surface — the core's Shield ingress scanned them when
+    /// they were submitted there, and sync itself never
+    /// dispatches anything to a brain, so there is no
+    /// unscanned path from a synced record to a model.
+    private func processArrivals(_ records: [SyncedChatRecord]) {
+        for record in records {
+            guard let rid = UUID(uuidString: record.id) else { continue }
+            if record.direction == "out" {
+                let exchangeID: UUID
+                if !pendingCoreExchanges.isEmpty {
+                    exchangeID = pendingCoreExchanges.removeFirst()
+                    replyingCount -= 1
+                } else if let preceding = precedingExchange(for: record) {
+                    exchangeID = preceding
+                } else {
+                    exchangeID = UUID()
+                }
+                exchangeByRecordId[rid] = exchangeID
+                let shown = scannedReplyText(exchangeID: exchangeID, text: record.text)
+                insertViewMessage(
+                    ChatMessage(id: rid, exchangeID: exchangeID, role: .assistant, text: shown),
+                    record: record)
+            } else {
+                exchangeByRecordId[rid] = rid
+                var message = ChatMessage(
+                    id: rid, exchangeID: rid, role: .user, text: record.text)
+                if let photos = record.photos, photos > 0 {
+                    message.photoNote = photos == 1 ? "1 photo" : "\(photos) photos"
+                }
+                insertViewMessage(message, record: record)
+            }
+        }
+    }
+
+    /// The exchange a synced reply belongs to when no Core
+    /// exchange is pending: the nearest preceding "in"
+    /// record's exchange (a reply from a conversation the
+    /// desk had — it renders under the words it answered).
+    private func precedingExchange(for record: SyncedChatRecord) -> UUID? {
+        let ordered = store.ordered
+        guard let index = ordered.firstIndex(where: { $0.id == record.id }) else { return nil }
+        for prior in ordered[..<index].reversed() where prior.direction == "in" {
+            if let rid = UUID(uuidString: prior.id) {
+                return exchangeByRecordId[rid] ?? rid
+            }
+        }
+        return nil
+    }
+
+    /// Insert a record-backed message at its canonical
+    /// position among the view's record-backed messages.
+    /// Session ephemera (notices, the streaming bubble) are
+    /// not in the canonical order and keep their places.
+    private func insertViewMessage(_ message: ChatMessage, record: SyncedChatRecord) {
+        let ordered = store.ordered
+        guard let index = ordered.firstIndex(where: { $0.id == record.id }) else {
+            messages.append(message)
             return
         }
-        let exchangeID = pendingCoreExchanges.removeFirst()
-        appendScannedReply(exchangeID: exchangeID, text: text)
-        replyingCount -= 1
+        let laterIds = Set(ordered[(index + 1)...].map { $0.id.lowercased() })
+        if let at = messages.firstIndex(where: {
+            laterIds.contains($0.id.uuidString.lowercased())
+        }) {
+            messages.insert(message, at: at)
+        } else {
+            messages.append(message)
+        }
     }
 
     /// A Core reply, scanned whole on arrival — Core replies
@@ -722,8 +898,11 @@ final class ChatModel: ObservableObject {
     /// is written before the text is shown, and a blocked
     /// reply is replaced by the canned line: the words
     /// themselves never render. A quarantined reply is
-    /// shown; the receipt carries the warning.
-    private func appendScannedReply(exchangeID: UUID, text: String) {
+    /// shown; the receipt carries the warning. The STORE
+    /// always keeps the record verbatim — the substitution
+    /// is display-only, or the two stores' copies of one
+    /// message would diverge and every merge would conflict.
+    private func scannedReplyText(exchangeID: UUID, text: String) -> String {
         var shown = text
         if ShieldSettings.enabled {
             let scan = ShieldScanner.scan(text, posture: ShieldSettings.posture)
@@ -732,7 +911,7 @@ final class ChatModel: ObservableObject {
                 shown = "I stopped part of that reply — it matched a known injection pattern."
             }
         }
-        messages.append(ChatMessage(exchangeID: exchangeID, role: .assistant, text: shown))
+        return shown
     }
 
     // MARK: Shared helpers

@@ -708,6 +708,7 @@ function stubBackend(wired: boolean): PanelBackend {
     installSkill: action,
     submitChat: action,
     chatHistory: () => ({ conversationId: "panel-chat", messages: [], jobs: [] }),
+    chatSync: () => ({ deviceId: "test-core", missing: [], wantIds: [], conflicts: 0 }),
     watchFrame: async () => ({ ok: false as const, detail: "no frame in the stub" }),
     watchTimeline: () => [],
     voiceSettings: () => ({

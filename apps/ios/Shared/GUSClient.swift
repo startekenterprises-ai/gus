@@ -108,6 +108,75 @@ struct PanelChatHistory: Decodable {
     let messages: [Message]
 }
 
+/// One synced chat record (v0.26.0) — the wire shape of
+/// chat-history sync, mirroring @gus/shared's
+/// SyncedChatMessage: born with a UUID, the creating device's
+/// ID, a per-device sequence, and a causal pointer (prevId);
+/// ts is display-only. Photos ride as a count, never data.
+struct ChatSyncMessage: Decodable {
+    let id: String
+    let deviceId: String
+    let seq: Int
+    let prevId: String?
+    let ts: Double
+    let direction: String
+    let text: String
+    let photos: Int?
+
+    /// The JSON body shape for a push — prevId written
+    /// explicitly (null at genesis), as the wire contract
+    /// names it on every record.
+    var wireDictionary: [String: Any] {
+        var d: [String: Any] = [
+            "id": id, "deviceId": deviceId, "seq": seq, "ts": ts,
+            "direction": direction, "text": text,
+        ]
+        if let prevId {
+            d["prevId"] = prevId
+        } else {
+            d["prevId"] = NSNull()
+        }
+        if let photos {
+            d["photos"] = photos
+        }
+        return d
+    }
+}
+
+/// POST /api/chat/sync — one exchange's answer: the records
+/// the caller lacks, and the caller's IDs the core still
+/// wants (sent in a follow-up exchange).
+struct ChatSyncResponse: Decodable {
+    let deviceId: String
+    let missing: [ChatSyncMessage]
+    let wantIds: [String]
+    let conflicts: Int
+}
+
+/// The sync identity a live chat submission carries (v0.26.0)
+/// — minted by the creating device (this phone, in
+/// ChatHistoryStore) so the core records the message under
+/// its birth identity instead of minting its own.
+struct ChatSubmitSync {
+    let id: String
+    let deviceId: String
+    let seq: Int
+    let prevId: String?
+    let ts: Double
+
+    var wireDictionary: [String: Any] {
+        var d: [String: Any] = [
+            "id": id, "deviceId": deviceId, "seq": seq, "ts": ts,
+        ]
+        if let prevId {
+            d["prevId"] = prevId
+        } else {
+            d["prevId"] = NSNull()
+        }
+        return d
+    }
+}
+
 /// One spoken segment of a reply, in seq order: either audio
 /// (audioBase64 + its content type) or — in built-in TTS mode —
 /// a `text` the app speaks with its own synthesizer. ok with no
@@ -302,12 +371,15 @@ actor GUSClient {
     /// core presents them to its brain as image input; the
     /// core's transcript records only the count. A photo-only
     /// message (empty text) is a valid submission.
-    func chat(text: String, images: [Data] = []) async throws -> ActionResult {
+    func chat(text: String, images: [Data] = [], sync: ChatSubmitSync? = nil) async throws -> ActionResult {
         var body: [String: Any] = ["text": text]
         if !images.isEmpty {
             body["images"] = images.map {
                 ["mediaType": "image/jpeg", "data": $0.base64EncodedString()]
             }
+        }
+        if let sync {
+            body["sync"] = sync.wireDictionary
         }
         let (data, status) = try await requestRaw(
             "/api/chat", method: "POST", jsonBody: body)
@@ -315,6 +387,22 @@ actor GUSClient {
             throw ClientError.http(status, String(data: data, encoding: .utf8) ?? "")
         }
         return try decode(ActionResult.self, data)
+    }
+
+    /// One chat-history sync exchange (v0.26.0): name the
+    /// record IDs this phone holds, optionally push records
+    /// the core wants; the answer carries the records this
+    /// phone lacks plus the IDs the core still wants. Pushed
+    /// records are HISTORY on the core — recorded verbatim,
+    /// never emitted as channel events (they were answered,
+    /// or deliberately never dispatched, where they were
+    /// born). Live dispatch is chat() above, never this.
+    func chatSync(deviceId: String, haveIds: [String], messages: [ChatSyncMessage]) async throws -> ChatSyncResponse {
+        var body: [String: Any] = ["deviceId": deviceId, "haveIds": haveIds]
+        if !messages.isEmpty {
+            body["messages"] = messages.map { $0.wireDictionary }
+        }
+        return try decode(ChatSyncResponse.self, await request("/api/chat/sync", method: "POST", jsonBody: body))
     }
 
     func chatHistory() async throws -> PanelChatHistory {

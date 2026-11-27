@@ -38,6 +38,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JsonlLogCache } from "../../packages/control-plane/src/log-cache.js";
+import { validateSyncedChatMessage } from "../../packages/shared/src/index.js";
 import { Governor, type LedgerEntry } from "../../packages/control-plane/src/governor.js";
 import {
   PanelChatAdapter,
@@ -203,7 +204,11 @@ test("governor equivalence: spendSummary matches the naive full parse, across ap
 
 // ------------------------------------------------------------ panel chat
 
-/** The pre-cache history reader, re-implemented naively. */
+/** The pre-cache history reader, re-implemented naively —
+ *  v0.26.0: mirroring the current line mapping, sync fields
+ *  included (history() migrates legacy lines first, so the
+ *  file it reads back carries identities the naive reader
+ *  must project exactly as mapChatLine does). */
 function naiveHistory(dir: string, limit = 200): PanelChatEntry[] {
   const p = join(dir, "chat.jsonl");
   if (!existsSync(p)) return [];
@@ -211,10 +216,30 @@ function naiveHistory(dir: string, limit = 200): PanelChatEntry[] {
   for (const line of readFileSync(p, "utf8").split("\n")) {
     if (!line.trim()) continue;
     try {
-      const r = JSON.parse(line) as { conversationId?: string; ts?: number; direction?: string; text?: string };
+      const r = JSON.parse(line) as {
+        conversationId?: string; ts?: number; direction?: string; text?: string;
+        photos?: number; id?: unknown; deviceId?: unknown; seq?: unknown; prevId?: unknown;
+      };
       if (r.conversationId !== PANEL_CHAT_CONVERSATION) continue;
       if (typeof r.ts !== "number" || typeof r.text !== "string") continue;
-      out.push({ ts: r.ts, direction: r.direction === "in" ? "in" : "out", text: r.text });
+      const entry: PanelChatEntry = {
+        ts: r.ts,
+        direction: r.direction === "in" ? "in" : "out",
+        text: r.text,
+        ...(typeof r.photos === "number" && r.photos > 0 ? { photos: r.photos } : {}),
+      };
+      const synced = validateSyncedChatMessage({
+        id: r.id, deviceId: r.deviceId, seq: r.seq, prevId: r.prevId,
+        ts: entry.ts, direction: entry.direction, text: entry.text,
+        ...(entry.photos ? { photos: entry.photos } : {}),
+      });
+      if (synced) {
+        entry.id = synced.id;
+        entry.deviceId = synced.deviceId;
+        entry.seq = synced.seq;
+        entry.prevId = synced.prevId;
+      }
+      out.push(entry);
     } catch { /* torn line — skip */ }
   }
   return out.slice(-limit);

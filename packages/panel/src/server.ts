@@ -36,7 +36,7 @@
  */
 import { createServer, type Server } from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import type { PanelBackend } from "./types.js";
+import type { PanelBackend, PanelChatSyncMessageData } from "./types.js";
 import { PANEL_HTML } from "./page.js";
 import { HELP_ENTRIES, HELP_HTML } from "./help.js";
 
@@ -270,11 +270,54 @@ export class PanelServer {
       // here the body field is only passed through when it is an
       // array — anything else is treated as no photos, and the
       // adapter refuses unusable entries with its own detail.
+      // v0.26.0: `sync` carries the creating device's sync
+      // identity for the message, passed through only when it
+      // is a plausible shape — the adapter validates it fully.
+      const sync = body.sync as
+        | { id?: unknown; deviceId?: unknown; seq?: unknown; prevId?: unknown; ts?: unknown }
+        | undefined;
+      const identity =
+        sync &&
+        typeof sync.id === "string" &&
+        typeof sync.deviceId === "string" &&
+        typeof sync.seq === "number" &&
+        (sync.prevId === null || typeof sync.prevId === "string") &&
+        typeof sync.ts === "number"
+          ? {
+              id: sync.id,
+              deviceId: sync.deviceId,
+              seq: sync.seq,
+              prevId: sync.prevId as string | null,
+              ts: sync.ts,
+            }
+          : undefined;
       const result = await this.backend.submitChat(
         typeof body.text === "string" ? body.text : "",
         Array.isArray(body.images) ? body.images : undefined,
+        identity,
       );
       return json(result.ok ? 200 : 400, result);
+    }
+
+    // v0.26.0: chat-history sync — one exchange per POST. The
+    // caller names the record IDs it holds and may push the
+    // records this store lacks; the answer carries the records
+    // the caller lacks and the IDs the store still wants. The
+    // adapter validates every pushed record fully; the body
+    // cap matches the chat route's (records are text, but a
+    // catch-up after a long offline stretch is not small).
+    if (method === "POST" && path === "/api/chat/sync") {
+      const body = await this.readJson(req, MAX_CHAT_BODY_BYTES);
+      const result = this.backend.chatSync({
+        deviceId: typeof body.deviceId === "string" ? body.deviceId : "",
+        haveIds: Array.isArray(body.haveIds)
+          ? body.haveIds.filter((id): id is string => typeof id === "string")
+          : [],
+        messages: Array.isArray(body.messages)
+          ? (body.messages as PanelChatSyncMessageData[])
+          : undefined,
+      });
+      return json(200, result);
     }
 
     // v0.9: the voice channel — settings (the operator's local

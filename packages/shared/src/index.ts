@@ -5,3 +5,4 @@ export * from "./channel.js";
 export * from "./jobs.js";
 export * from "./stores.js";
 export * from "./comm.js";
+export * from "./chat-sync.js";
