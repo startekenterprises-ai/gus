@@ -125,6 +125,11 @@ final class KokoroSpeechEngine: SpeechEngine {
         // log — the record the call screen and Settings →
         // About read when a call goes silent.
         player.onDiagnostic = { line in VoiceFailureLog.shared.recordInfo(line) }
+        // Caught play() exceptions (v0.27.2): the containment
+        // shim's catches are FAILURES in the log, with the
+        // exception's name and reason verbatim — the words
+        // Settings → About was missing through two crashes.
+        player.onPlaybackException = { line in VoiceFailureLog.shared.recordFailure(line) }
     }
     private let lock = NSLock()
     private var generation = 0

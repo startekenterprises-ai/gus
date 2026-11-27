@@ -79,6 +79,25 @@
 	<string>GUS listens while you are on a call with it — that is the call. The microphone is live only during a call you started.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>GUS turns your speech into text during calls so it can answer you. Recognition runs on this iPhone whenever the system allows it.</string>
+	<!--
+		v0.27.2: the launch screen. Through 0.27.1 this plist
+		carried NO launch-screen configuration at all — no
+		UILaunchStoryboardName, no UILaunchScreen, and no
+		LaunchScreen storyboard exists — so iOS ran the app in
+		compatibility mode at a legacy resolution: letterboxed,
+		scaled, visibly not filling the screen on Glenn's
+		iPhone (field screenshot, 2026-11-27) while other apps
+		filled theirs. The empty-storyboard UILaunchScreen
+		dict below is what opts the app into native full
+		resolution; its color names the LaunchBackground
+		colorset in App/Assets.xcassets (the icon's navy), so
+		the launch flash is brand navy rather than white.
+	-->
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UIColorName</key>
+		<string>LaunchBackground</string>
+	</dict>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

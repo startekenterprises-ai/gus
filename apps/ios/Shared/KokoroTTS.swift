@@ -369,6 +369,17 @@ final class KokoroPlayer {
     /// engine's stage-2 catch records them); this is context.
     var onDiagnostic: ((String) -> Void)?
 
+    /// A play() the containment shim had to catch (v0.27.2):
+    /// fired with the NSException's name and reason, Apple's
+    /// own words, the moment the shim returns them — whether
+    /// or not the one permitted rebuild then saves the
+    /// sentence. The speech engine wires this into
+    /// VoiceFailureLog as a FAILURE (not an info line), so
+    /// Settings → About carries the reason the audio layer
+    /// objected, which two crash-only field reports never
+    /// could. See startPlayback and GUSPlayShim.h.
+    var onPlaybackException: ((String) -> Void)?
+
     var isPlaying: Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -491,6 +502,24 @@ final class KokoroPlayer {
         // a thrown error — the speech engine's stage-2 catch
         // logs it and finishes the sentence — never a play()
         // into an unproven graph.
+        //
+        // v0.27.2 — the guarantee above was necessary and NOT
+        // sufficient. The identical crash recurred on 0.27.1
+        // (GUS-2026-11-27-100032.ips): same StartImpl raise,
+        // same thread, with ensurePlayable's proof passing
+        // immediately before the call. The engine's reported
+        // state can pass every check while StartImpl still
+        // raises — the graph state under voice processing is
+        // the suspect area, but the micro-cause is unproven
+        // and this comment does not claim one. What is proven
+        // is the shape of the only possible fix: Swift cannot
+        // catch an NSException, so the bare play() call itself
+        // had to go. play() is now reached only through the
+        // Objective-C containment shim (startPlayback below,
+        // GUSPlayShim.h), which returns a raise as data; the
+        // proof remains, as defense in depth and because its
+        // throws still name an unplayable state in words — but
+        // containment, not prevention, is what ends the crash.
         playLock.lock()
         do {
             try ensurePlayable(playFormat: playFormat, voiceProcessing: voiceProcessing, sourceFormat: format)
@@ -507,9 +536,82 @@ final class KokoroPlayer {
         player.scheduleBuffer(playBuffer) { [weak self] in
             self?.fireFinish()
         }
-        player.play()
+        do {
+            try startPlayback(playBuffer: playBuffer, playFormat: playFormat, voiceProcessing: voiceProcessing, sourceFormat: format)
+        } catch {
+            playLock.unlock()
+            throw error
+        }
         playLock.unlock()
         onLevelChange?(level)
+    }
+
+    /// Start the scheduled buffer playing — through the
+    /// Objective-C containment shim (GUSPlayShim), never a
+    /// bare player.play(). Called under playLock, with the
+    /// buffer already scheduled and ensurePlayable's proof
+    /// fresh. A clean play returns at once. On a caught
+    /// exception, in order:
+    ///
+    /// 1. TELEMETRY — the exception's name and reason go out
+    ///    verbatim via onPlaybackException (the speech engine
+    ///    records it in VoiceFailureLog), whether or not the
+    ///    sentence is then saved. This is the diagnostic the
+    ///    crash-only reports never carried.
+    /// 2. RECOVERY — exactly ONE rebuild: the player's queued
+    ///    buffer is flushed (reset), the connection is forced
+    ///    through ensurePlayable again, the buffer is
+    ///    re-scheduled, and the shim play is retried ONCE.
+    /// 3. GIVE-UP — a second catch, or a rebuild whose own
+    ///    proof throws, clears the pending finish WITHOUT
+    ///    firing it and throws, so the speech engine's stage-2
+    ///    catch records the failure and finishes the sentence
+    ///    — the same contract ensurePlayable's throws already
+    ///    had. The app never aborts, and this never loops:
+    ///    one rebuild, one retry, then the sentence is over.
+    private func startPlayback(playBuffer: AVAudioPCMBuffer, playFormat: AVAudioFormat, voiceProcessing: Bool, sourceFormat: AVAudioFormat) throws {
+        guard let caught = GUSAudioPlayerPlayCatching(player) else { return }
+        onPlaybackException?("play() raised \(caught)")
+        // Flush whatever the failed start left queued: a
+        // stale buffer rendering under a later sentence would
+        // speak the wrong words, and a queue whose state the
+        // raise just called into question cannot be trusted.
+        // reset() discards scheduled buffers without firing
+        // their completions, so the pending finish below is
+        // still this sentence's to fire — exactly once, by
+        // whichever buffer actually plays.
+        player.reset()
+        do {
+            connectedFormat = nil
+            try ensurePlayable(playFormat: playFormat, voiceProcessing: voiceProcessing, sourceFormat: format)
+        } catch {
+            clearPendingFinish()
+            throw error
+        }
+        player.scheduleBuffer(playBuffer) { [weak self] in
+            self?.fireFinish()
+        }
+        if let caughtAgain = GUSAudioPlayerPlayCatching(player) {
+            onPlaybackException?("play() raised again after one reconnect: \(caughtAgain)")
+            player.reset()
+            clearPendingFinish()
+            throw NSError(domain: "GUS.Kokoro", code: 13, userInfo: [
+                NSLocalizedDescriptionKey: "The voice's player wouldn't start even after its connection was rebuilt (\(caughtAgain)) — this sentence can't be played.",
+            ])
+        }
+    }
+
+    /// Drop the pending finish WITHOUT firing it, and mark
+    /// playback stopped. Used when playback is about to throw
+    /// after `finish` was already set: the speech engine's
+    /// stage-2 catch finishes the sentence itself, and a
+    /// stored callback firing later (a late buffer
+    /// completion, a stop()) would finish it a second time.
+    private func clearPendingFinish() {
+        lock.lock()
+        finish = nil
+        playing = false
+        lock.unlock()
     }
 
     /// Establish — and then prove — the state play()
@@ -522,6 +624,13 @@ final class KokoroPlayer {
     /// checks) and the engine's running state, after any
     /// reconnect or start this call performed. Throws rather
     /// than letting play() proceed on an unproven state.
+    /// Since v0.27.2 the connection proof walks the FULL
+    /// chain — player → mixer → the engine's output node —
+    /// where v0.27.0 proved only the player's own hop; the
+    /// mixer's hop is established here too when the engine
+    /// no longer shows it. (The proof is defense in depth
+    /// now, not the crash fix — containment is; see
+    /// playSamples.)
     private func ensurePlayable(playFormat: AVAudioFormat, voiceProcessing: Bool, sourceFormat: AVAudioFormat) throws {
         if !attached {
             engine.attach(player)
@@ -547,6 +656,20 @@ final class KokoroPlayer {
             connectedFormat = playFormat
             onDiagnostic?("Playback path: voice processing \(voiceProcessing ? "on" : "off"), samples \(Self.describe(sourceFormat)) → playing \(Self.describe(playFormat)), engine \(engine.isRunning ? "running" : "stopped").")
         }
+        // The rest of the chain (v0.27.2): the mixer's own
+        // hop to the output node. The engine normally keeps
+        // its main mixer connected to the output itself, so
+        // this is a proof, not a construction — but a graph
+        // the voice-processing unit has had its hands on is
+        // exactly where an assumption deserves a check, and
+        // if the hop is missing the standard connection is
+        // restored. The format is left to the engine (nil):
+        // the mixer's output format is whatever the graph's
+        // format is, and naming one here could only disagree
+        // with it.
+        if !isMixerConnectedToOutput {
+            engine.connect(engine.mainMixerNode, to: engine.outputNode, format: nil)
+        }
         if !engine.isRunning {
             try engine.start()
         }
@@ -560,6 +683,11 @@ final class KokoroPlayer {
                 NSLocalizedDescriptionKey: "The call's audio engine isn't running — this sentence can't be played.",
             ])
         }
+        guard isMixerConnectedToOutput else {
+            throw NSError(domain: "GUS.Kokoro", code: 12, userInfo: [
+                NSLocalizedDescriptionKey: "The call's audio mixer isn't connected to the output — this sentence can't be played.",
+            ])
+        }
     }
 
     /// The connection as the engine itself reports it: this
@@ -571,6 +699,15 @@ final class KokoroPlayer {
     private var isPlayerConnected: Bool {
         engine.outputConnectionPoints(for: player, outputBus: 0)
             .contains { $0.node === engine.mainMixerNode }
+    }
+
+    /// The mixer's hop, read the same way from the same
+    /// ground truth: the main mixer, output bus 0, landing
+    /// on the engine's output node (v0.27.2 — the proof now
+    /// walks the whole chain a played buffer travels).
+    private var isMixerConnectedToOutput: Bool {
+        engine.outputConnectionPoints(for: engine.mainMixerNode, outputBus: 0)
+            .contains { $0.node === engine.outputNode }
     }
 
     /// A format in one short line, for the playback path's
