@@ -24,7 +24,7 @@ struct BrainRowView: View {
                 Text(entry.plainName)
                     .font(.callout)
                 if isActive {
-                    Text("In use")
+                    Text("Active")
                         .font(.caption)
                         .fontWeight(.semibold)
                         .foregroundColor(.accentColor)

@@ -69,7 +69,7 @@ struct SettingsView: View {
                         .onChange(of: demoPitch) { newValue in
                             LocalBrain.demoPitchEnabled = newValue
                         }
-                    Text("On, the on-device brain introduces itself with the email pitch — the Gmail demo. Off, it's a general-purpose assistant. Takes effect the next time the app starts.")
+                    Text("On, the on-device brain introduces itself with the email pitch — the Gmail demo. Off, it's a general-purpose assistant. Takes effect with your next message or call — the brain reloads in this same app run (v0.31.0).")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 } header: {
@@ -112,7 +112,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Persona starters")
                 } footer: {
-                    Text("Tap a starter to fill the prompt, then make the words your own — nothing here is locked or hidden. Empty means the general assistant. The brain reads the prompt when the app starts, so a change lands on the next launch; while the Gmail demo pitch above is on, it wins.")
+                    Text("Tap a starter to fill the prompt, then make the words your own — nothing here is locked or hidden. Empty means the general assistant. A change lands with your next message or call — the brain reloads in this same app run (v0.31.0); while the Gmail demo pitch above is on, it wins. To switch persona, voice, and face together in one tap, use the Personas tab or tap the avatar in Chat.")
                 }
 
                 Section {
@@ -185,7 +185,7 @@ struct SettingsView: View {
                 } header: {
                     Text("On-device models")
                 } footer: {
-                    Text("Brains are downloaded once, verified against the model manifest before use, and stored on this iPhone. You can keep more than one and switch freely — switching never deletes anything, and the switch takes effect the next time the app starts. Nothing about a call leaves the phone in on-device mode. Deleting every brain turns on-device calls off (Core mode still works) and brings the setup prompt back at the next launch.")
+                    Text("Brains are downloaded once, verified against the model manifest before use, and stored on this iPhone. You can keep more than one and switch freely — switching never deletes anything, and the switch takes effect right away: the new brain loads in this same app run with your next message or call (v0.31.0), no restart needed. The brain marked Active is the one that loads. Nothing about a call leaves the phone in on-device mode. Deleting every brain turns on-device calls off (Core mode still works) and brings the setup prompt back at the next launch.")
                 }
 
                 Section {
@@ -290,6 +290,11 @@ struct SettingsView: View {
                 // to the key, so this can only ever catch the
                 // field up, never clobber an edit.
                 personaText = LocalBrain.customPrompt ?? ""
+                // v0.31.0: the same coherence for the voice —
+                // a persona pick sets the persona's voice
+                // (gus.voice.kokoroVoice), and this picker's
+                // state was loaded when the view was built.
+                kokoroVoice = KokoroVoice.selected
             }
         }
     }

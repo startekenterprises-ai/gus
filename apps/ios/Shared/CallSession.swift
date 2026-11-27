@@ -226,11 +226,40 @@ final class CallSession: NSObject, ObservableObject {
     // instead of letting the call run silent to its end.
     private var playbackFailuresThisCall = 0
 
+    // Audio lifecycle (v0.31.0, item 8): the observers that
+    // let a call survive the phone's ordinary life —
+    // interruptions (another call, Siri, an alarm), route
+    // changes (a Bluetooth device coming and going), and
+    // the media-services reset. Registered at call start,
+    // removed when the call ends; they handle lifecycle
+    // only and never touch the playback graph.
+    private var interruptionObserver: NSObjectProtocol?
+    private var routeChangeObserver: NSObjectProtocol?
+    private var mediaResetObserver: NSObjectProtocol?
+    /// An interruption is in progress: hearing and playback
+    /// are stalled by the system, and the resume path runs
+    /// when it ends. The call itself is NOT ended — an
+    /// interruption is weather, not a hang-up.
+    private var audioInterrupted = false
+
+    /// Whether the call's audio is ACTUALLY coming out of
+    /// the built-in speaker right now (v0.31.0, item 10) —
+    /// read from the session's current route, refreshed on
+    /// every route change. The speaker button shows THIS,
+    /// not the toggle's intent: a button that lights for a
+    /// route the phone isn't using is a lie on the call
+    /// screen (Glenn's field report: the button toggled,
+    /// the route never moved). `isSpeakerOn` remains the
+    /// operator's selected route — the intent the
+    /// reassertion points re-apply.
+    @Published private(set) var outputRouteIsSpeaker: Bool = true
+
     // MARK: - Lifecycle
 
     func startCall() {
         guard phase == .idle || phase == .ended else { return }
         phase = .connecting
+        observeAudioLifecycle()
         errorText = nil
         liveTranscript = ""
         liveReplyText = ""
@@ -324,20 +353,184 @@ final class CallSession: NSObject, ObservableObject {
             // the call ever reasserted the route, so output
             // could land in the receiver while every screen
             // said "speaker" (at arm's length: silence, with
-            // the level meter still moving). Assert the port
-            // outright when speaker is on; startHearing
-            // reasserts it at every hearing start, and the
-            // route the system reports is written to the voice
-            // log, so a field report can see where sound went.
-            if isSpeakerOn {
-                try? session.overrideOutputAudioPort(.speaker)
-            }
+            // the level meter still moving). The port is
+            // asserted outright — through applySelectedRoute,
+            // the one route owner since v0.31.0: at call start
+            // the selection defaults to speaker, and every
+            // later reassertion re-applies the OPERATOR's
+            // selection, never a hard-coded speaker. The route
+            // the system reports is written to the voice log,
+            // so a field report can see where sound went.
+            applySelectedRoute()
+            refreshOutputRoute()
             VoiceFailureLog.shared.recordInfo("Call route: \(session.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ", ")) — speaker \(isSpeakerOn ? "on" : "off").")
         } catch {
             fail("The call's audio couldn't be set up: \(error.localizedDescription)")
             return false
         }
         return true
+    }
+
+    // MARK: - Audio lifecycle & routes (v0.31.0)
+
+    private static let interruptionNotice = "Call interrupted — another app or call has the audio. GUS will pick up again when it clears."
+
+    /// Register the lifecycle observers for this call
+    /// (idempotent — a re-call after an ended call reuses
+    /// them). Background continuation itself needs no
+    /// observer: the audio background mode (Info.plist,
+    /// UIBackgroundModes = audio) plus this call's active
+    /// session and running engine are what keep the
+    /// process alive while the app is backgrounded or the
+    /// phone is locked — hearing, synthesis, and playback
+    /// all keep running because nothing here ever suspends
+    /// them on a scene change.
+    private func observeAudioLifecycle() {
+        let center = NotificationCenter.default
+        let session = AVAudioSession.sharedInstance()
+        if interruptionObserver == nil {
+            interruptionObserver = center.addObserver(
+                forName: AVAudioSession.interruptionNotification,
+                object: session, queue: nil) { [weak self] note in
+                guard let self,
+                      let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                      let type = AVAudioSession.InterruptionType(rawValue: raw)
+                else { return }
+                Task { @MainActor in
+                    switch type {
+                    case .began: self.handleInterruptionBegan()
+                    case .ended: self.handleInterruptionEnded(note)
+                    @unknown default: break
+                    }
+                }
+            }
+        }
+        if routeChangeObserver == nil {
+            routeChangeObserver = center.addObserver(
+                forName: AVAudioSession.routeChangeNotification,
+                object: session, queue: nil) { [weak self] note in
+                let reasonRaw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.refreshOutputRoute()
+                    // A device that vanished (Bluetooth
+                    // dropped, headphones unplugged) leaves
+                    // the route wherever the system dropped
+                    // it — put the OPERATOR's selection back.
+                    // A change the operator made themselves
+                    // (the route picker, the toggle) already
+                    // carries their intent and is never fought.
+                    if reasonRaw == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue,
+                       self.phase == .live {
+                        self.applySelectedRoute()
+                        self.refreshOutputRoute()
+                    }
+                }
+            }
+        }
+        if mediaResetObserver == nil {
+            mediaResetObserver = center.addObserver(
+                forName: AVAudioSession.mediaServicesWereResetNotification,
+                object: nil, queue: nil) { [weak self] _ in
+                Task { @MainActor in self?.handleMediaServicesReset() }
+            }
+        }
+    }
+
+    private func removeAudioLifecycleObservers() {
+        let center = NotificationCenter.default
+        if let interruptionObserver { center.removeObserver(interruptionObserver) }
+        if let routeChangeObserver { center.removeObserver(routeChangeObserver) }
+        if let mediaResetObserver { center.removeObserver(mediaResetObserver) }
+        interruptionObserver = nil
+        routeChangeObserver = nil
+        mediaResetObserver = nil
+        audioInterrupted = false
+    }
+
+    /// An interruption began (a phone call, Siri, an
+    /// alarm): the system stalls the call's audio on its
+    /// own. Nothing is torn down — the graph, the hearing,
+    /// and the session all stay exactly as built, so the
+    /// resume below is a reactivation, not a rebuild. The
+    /// operator is told, in words, on the call screen.
+    private func handleInterruptionBegan() {
+        guard phase == .live || phase == .connecting else { return }
+        audioInterrupted = true
+        if speechNotice == nil { speechNotice = Self.interruptionNotice }
+        VoiceFailureLog.shared.recordInfo("Audio interruption began — the call waits it out.")
+    }
+
+    /// The interruption ended: reactivate the session,
+    /// re-apply the operator's route, and restart hearing
+    /// (recognizer tasks do not survive interruptions; the
+    /// restart is the call's ordinary recovery path, and
+    /// starting the shared engine is also what brings
+    /// playback back). If the system says don't resume,
+    /// the call still re-arms hearing — the operator is
+    /// here and the call screen says the call is live;
+    /// ending the call is their tap, not an inference.
+    private func handleInterruptionEnded(_ note: Notification) {
+        guard phase == .live, audioInterrupted else { return }
+        audioInterrupted = false
+        if speechNotice == Self.interruptionNotice { speechNotice = nil }
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playAndRecord, mode: .default,
+                                    options: [.defaultToSpeaker, .allowBluetoothHFP])
+            try session.setActive(true)
+        } catch {
+            VoiceFailureLog.shared.recordInfo("Audio session couldn't reactivate after the interruption (\(error.localizedDescription)).")
+        }
+        applySelectedRoute()
+        refreshOutputRoute()
+        if !isMuted { restartHearing() }
+        VoiceFailureLog.shared.recordInfo("Audio interruption ended — session reactivated, hearing restarted.")
+    }
+
+    /// The media services daemon restarted: every audio
+    /// object the call holds is invalid, and rebuilding the
+    /// graph mid-call is exactly what this class never does
+    /// silently. The honest move is to end the call in
+    /// words and let the operator call again into a fresh
+    /// graph.
+    private func handleMediaServicesReset() {
+        guard phase == .live || phase == .connecting else { return }
+        VoiceFailureLog.shared.recordInfo("Media services were reset by the system — the call was ended.")
+        fail("The phone's audio system restarted itself, so this call had to end. Please call again.")
+    }
+
+    /// The operator's selected route, applied — the ONE
+    /// place a route override is written during a call
+    /// (v0.31.0, item 10). Speaker on: the built-in speaker,
+    /// outright. Speaker off: no override — the earpiece,
+    /// the private route. An EXTERNAL output (Bluetooth,
+    /// AirPlay, wired headphones, a car) owns the route
+    /// while it is connected and is never overridden here:
+    /// the route picker's choice outranks the toggle until
+    /// the device goes away. Call start defaults to speaker
+    /// because isSpeakerOn does; once the operator toggles,
+    /// every reassertion point (call setup, hearing starts,
+    /// interruption resume, a device vanishing) re-applies
+    /// THEIR selection, never a hard-coded speaker.
+    private func applySelectedRoute() {
+        let session = AVAudioSession.sharedInstance()
+        let hasExternalOutput = session.currentRoute.outputs.contains { output in
+            switch output.portType {
+            case .builtInSpeaker, .builtInReceiver: return false
+            default: return true
+            }
+        }
+        guard !hasExternalOutput else { return }
+        try? session.overrideOutputAudioPort(isSpeakerOn ? .speaker : .none)
+    }
+
+    /// What the route actually is, for the call screen's
+    /// speaker button (item 10): read from the live route,
+    /// never inferred from the toggle.
+    private func refreshOutputRoute() {
+        outputRouteIsSpeaker = AVAudioSession.sharedInstance()
+            .currentRoute.outputs.contains { $0.portType == .builtInSpeaker }
     }
 
     /// Voice processing on the call engine's input (v0.18.0;
@@ -407,13 +600,20 @@ final class CallSession: NSObject, ObservableObject {
 
     /// On-device connect: no core session, no network at all.
     /// The brain loads once and stays loaded across calls (a
-    /// 2.5 GB model is not re-read per call); a missing or
-    /// unloadable brain fails the call loudly, in words, with
-    /// the way out named.
+    /// 2.5 GB model is not re-read per call) while it is still
+    /// CURRENT (v0.31.0): a library switch or a persona pick
+    /// makes a kept brain stale — the old file, the old
+    /// prompt — and a stale brain is dropped here and
+    /// reloaded in-process, so a switch never asks for an app
+    /// restart. A missing or unloadable brain fails the call
+    /// loudly, in words, with the way out named.
     private func connectLocal() async {
         guard await prepareCallAudio() else { return }
         primeCallAudioPath()
         transport = .local
+        if let kept = localBrain, !kept.isCurrent() {
+            localBrain = nil
+        }
         if localBrain == nil {
             // The ACTIVE brain (v0.21.0): the person's library
             // pick when it's on the phone, else the standard
@@ -435,11 +635,38 @@ final class CallSession: NSObject, ObservableObject {
         phase = .live
         startHearing()
         startWatchdog()
+        // GUS speaks first (v0.31.0): the greeting turn goes
+        // out through the same pump as any answer.
+        greetLocally()
+    }
+
+    /// The greeting (v0.31.0, item 9): a connected call
+    /// opens with GUS speaking first — a short hello in the
+    /// ACTIVE PERSONA's character (the brain carries the
+    /// persona prompt, and the shared style block keeps it
+    /// brief) — instead of dead air while the operator
+    /// wonders if anything connected. It rides the ordinary
+    /// answer turn with a stage-direction input and NO
+    /// transcript: nothing the operator said is being
+    /// answered, so nothing is scanned as their words and
+    /// no line appears in the transcript as if they spoke.
+    /// The reply itself still passes the reply-side Shield
+    /// seam in the pump, like every spoken sentence. Core
+    /// calls don't greet (report): the core's voice session
+    /// opens by listening and has no kickoff turn to send —
+    /// a synthetic transcript would put words in the
+    /// operator's mouth in the core's own record.
+    private static let greetingInstruction = "The call just connected and the person is listening. Greet them now: a short, warm hello in character — one or two sentences — and invite them to tell you what they need."
+
+    private func greetLocally() {
+        guard localBrain != nil, phase == .live else { return }
+        beginLocalTurn(input: Self.greetingInstruction, transcript: nil)
     }
 
     func endCall() {
         guard phase == .live || phase == .connecting else { return }
         phase = .ended
+        removeAudioLifecycleObservers()
         pendingShieldQuarantine = nil
         watchdogTask?.cancel(); watchdogTask = nil
         pollTask?.cancel(); pollTask = nil
@@ -461,6 +688,7 @@ final class CallSession: NSObject, ObservableObject {
     private func fail(_ message: String) {
         errorText = message
         voiceLevel = 0
+        removeAudioLifecycleObservers()
         pendingShieldQuarantine = nil
         phase = .ended
         watchdogTask?.cancel(); watchdogTask = nil
@@ -472,15 +700,16 @@ final class CallSession: NSObject, ObservableObject {
 
     private func startHearing() {
         guard phase == .live, !isMuted else { return }
-        // Route reassertion (v0.22.0): hearing restarts ride
-        // session reactivations and route changes that can
-        // reset the output port — the speaker choice is
-        // restated here so it survives them (see
-        // prepareCallAudio for why the category option alone
-        // was never enough).
-        if isSpeakerOn {
-            try? AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
-        }
+        // Route reassertion (v0.22.0; ownership v0.31.0):
+        // hearing restarts ride session reactivations and
+        // route changes that can reset the output port —
+        // the OPERATOR's route choice is restated here so
+        // it survives them, through the one route owner
+        // (applySelectedRoute): their earpiece choice is
+        // re-applied exactly as faithfully as speaker, and
+        // an external device's route is never fought.
+        applySelectedRoute()
+        refreshOutputRoute()
         recognitionGeneration += 1
         let generation = recognitionGeneration
         let input = audioEngine.inputNode
@@ -570,14 +799,25 @@ final class CallSession: NSObject, ObservableObject {
 
     /// Speaker on/off from the call screen (field report,
     /// Glenn 2026-11-20: the call screen had no speaker
-    /// button at all). Only the output port is overridden —
-    /// the session stays exactly as prepareCallAudio set it,
-    /// because its echo behavior comes from the engine's
-    /// voice processing (v0.18.0), which the output-port
-    /// override does not touch.
+    /// button at all). The toggle records the OPERATOR's
+    /// selection and applies it through the one route owner
+    /// (v0.31.0, item 10 — the field defect this fixes: the
+    /// button once only changed its own highlight while
+    /// other code paths quietly re-asserted speaker over
+    /// the operator's earpiece choice). On = the built-in
+    /// speaker, outright; off = no override, the earpiece —
+    /// hold the phone to your ear for a private call. The
+    /// session's category is never touched here, because
+    /// its echo behavior comes from the engine's voice
+    /// processing (v0.18.0), which the output-port override
+    /// does not touch. The button's face follows the ACTUAL
+    /// route (outputRouteIsSpeaker), refreshed here and on
+    /// every route change.
     func setSpeaker(_ on: Bool) {
         isSpeakerOn = on
-        try? AVAudioSession.sharedInstance().overrideOutputAudioPort(on ? .speaker : .none)
+        applySelectedRoute()
+        refreshOutputRoute()
+        VoiceFailureLog.shared.recordInfo("Route selected: speaker \(on ? "on" : "off") — now \(AVAudioSession.sharedInstance().currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ", ")).")
     }
 
     /// A typed message sent mid-call (v0.23.0, Glenn's
@@ -843,12 +1083,22 @@ final class CallSession: NSObject, ObservableObject {
     /// is stopped and awaited before the new one starts (the
     /// brain runs one generation at a time).
     private func beginLocalAnswer(_ text: String) {
+        beginLocalTurn(input: text, transcript: text)
+    }
+
+    /// The turn engine, split from its transcript (v0.31.0):
+    /// a normal answer is driven by — and recorded as — the
+    /// operator's words; the connect-time GREETING is driven
+    /// by a stage direction and records NO transcript (see
+    /// greetLocally). Everything downstream — the pump, the
+    /// reply-side Shield seam, barge-in — is shared verbatim.
+    private func beginLocalTurn(input: String, transcript: String?) {
         guard let brain = localBrain, phase == .live else { return }
         localTurnCounter += 1
         let turnID = localTurnCounter
         turns.append(VoiceSessionState.Turn(
             index: turns.count, kind: "voice", detail: "",
-            transcript: text, replyText: nil, interrupted: false))
+            transcript: transcript, replyText: nil, interrupted: false))
         corePhase = "thinking"
         localSentenceQueue = []
         preparedLineup = []
@@ -859,7 +1109,7 @@ final class CallSession: NSObject, ObservableObject {
         if previous != nil { brain.stop() }
         localAnswerTask = Task { [weak self] in
             await previous?.value
-            let reply = await brain.respond(to: text) { sentence in
+            let reply = await brain.respond(to: input) { sentence in
                 Task { @MainActor in
                     guard let self, self.localTurnCounter == turnID else { return }
                     self.localSentenceQueue.append(sentence)

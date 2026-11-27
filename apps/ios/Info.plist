@@ -98,6 +98,20 @@
 		<key>UIColorName</key>
 		<string>LaunchBackground</string>
 	</dict>
+	<!--
+		Background audio (v0.31.0): a live call keeps talking
+		and hearing when the app leaves the foreground — the
+		operator switches apps, locks the phone, or moves GUS
+		aside mid-conversation. This declaration is the
+		iOS-sanctioned path: with the audio background mode
+		and the call's AVAudioSession active, the process is
+		not suspended while the call runs. It declares
+		nothing else — no background fetch, no location.
+	-->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

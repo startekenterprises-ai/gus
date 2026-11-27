@@ -73,6 +73,8 @@ struct ChatView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
+                headerAvatar
+
                 Text(model.mode == .onDevice
                      ? "On-device — the brain lives on this iPhone."
                      : "Core — replies come from your GUS core.")
@@ -84,6 +86,8 @@ struct ChatView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.horizontal, 16)
                     .padding(.top, 8)
+
+                debateBar
 
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -101,6 +105,15 @@ struct ChatView: View {
                                 if exchangeTailIDs.contains(message.id) {
                                     shieldLine(for: message.exchangeID)
                                 }
+                            }
+                            if model.isBrainSwitching {
+                                HStack(spacing: 8) {
+                                    ProgressView()
+                                    Text("Switching brains…")
+                                        .font(.callout)
+                                        .foregroundColor(.secondary)
+                                }
+                                .id("switching")
                             }
                             if model.isReplying {
                                 HStack(spacing: 8) {
@@ -134,19 +147,15 @@ struct ChatView: View {
             // The header (v0.29.0): share the conversation,
             // and the call button — Muse's shape, a phone
             // in the chat header instead of a Call tab.
-            // v0.30.0: the avatar sits at the top-left, and
-            // tapping it opens the persona picker; the call
+            // v0.30.0: the avatar sat at the top-left, and
+            // tapping it opened the persona picker; the call
             // button now STARTS the call (the cover passes
             // autoStart) — one tap, like Muse's.
+            // v0.31.0: the avatar moves to the top CENTER of
+            // the screen, large (headerAvatar above) — the
+            // small toolbar chip is gone so the face shows
+            // once, not twice.
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        showPersonaPicker = true
-                    } label: {
-                        AvatarThumbnailView()
-                    }
-                    .accessibilityLabel("Choose persona")
-                }
                 ToolbarItem(placement: .topBarTrailing) {
                     ShareLink(item: model.exportText()) {
                         Image(systemName: "square.and.arrow.up")
@@ -170,6 +179,128 @@ struct ChatView: View {
                 PersonaPickerSheet()
             }
             .onAppear { model.refreshMode() }
+        }
+    }
+
+    // MARK: - Header avatar + debate bar (v0.31.0)
+
+    /// The face at the top center of Chat (v0.31.0, Glenn:
+    /// personas a bit larger, top center): the ACTIVE
+    /// persona's own portrait, large, with its name — a tap
+    /// opens the persona picker. In Debate mode the two
+    /// debaters stand here instead, a size down, named.
+    @ViewBuilder
+    private var headerAvatar: some View {
+        if model.debateActive {
+            HStack(alignment: .top, spacing: 32) {
+                debaterFace(slot: 0)
+                debaterFace(slot: 1)
+            }
+            .padding(.top, 10)
+        } else {
+            Button {
+                showPersonaPicker = true
+            } label: {
+                VStack(spacing: 4) {
+                    ActivePersonaAvatarView(side: 92)
+                    Text(activePersonaDisplayName)
+                        .font(.callout)
+                        .fontWeight(.semibold)
+                        .foregroundColor(.primary)
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Choose persona")
+            .padding(.top, 10)
+        }
+    }
+
+    private var activePersonaDisplayName: String {
+        if let starter = LocalBrain.activeStarter { return starter.name }
+        return LocalBrain.customPrompt == nil ? "General" : "Custom"
+    }
+
+    private func debaterFace(slot: Int) -> some View {
+        let starter = LocalBrain.starter(id: slot == 0 ? model.debateLeftID : model.debateRightID)
+        return VStack(spacing: 4) {
+            if let starter {
+                PersonaAvatarView(face: starter.face, side: 56)
+            }
+            Text(starter?.name ?? "")
+                .font(.caption)
+                .fontWeight(.semibold)
+        }
+    }
+
+    /// The debate controls: off, one quiet button under the
+    /// header; on, the two debater menus (face + name), the
+    /// fallback-brain note when a debater's own brain isn't
+    /// on the phone, and the way out.
+    @ViewBuilder
+    private var debateBar: some View {
+        if model.debateActive {
+            VStack(spacing: 6) {
+                HStack(spacing: 10) {
+                    debaterMenu(slot: 0)
+                    Text("vs")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    debaterMenu(slot: 1)
+                    Spacer()
+                    Button("End debate") { model.endDebate() }
+                        .font(.callout)
+                }
+                if let note = model.debateFallbackNote {
+                    Text(note)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(Color.secondary.opacity(0.06))
+            .padding(.top, 8)
+        } else {
+            Button {
+                model.startDebate()
+            } label: {
+                Label("Start a debate — two personas", systemImage: "person.2.wave.2")
+                    .font(.callout)
+            }
+            .padding(.top, 8)
+            .padding(.bottom, 2)
+        }
+    }
+
+    private func debaterMenu(slot: Int) -> some View {
+        let currentID = slot == 0 ? model.debateLeftID : model.debateRightID
+        let current = LocalBrain.starter(id: currentID)
+        return Menu {
+            ForEach(LocalBrain.personaStarters) { starter in
+                Button {
+                    model.setDebater(slot: slot, id: starter.id)
+                } label: {
+                    if starter.id == currentID {
+                        Label(starter.name, systemImage: "checkmark")
+                    } else {
+                        Text(starter.name)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                if let current {
+                    PersonaAvatarView(face: current.face, side: 24)
+                }
+                Text(current?.name ?? "Choose")
+                    .font(.callout)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.primary)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
         }
     }
 
@@ -203,10 +334,26 @@ struct ChatView: View {
             }
             .id(message.id)
         case .assistant:
-            HStack {
-                bubble(message, mine: false)
-                    .contextMenu { messageMenu(message) }
-                Spacer(minLength: 48)
+            VStack(alignment: .leading, spacing: 4) {
+                // Debate attribution (v0.31.0): whose answer
+                // this is, worn as a face + name over the
+                // bubble — in a debate the two voices must
+                // never blur into one "GUS".
+                if let personaID = message.personaID,
+                   let starter = LocalBrain.starter(id: personaID) {
+                    HStack(spacing: 6) {
+                        PersonaAvatarView(face: starter.face, side: 18)
+                        Text(starter.name)
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                HStack {
+                    bubble(message, mine: false)
+                        .contextMenu { messageMenu(message) }
+                    Spacer(minLength: 48)
+                }
             }
             .id(message.id)
         }
@@ -472,10 +619,17 @@ struct ChatMessage: Identifiable {
     var held = false
     var dropped = false
     var blocked = false
+    /// Debate attribution (v0.31.0): the persona starter id
+    /// that authored an assistant message in Debate mode.
+    /// View-side only — debate turns are session-only and
+    /// never enter the sync store, so this never has to
+    /// survive the wire (see ChatModel's debate section).
+    var personaID: String? = nil
 
     init(id: UUID = UUID(), exchangeID: UUID, role: Role, text: String,
          photoData: Data? = nil, photoNote: String? = nil,
-         held: Bool = false, dropped: Bool = false, blocked: Bool = false) {
+         held: Bool = false, dropped: Bool = false, blocked: Bool = false,
+         personaID: String? = nil) {
         self.id = id
         self.exchangeID = exchangeID
         self.role = role
@@ -485,6 +639,7 @@ struct ChatMessage: Identifiable {
         self.held = held
         self.dropped = dropped
         self.blocked = blocked
+        self.personaID = personaID
     }
 
     /// The text Copy and Share move (v0.29.0): the message's
@@ -514,6 +669,31 @@ final class ChatModel: ObservableObject {
     /// exchange — the Shield line reads from here.
     private var receiptsByExchange: [UUID: [ShieldReceipt]] = [:]
     private var brain: LocalBrain?
+    /// A stale cached brain is being reloaded in-process
+    /// (v0.31.0) — the view's "Switching brains…" row.
+    @Published private(set) var isBrainSwitching = false
+
+    // MARK: Debate state (v0.31.0)
+
+    /// Debate mode: two personas answer every message, in
+    /// turn, in text. Chat-only and on-device-only — the
+    /// call is one voice and one brain by construction, and
+    /// a debate is two. Session-only by design: debate
+    /// turns never enter the sync store (see runDebate).
+    @Published private(set) var debateActive = false
+    @Published private(set) var debateLeftID = "ai-priest"
+    @Published private(set) var debateRightID = "devil"
+    /// The debate's own running context — who said what, in
+    /// order — fed to each pass so the personas answer each
+    /// other and not just the operator. Memory only; it
+    /// dies with the debate.
+    private var debateTranscript: [(speaker: String, text: String)] = []
+    /// Exchanges born in debate, so a held debate message's
+    /// one-time override routes back here, not to dispatch.
+    private var debateExchangeIDs: Set<UUID> = []
+    /// Debate messages that already carry the canned line
+    /// (one per message, as replies elsewhere).
+    private var debateCannedMessages: Set<UUID> = []
     private let client = GUSClient.shared
     private var localChain: Task<Void, Never>?
     private var replyingCount = 0 {
@@ -602,7 +782,16 @@ final class ChatModel: ObservableObject {
             case .user:
                 return message.shareText.isEmpty ? nil : "You: \(message.shareText)"
             case .assistant:
-                return message.shareText.isEmpty ? nil : "GUS: \(message.shareText)"
+                if message.shareText.isEmpty { return nil }
+                // Debate answers export under their
+                // persona's name (v0.31.0) — an export that
+                // flattened both voices into "GUS" would
+                // misquote the debate.
+                if let personaID = message.personaID,
+                   let starter = LocalBrain.starter(id: personaID) {
+                    return "\(starter.name): \(message.shareText)"
+                }
+                return "GUS: \(message.shareText)"
             }
         }
         .joined(separator: "\n\n")
@@ -659,6 +848,15 @@ final class ChatModel: ObservableObject {
         draft = ""
         let photo = photoData
         clearPhoto()
+        // Debate (v0.31.0) forks BEFORE the sync store: a
+        // debate turn is session-only, born here and never
+        // recorded — see the debate section below for why
+        // (the sync schema is a strict mirror of the core's,
+        // and persona attribution has no honest home in it).
+        if debateActive {
+            sendDebate(text: text, photoAttached: photo != nil)
+            return
+        }
         let exchangeID = UUID()
         // v0.26.0: the message is BORN as a sync record —
         // in the durable store, chained to the conversation
@@ -707,6 +905,12 @@ final class ChatModel: ObservableObject {
     /// already stands, exactly as on the call screen.
     func sendHeld(_ message: ChatMessage) {
         update(message.id) { $0.held = false }
+        // A held DEBATE message goes back to the debate —
+        // its exchange was born there, not in dispatch.
+        if debateExchangeIDs.contains(message.exchangeID) {
+            runDebate(exchangeID: message.exchangeID, text: message.text)
+            return
+        }
         dispatch(exchangeID: message.exchangeID, text: message.text, photo: message.photoData)
     }
 
@@ -771,7 +975,7 @@ final class ChatModel: ObservableObject {
     }
 
     private func runOnDeviceAnswer(exchangeID: UUID, text: String) async {
-        guard let brain = loadBrain(exchangeID: exchangeID) else {
+        guard let brain = await loadBrain(exchangeID: exchangeID) else {
             replyingCount -= 1
             return
         }
@@ -832,8 +1036,17 @@ final class ChatModel: ObservableObject {
     /// The chat's on-device brain, loaded once and kept —
     /// the same presence checks and the same loud failures
     /// as the call's connect path.
-    private func loadBrain(exchangeID: UUID) -> LocalBrain? {
-        if let brain { return brain }
+    ///
+    /// v0.31.0: kept only while it is CURRENT. A brain
+    /// switch in the library, a persona pick (the prompt is
+    /// part of what a brain loads with), or the demo-pitch
+    /// toggle makes the cached instance stale, and the next
+    /// answer drops it and loads the new one IN-PROCESS —
+    /// the "Switching brains…" state covers the reload —
+    /// where through v0.30.0 every one of those waited for
+    /// an app restart (Glenn's friction: "Use this brain"
+    /// felt like it did nothing).
+    private func loadBrain(exchangeID: UUID) async -> LocalBrain? {
         // The ACTIVE brain, same resolution as the call's
         // (v0.21.0 — ActiveBrain in ModelManifest.swift).
         guard let entry = ActiveBrain.resolved() else {
@@ -841,13 +1054,242 @@ final class ChatModel: ObservableObject {
                 text: "The on-device brain isn't downloaded yet — get it in Settings → On-device models, or switch the brain to Core in Settings.")
             return nil
         }
-        guard let loaded = LocalBrain(modelURL: ModelStore.fileURL(for: entry)) else {
+        if let brain, brain.isCurrent() { return brain }
+        let swapping = brain != nil
+        if swapping {
+            isBrainSwitching = true
+            // Let the state paint before the load takes the
+            // main actor — the operator sees the switch
+            // happen instead of a frozen screen.
+            await Task.yield()
+        }
+        let loaded = LocalBrain(modelURL: ModelStore.fileURL(for: entry))
+        if swapping { isBrainSwitching = false }
+        guard let loaded else {
             appendNotice(exchangeID: exchangeID,
                 text: "The on-device brain wouldn't load — try deleting and re-downloading it in Settings → On-device models.")
             return nil
         }
         brain = loaded
         return loaded
+    }
+
+    // MARK: Debate (v0.31.0)
+
+    /// The two debaters, resolved from the slot ids —
+    /// exactly two while debate is on (the defaults are
+    /// Glenn's pairing: the AI priest and the Devil).
+    private var debateStarters: [PersonaStarter]? {
+        guard debateActive else { return nil }
+        let pair = [debateLeftID, debateRightID].compactMap { LocalBrain.starter(id: $0) }
+        return pair.count == 2 ? pair : nil
+    }
+
+    /// The honest header note: a debater whose OWN brain
+    /// (its pairedBrainID) isn't on the phone answers with
+    /// the active brain instead — said out loud, never
+    /// silently (today only the Devil pairs, to the Most
+    /// open brain).
+    var debateFallbackNote: String? {
+        guard let pair = debateStarters else { return nil }
+        for starter in pair {
+            if let pairedID = starter.pairedBrainID,
+               let entry = GUSModelManifest.entry(id: pairedID),
+               !ModelStore.isPresent(entry) {
+                let running = ActiveBrain.resolved()?.plainName ?? "no brain"
+                return "\(starter.name) is running on the \(running) — its own brain (the \(entry.plainName)) isn't on this iPhone."
+            }
+        }
+        return nil
+    }
+
+    /// Debate is on-device only: two brains, two prompts,
+    /// one phone. In Core mode the button says why instead
+    /// of pretending (a notice, in the conversation).
+    func startDebate() {
+        guard mode == .onDevice else {
+            appendNotice(exchangeID: UUID(),
+                text: "Debate needs the on-device brain — two personas take turns thinking right here on the phone. Switch the call brain to On-device in Settings → Call mode, then start the debate.")
+            return
+        }
+        debateActive = true
+        debateTranscript = []
+        let names = [debateLeftID, debateRightID]
+            .compactMap { LocalBrain.starter(id: $0)?.name }
+            .joined(separator: " vs ")
+        appendNotice(exchangeID: UUID(),
+            text: "Debate started — \(names). Every message gets both answers, each under its own name. Debate chats live in this session only: they aren't saved to your history and never sync to your Mac.")
+    }
+
+    func endDebate() {
+        guard debateActive else { return }
+        debateActive = false
+        debateTranscript = []
+        appendNotice(exchangeID: UUID(), text: "Debate ended — back to one voice.")
+    }
+
+    /// Change a debater mid-debate: the new voice joins
+    /// from the next message; the story so far stands.
+    func setDebater(slot: Int, id: String) {
+        if slot == 0 { debateLeftID = id } else { debateRightID = id }
+    }
+
+    /// One debate message: the operator's words appear at
+    /// once (session-only — NO store record, unlike a
+    /// normal send), the Shield gate runs exactly as it
+    /// does for any message, and then both personas answer.
+    private func sendDebate(text: String, photoAttached: Bool) {
+        let exchangeID = UUID()
+        debateExchangeIDs.insert(exchangeID)
+        if photoAttached {
+            appendNotice(exchangeID: exchangeID,
+                text: "Debate is text-only — the photo wasn't sent.")
+            if text.isEmpty { return }
+        }
+        let message = ChatMessage(id: UUID(), exchangeID: exchangeID, role: .user, text: text)
+        messages.append(message)
+        if ShieldSettings.enabled {
+            let scan = ShieldScanner.scan(text, posture: ShieldSettings.posture)
+            record(scan, direction: .user, exchangeID: exchangeID)
+            switch scan.verdict {
+            case .block:
+                update(message.id) { $0.blocked = true }
+                appendNotice(exchangeID: exchangeID,
+                    text: "Shield stopped that message — it matched \(scan.primaryRuleID). It never reached the brain; the scan is recorded in Settings → Security → Shield log.")
+                return
+            case .quarantine:
+                update(message.id) { $0.held = true }
+                return
+            case .allow:
+                break
+            }
+        }
+        runDebate(exchangeID: exchangeID, text: text)
+    }
+
+    /// Debate turns chain on the same queue as ordinary
+    /// on-device answers — the phone thinks one thought at
+    /// a time, whichever surface asked.
+    private func runDebate(exchangeID: UUID, text: String) {
+        replyingCount += 1
+        let previous = localChain
+        localChain = Task { [weak self] in
+            await previous?.value
+            await self?.runDebatePasses(exchangeID: exchangeID, text: text)
+        }
+    }
+
+    private func runDebatePasses(exchangeID: UUID, text: String) async {
+        guard let pair = debateStarters else {
+            replyingCount -= 1
+            return
+        }
+        debateTranscript.append((speaker: "Person", text: text))
+        for starter in pair {
+            await runDebatePass(exchangeID: exchangeID, starter: starter)
+        }
+        replyingCount -= 1
+    }
+
+    /// One persona's answer. Its brain: its OWN paired
+    /// brain when that brain is on the phone (the Devil on
+    /// the Most open brain), else the active brain — the
+    /// header note says which case the debate is in. The
+    /// brain instance is built for this pass from the
+    /// persona's composed prompt and let go after: two
+    /// personas means two system prompts, and a loaded
+    /// brain carries exactly one, so a pass loads its own
+    /// (the chat's cached brain is a different instance
+    /// and is never touched). The reply streams into the
+    /// persona's own labeled message, sentence by sentence,
+    /// through the same reply-side Shield seam as any
+    /// answer.
+    private func runDebatePass(exchangeID: UUID, starter: PersonaStarter) async {
+        let entry: ModelDownloadEntry?
+        if let pairedID = starter.pairedBrainID,
+           let paired = GUSModelManifest.entry(id: pairedID),
+           ModelStore.isPresent(paired) {
+            entry = paired
+        } else {
+            entry = ActiveBrain.resolved()
+        }
+        guard let entry,
+              let passBrain = LocalBrain(
+                modelURL: ModelStore.fileURL(for: entry),
+                systemPrompt: LocalBrain.composedPrompt(starter.prompt))
+        else {
+            appendNotice(exchangeID: exchangeID,
+                text: "\(starter.name) couldn't answer — its brain isn't downloaded or wouldn't load.")
+            return
+        }
+        let messageID = UUID()
+        messages.append(ChatMessage(
+            id: messageID, exchangeID: exchangeID, role: .assistant,
+            text: "", personaID: starter.id))
+        _ = await passBrain.respond(to: debateInput(for: starter)) { sentence in
+            Task { @MainActor in
+                if self.debateSentenceAllowed(sentence, exchangeID: exchangeID, messageID: messageID) {
+                    self.appendDebateSentence(sentence, messageID: messageID)
+                }
+            }
+        }
+        // The transcript takes the reply as SHOWN (post-scan) —
+        // read back from the message itself, whose sentence
+        // hops were all submitted before this continuation
+        // (the call pump's completion discipline). Anything
+        // less would hand a blocked sentence to the OTHER
+        // debater as context: blocked words never reach a
+        // brain in this app, including the second one.
+        let shown = messages.first(where: { $0.id == messageID })?.text ?? ""
+        if shown.isEmpty {
+            if let i = messages.firstIndex(where: { $0.id == messageID }) {
+                messages.remove(at: i)
+            }
+            appendNotice(exchangeID: exchangeID, text: "\(starter.name) didn't reply to that.")
+        } else {
+            debateTranscript.append((speaker: starter.name, text: shown))
+        }
+    }
+
+    /// What a debater is handed: the story so far (recent
+    /// turns, both voices and the person's), then the
+    /// instruction to answer as themselves. Their persona
+    /// prompt — which speaks of a live phone call, since
+    /// the starters are written for calls — is steered to
+    /// text here: a short paragraph, not spoken sentences.
+    private func debateInput(for starter: PersonaStarter) -> String {
+        let recent = debateTranscript.suffix(10)
+        let story = recent.map { "\($0.speaker): \($0.text)" }.joined(separator: "\n")
+        return """
+            This is a written debate, not a phone call. The story so far:
+            \(story)
+
+            Answer now as \(starter.name), speaking to the Person. If the other \
+            side made a point you disagree with, answer it briefly. A short \
+            paragraph in plain words — no lists, no markdown.
+            """
+    }
+
+    /// Shield on a debater's way out — the reply seam,
+    /// per sentence, against the persona's own message: a
+    /// blocked sentence never renders, and the canned line
+    /// takes its place in that persona's bubble (once).
+    private func debateSentenceAllowed(_ sentence: String, exchangeID: UUID, messageID: UUID) -> Bool {
+        guard ShieldSettings.enabled else { return true }
+        let scan = ShieldScanner.scan(sentence, posture: ShieldSettings.posture)
+        record(scan, direction: .assistant, exchangeID: exchangeID)
+        guard scan.verdict == .block else { return true }
+        if debateCannedMessages.insert(messageID).inserted {
+            appendDebateSentence(
+                "I stopped part of that reply — it matched a known injection pattern.",
+                messageID: messageID)
+        }
+        return false
+    }
+
+    private func appendDebateSentence(_ sentence: String, messageID: UUID) {
+        guard let i = messages.firstIndex(where: { $0.id == messageID }) else { return }
+        messages[i].text += (messages[i].text.isEmpty ? "" : " ") + sentence
     }
 
     // MARK: Core answers

@@ -1,4 +1,5 @@
 import SwiftUI
+import AVKit
 
 /// The front door: a live call with GUS. Tap Call and talk —
 /// full-duplex, with barge-in; there is deliberately no
@@ -139,24 +140,32 @@ struct CallView: View {
                     composer
 
                     // The control row (v0.23.0 cleanup):
-                    // three equal circles with the label
-                    // UNDER the icon, so state reads at a
-                    // glance across a room — a filled accent
-                    // circle means Speaker is on, a filled
-                    // orange circle means you are muted, and
-                    // End is always the red one. Through
-                    // v0.22.0 these were bordered text
-                    // buttons whose on/off difference was a
-                    // swapped SF Symbol and the word Mute
-                    // flipping to Unmute — easy to misread
-                    // mid-demo (Glenn, 2026-11-26).
+                    // equal circles with the label UNDER the
+                    // icon, so state reads at a glance across
+                    // a room — a filled accent circle means
+                    // Speaker is on, a filled orange circle
+                    // means you are muted, and End is always
+                    // the red one. Through v0.22.0 these were
+                    // bordered text buttons whose on/off
+                    // difference was a swapped SF Symbol and
+                    // the word Mute flipping to Unmute — easy
+                    // to misread mid-demo (Glenn, 2026-11-26).
+                    // v0.31.0: the Speaker circle now shows the
+                    // ACTUAL route (CallSession
+                    // .outputRouteIsSpeaker — the session's
+                    // live route, not the toggle's intent),
+                    // and a fourth control joins: Devices, the
+                    // system route picker, for Bluetooth and
+                    // every other output the phone can see.
                     HStack(spacing: 12) {
                         CallControlButton(
                             title: "Speaker",
-                            systemImage: call.isSpeakerOn ? "speaker.wave.2.fill" : "speaker.slash.fill",
-                            filled: call.isSpeakerOn,
+                            systemImage: call.outputRouteIsSpeaker ? "speaker.wave.2.fill" : "speaker.slash.fill",
+                            filled: call.outputRouteIsSpeaker,
                             fillColor: .accentColor
-                        ) { call.setSpeaker(!call.isSpeakerOn) }
+                        ) { call.setSpeaker(!call.outputRouteIsSpeaker) }
+
+                        CallRouteButton()
 
                         CallControlButton(
                             title: call.isMuted ? "Muted" : "Mute",
@@ -403,18 +412,29 @@ private struct CallControlButton: View {
 
 /// The face on the call screen (v0.15.5, "the face" —
 /// Glenn approved the direction 2026-11-19 and pulled it
-/// forward 2026-11-20): the stock avatar, decoded from its
-/// own .b64 master by build-ipa.sh into Avatar.imageset —
-/// cropped to the head, with a mouth that moves with
-/// Kokoro's voice. v0.20.0: the art is the hyper-realistic
-/// pair Glenn approved — the boy in Avatar (the default),
-/// the girl in AvatarGirl — picked in Settings over
+/// forward 2026-11-20): the avatar, decoded from its own
+/// .b64 master by build-ipa.sh into its imageset — cropped
+/// to the head, with a mouth that moves with Kokoro's
+/// voice. v0.20.0: the art is the hyper-realistic pair
+/// Glenn approved — the boy in Avatar (the default), the
+/// girl in AvatarGirl — picked in Settings over
 /// gus.avatar.stock, the same key the Mac keeps; the plush
 /// portrait that filled this spot through v0.19.0 stays in
-/// git history. Each face carries its own crop and mouth
-/// calibration below, measured from its pixels the way the
-/// plush's was — and, like the plush's, eyeballed until
-/// Glenn sees it on his phone and says it is right.
+/// git history.
+///
+/// v0.31.0 (Glenn): the face is the ACTIVE PERSONA's —
+/// PersonaFace.current resolves it (the persona's own
+/// portrait, or the stock pick for General/Custom) — and
+/// it is MUCH larger: 232 pt, the screen's dominant
+/// visual in the shape of Muse's call screen, with the
+/// transcript flexing around it and the controls unmoved
+/// below. The animation grows with it: the mouth-flap at
+/// full size, a breathing idle (a slow ±3% swell, so the
+/// face feels alive in silence), and an unmistakable
+/// speaking state — the backing disc swells with the
+/// voice level itself and a ring pulses outward while
+/// GUS talks; the listening pulse from before stays for
+/// the hearing phases.
 ///
 /// The mouth is an amplitude lip-flap, deliberately NOT
 /// lip-sync: KokoroPlayer publishes the RMS of the samples
@@ -422,12 +442,13 @@ private struct CallControlButton: View {
 /// data already in memory), and the ellipse's height
 /// follows it. The animation adds no work to the audio
 /// path: a 12 fps TimelineView reshapes one small ellipse,
-/// and the breathing scale and listening pulse are plain
-/// view transforms. If any of this ever threatened the
-/// call, the face goes, not the call (Glenn's hard rule).
+/// and the breathing scale and pulses are plain view
+/// transforms. If any of this ever threatened the call,
+/// the face goes, not the call (Glenn's hard rule).
 ///
-/// Placement was measured from the art itself (below);
-/// the exact sit of the mouth is eyeballed until Glenn
+/// Each face's crop and mouth calibration lives in
+/// PersonaFace (LocalBrain.swift, beside the persona it
+/// belongs to); every constant is eyeballed until Glenn
 /// sees it on his phone and says it is right.
 private struct AvatarFaceView: View {
     let level: Float
@@ -440,51 +461,48 @@ private struct AvatarFaceView: View {
     /// v0.20.0: the stock avatar pick (Settings → Avatar),
     /// the same key the Mac keeps — "girl" shows AvatarGirl,
     /// anything else is the boy in Avatar, the default.
+    /// v0.31.0: it only decides the face when no persona is
+    /// active (or the everyday assistant, who shares the
+    /// boy) — a persona's own portrait outranks it.
     @AppStorage("gus.avatar.stock") private var stockAvatar = "boy"
-    private var isGirl: Bool { stockAvatar == "girl" }
-    private var imageName: String { isGirl ? "AvatarGirl" : "Avatar" }
+    private var face: PersonaFace {
+        PersonaFace.current(stockGirl: stockAvatar == "girl")
+    }
 
-    private let side: CGFloat = 120
-    // The square window on the face inside the shipped
-    // square art, as fractions of the image, per face
-    // (v0.20.0, measured from the new portraits' pixels):
-    // the boy's face spans x ~0.115–0.885, hairline y
-    // ~0.153, chin ~0.953, mouth center ~(0.50, 0.773)
-    // spanning ~0.20; the girl's face spans x ~0.315–0.685
-    // inside her hair, hairline y ~0.27, chin ~0.715,
-    // mouth center ~(0.505, 0.60) spanning ~0.13. Each
-    // window frames its face a touch tighter than the
-    // head, so the face fills the circle edge to edge
-    // (full-bleed), as the plush's window did.
-    private var cropOriginX: CGFloat { isGirl ? 0.225 : 0.14 }
-    private var cropOriginY: CGFloat { isGirl ? 0.215 : 0.193 }
-    private var cropSide: CGFloat { isGirl ? 0.55 : 0.72 }
-    // The mouth's center and width inside that window,
-    // mapped from the full-image measurements above, so
-    // the ellipse sits on the mouth: closed reads as the
-    // smile, open reads as the mouth opening inside it.
-    private var mouthCenterX: CGFloat { isGirl ? 0.509 : 0.50 }
-    private var mouthCenterY: CGFloat { isGirl ? 0.70 : 0.806 }
-    private var mouthWidth: CGFloat { isGirl ? 0.236 : 0.278 }
+    /// v0.31.0: properly large (see the type comment) —
+    /// the old 120 pt face read as a thumbnail next to the
+    /// transcript; this one IS the call screen.
+    private let side: CGFloat = 232
 
     var body: some View {
         ZStack {
             Circle()
                 .fill(Color.accentColor.opacity(speaking ? 0.3 : 0.15))
-                .frame(width: side + 14, height: side + 14)
+                .frame(width: side + 20, height: side + 20)
+                // The speaking swell: the disc breathes with
+                // the voice itself, on the same published
+                // level the mouth follows.
+                .scaleEffect(speaking ? 1.0 + CGFloat(level) * 0.07 : 1.0)
+            if speaking {
+                Circle()
+                    .stroke(Color.accentColor.opacity(0.35), lineWidth: 2)
+                    .frame(width: side + 20, height: side + 20)
+                    .scaleEffect(pulse ? 1.1 : 1.0)
+                    .opacity(pulse ? 0.12 : 0.55)
+            }
             if listening {
                 Circle()
                     .stroke(Color.accentColor.opacity(0.35), lineWidth: 2)
-                    .frame(width: side + 14, height: side + 14)
+                    .frame(width: side + 20, height: side + 20)
                     .scaleEffect(pulse ? 1.1 : 1.0)
                     .opacity(pulse ? 0.15 : 0.6)
             }
-            face
+            faceView
         }
-        .scaleEffect(breathe ? 1.015 : 1.0)
+        .scaleEffect(breathe ? 1.03 : 1.0)
         .accessibilityHidden(true)
         .onAppear {
-            withAnimation(.easeInOut(duration: 2.8).repeatForever(autoreverses: true)) {
+            withAnimation(.easeInOut(duration: 3.4).repeatForever(autoreverses: true)) {
                 breathe = true
             }
             withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) {
@@ -493,21 +511,21 @@ private struct AvatarFaceView: View {
         }
     }
 
-    private var face: some View {
+    private var faceView: some View {
         GeometryReader { geo in
             let s = geo.size.width
-            let rendered = s / cropSide
+            let rendered = s / face.cropSide
             ZStack(alignment: .topLeading) {
-                Image(imageName)
+                Image(face.imageName)
                     .resizable()
                     .frame(width: rendered, height: rendered)
-                    .offset(x: -cropOriginX * rendered, y: -cropOriginY * rendered)
+                    .offset(x: -face.cropOriginX * rendered, y: -face.cropOriginY * rendered)
                 TimelineView(.periodic(from: .now, by: 1.0 / 12.0)) { context in
                     ZStack {
                         Ellipse()
                             .fill(Color(red: 0.25, green: 0.13, blue: 0.04).opacity(0.85))
-                            .frame(width: s * mouthWidth, height: mouthHeight(at: context.date))
-                            .position(x: s * mouthCenterX, y: s * mouthCenterY)
+                            .frame(width: s * face.mouthWidth, height: mouthHeight(at: context.date))
+                            .position(x: s * face.mouthCenterX, y: s * face.mouthCenterY)
                     }
                     .frame(width: s, height: s)
                 }
@@ -519,15 +537,57 @@ private struct AvatarFaceView: View {
     }
 
     /// Mouth height for a tick: closed is a thin line; the
-    /// published level opens it up to ~10 pt more, with a
-    /// gentle flutter while speech is sounding so a long
-    /// sentence does not hold a statue's mouth. Pure view
-    /// math on the published level — the audio path never
-    /// hears about any of this.
+    /// published level opens it proportionally (the
+    /// fractions scale with the face), with a gentle
+    /// flutter while speech is sounding so a long sentence
+    /// does not hold a statue's mouth. Pure view math on
+    /// the published level — the audio path never hears
+    /// about any of this.
     private func mouthHeight(at date: Date) -> CGFloat {
         let open = CGFloat(level)
         guard open > 0.01 else { return side * 0.021 }
         let flutter = 0.94 + 0.06 * sin(date.timeIntervalSinceReferenceDate * 11)
         return side * (0.021 + open * 0.085 * CGFloat(flutter))
     }
+}
+
+/// The Devices control (v0.31.0): the system route picker
+/// as the control row's fourth circle — Bluetooth
+/// headsets, AirPlay, the car, every output the phone can
+/// see, in the system's own sheet (AVRoutePickerView).
+/// Picking a device there routes the call's audio through
+/// the session like any route change: CallSession watches
+/// route changes, never fights an external device's route,
+/// and the Speaker circle keeps showing the actual route.
+private struct CallRouteButton: View {
+    var body: some View {
+        VStack(spacing: 4) {
+            ZStack {
+                Circle()
+                    .fill(Color.secondary.opacity(0.12))
+                    .frame(width: 60, height: 60)
+                RoutePickerView()
+                    .frame(width: 60, height: 60)
+            }
+            Text("Devices")
+                .font(.caption)
+                .foregroundColor(.primary)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityLabel("Audio devices")
+    }
+}
+
+private struct RoutePickerView: UIViewRepresentable {
+    func makeUIView(context: Context) -> AVRoutePickerView {
+        let picker = AVRoutePickerView()
+        picker.tintColor = .secondaryLabel
+        picker.activeTintColor = .systemBlue
+        picker.backgroundColor = .clear
+        picker.prioritizesVideoDevices = false
+        return picker
+    }
+
+    func updateUIView(_ uiView: AVRoutePickerView, context: Context) {}
 }

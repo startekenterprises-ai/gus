@@ -139,6 +139,17 @@ if [ -f "$AVATAR_GIRL_B64" ]; then
   base64 -d < "$AVATAR_GIRL_B64" > "$PROJECT_DIR/App/Assets.xcassets/AvatarGirl.imageset/AvatarGirl.png" \
     || fail "decoding the second call-screen avatar from $AVATAR_GIRL_B64 failed."
 fi
+# v0.31.0: the per-persona portraits ride the same way, each in
+# its own imageset (PersonaFace in LocalBrain.swift names them:
+# the active persona's face is what the call screen and the
+# picker show). One loop, the established pattern per face.
+for PERSONA_FACE in Priest Devil Therapist Debbie Doctor Email Shield; do
+  PERSONA_B64="$PROJECT_DIR/App/Assets.xcassets/Avatar$PERSONA_FACE.imageset/Avatar$PERSONA_FACE.png.b64"
+  if [ -f "$PERSONA_B64" ]; then
+    base64 -d < "$PERSONA_B64" > "$PROJECT_DIR/App/Assets.xcassets/Avatar$PERSONA_FACE.imageset/Avatar$PERSONA_FACE.png" \
+      || fail "decoding the $PERSONA_FACE persona avatar from $PERSONA_B64 failed."
+  fi
+done
 
 # --- 2. archive -----------------------------------------------------
 echo "build-ipa: archiving $SCHEME ($CONFIGURATION)…"

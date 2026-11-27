@@ -235,9 +235,11 @@ final class ModelLibrary: NSObject, ObservableObject {
     // MARK: - Selection
 
     /// Make a downloaded brain the one the call and chat
-    /// load. Nothing is deleted and nothing moves on disk;
-    /// the brain loads once per app run, so a switch lands
-    /// the next time the app starts (Settings says so).
+    /// load. Nothing is deleted and nothing moves on disk.
+    /// Since v0.31.0 the switch lands IN-PROCESS: holders
+    /// check their cached brain against what would load now
+    /// (LocalBrain.isCurrent) and reload at the next turn or
+    /// call — no app restart, and Settings now says that.
     func useBrain(_ entry: ModelDownloadEntry) {
         guard ModelStore.isPresent(entry) else { return }
         ActiveBrain.select(entry)
