@@ -71,3 +71,20 @@ test("every @StateObject/@ObservedObject/@EnvironmentObject type conforms", () =
     );
   }
 });
+
+// GUS v0.38.1 — the actor-isolation pin. CallSession is
+// @MainActor-isolated, and the v0.33.0 voice-preview gate
+// (VoicePreviewPlayer.toggle, a nonisolated context) reads
+// its isAnyCallLive flag; Swift rejected the read and the
+// v0.37.1 archive failed on that one line — the only error
+// in the log. The flag is an advisory gate (writes happen
+// only on the main actor inside CallSession; a stale read
+// is harmless), so the declaration carries
+// nonisolated(unsafe). Pin the exact declaration so the
+// isolation is never silently reintroduced.
+test("CallSession.isAnyCallLive is readable off-actor (the v0.38.1 archive fix)", () => {
+  assert.match(
+    allSource,
+    /nonisolated\(unsafe\) static private\(set\) var isAnyCallLive = false/
+  );
+});

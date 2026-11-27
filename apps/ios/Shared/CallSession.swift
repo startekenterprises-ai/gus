@@ -131,7 +131,12 @@ final class CallSession: NSObject, ObservableObject {
     /// an audition is never offered into a live call. It is
     /// a plain flag, not a control — nothing in the call
     /// path reads it.
-    static private(set) var isAnyCallLive = false
+    ///
+    /// nonisolated(unsafe): writes happen only on the main
+    /// actor, inside CallSession; the preview's reader is
+    /// off-actor and uses it as an advisory gate, where a
+    /// one-frame-stale read is harmless.
+    nonisolated(unsafe) static private(set) var isAnyCallLive = false
 
     @Published private(set) var phase: Phase = .idle
     /// The core's word for the moment: listening | thinking |
