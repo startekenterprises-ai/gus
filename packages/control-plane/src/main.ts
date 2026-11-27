@@ -608,6 +608,7 @@ function toPanelVoiceSession(s: VoiceSessionStateData): PanelVoiceSessionData {
       index: t.index,
       startedAt: t.startedAt,
       transcript: t.transcript,
+      ...(t.photos !== undefined ? { photos: t.photos } : {}),
       kind: t.kind,
       detail: t.detail,
       replyText: t.replyText,
@@ -1247,7 +1248,8 @@ const panelBackend: PanelBackend = {
   // interrupt are the service's own results, passed through.
   voiceSessionStart: async () => toPanelVoiceSession(await voiceSessions.start()),
   voiceSessionAudio: (sessionId, audio) => voiceSessions.pushAudio(sessionId, audio),
-  voiceSessionTranscript: (sessionId, text) => voiceSessions.submitTranscript(sessionId, text),
+  voiceSessionTranscript: (sessionId, text, images) =>
+    voiceSessions.submitTranscript(sessionId, text, images),
   voiceSessionState: (sessionId) => toPanelVoiceSession(voiceSessions.state(sessionId)),
   voiceSessionNextAudio: (sessionId, afterSeq) => voiceSessions.nextAudio(sessionId, afterSeq),
   voiceSessionInterrupt: (sessionId) => voiceSessions.interrupt(sessionId),

@@ -1616,3 +1616,115 @@ test("session (v0.9.11): state carries shieldMode — fast with the switch on, o
   const offEnded = off.sessions.end(offId);
   assert.equal(offEnded.shieldMode, "off", "the ended snapshot carries it");
 });
+
+// ---------------------------------------------------------------- v0.36.0: in-call camera turns
+
+/** One photo as the app posts it: a downscaled JPEG, base64 —
+ *  the exact {mediaType, data} shape a chat photo rides. */
+const PHOTO_JPEG = {
+  mediaType: "image/jpeg",
+  data: "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBD",
+};
+
+test("session (v0.36.0): a photo-only camera turn rides the session turn to the model as image input", async () => {
+  const r = await sessionRig({ sttEngine: "local", ttsEngine: "local" });
+  const id = await startCall(r);
+
+  const posted = r.sessions.submitTranscript(id, "", [PHOTO_JPEG]);
+  assert.equal(posted.ok, true, posted.detail);
+  const jobId = await driveJob(r, "That is a red bicycle leaning on a fence.");
+  await r.sessions.drain();
+
+  const pushed = r.pushed[0] as unknown as { text: string; images?: unknown };
+  assert.deepEqual(pushed.images, [PHOTO_JPEG], "the photo rode the job as image input");
+  assert.match(
+    pushed.text,
+    /sent 1 photo with no caption/,
+    "the photo-only framing names what arrived, as on the chat door",
+  );
+
+  const state = r.sessions.state(id);
+  assert.equal(state.turns.length, 1);
+  const turn = state.turns[0];
+  assert.equal(turn.photos, 1, "the turn records the photo count");
+  assert.equal(turn.transcript, undefined, "a photo-only turn has no words on the record");
+  assert.equal(turn.kind, "reply");
+  assert.equal(r.jobs.get(jobId)?.state, "verified-done");
+
+  const lines = readFileSync(join(r.dir, "voice-turns.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l) as Record<string, unknown>);
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].photos, 1, "the durable record carries the count, never the data");
+  assert.equal(lines[0].transcript, undefined);
+  r.sessions.end(id);
+});
+
+test("session (v0.36.0): a photo with words keeps both — the words on the record, the photo as image input", async () => {
+  const r = await sessionRig({ sttEngine: "local", ttsEngine: "local" });
+  const id = await startCall(r);
+
+  const posted = r.sessions.submitTranscript(id, "what is this?", [PHOTO_JPEG]);
+  assert.equal(posted.ok, true, posted.detail);
+  await driveJob(r, "It is a red bicycle.");
+  await r.sessions.drain();
+
+  const pushed = r.pushed[0] as unknown as { text: string; images?: unknown };
+  assert.deepEqual(pushed.images, [PHOTO_JPEG]);
+  assert.match(pushed.text, /^what is this\?/);
+  assert.match(pushed.text, /attached 1 photo/);
+
+  const turn = r.sessions.state(id).turns[0];
+  assert.equal(turn.transcript, "what is this?");
+  assert.equal(turn.photos, 1);
+  assert.equal(turn.kind, "reply");
+  r.sessions.end(id);
+});
+
+test("session (v0.36.0): an unusable photo refuses the post itself — no turn, no job, nothing dropped silently", async () => {
+  const r = await sessionRig({ sttEngine: "local", ttsEngine: "local" });
+  const id = await startCall(r);
+
+  const posted = r.sessions.submitTranscript(id, "", [
+    { mediaType: "text/plain", data: "aGVsbG8=" },
+  ]);
+  assert.equal(posted.ok, false);
+  assert.match(posted.detail, /isn't a usable image/);
+  await r.sessions.drain();
+
+  assert.equal(r.sessions.state(id).turns.length, 0, "no turn was minted");
+  assert.equal(r.pushed.length, 0, "nothing was submitted");
+  assert.equal(r.jobs.list(10).length, 0, "no job exists");
+  r.sessions.end(id);
+});
+
+test("session (v0.36.0): more photos than one turn can carry refuse the post", async () => {
+  const r = await sessionRig({ sttEngine: "local", ttsEngine: "local" });
+  const id = await startCall(r);
+
+  const posted = r.sessions.submitTranscript(id, "", [
+    PHOTO_JPEG, PHOTO_JPEG, PHOTO_JPEG, PHOTO_JPEG, PHOTO_JPEG,
+  ]);
+  assert.equal(posted.ok, false);
+  assert.match(posted.detail, /isn't a usable image/);
+  await r.sessions.drain();
+  assert.equal(r.sessions.state(id).turns.length, 0, "no turn was minted");
+  assert.equal(r.pushed.length, 0, "nothing was submitted");
+  r.sessions.end(id);
+});
+
+test("session (v0.36.0): in endpoint-STT mode a photo post is refused like any built-in transcript", async () => {
+  const r = await sessionRig({
+    transcripts: ["hello gus"],
+    sttEngine: "endpoint",
+    ttsEngine: "local",
+  });
+  const id = await startCall(r);
+
+  const posted = r.sessions.submitTranscript(id, "", [PHOTO_JPEG]);
+  assert.equal(posted.ok, false);
+  assert.match(posted.detail, /speech endpoint/);
+  assert.equal(r.pushed.length, 0, "nothing was submitted");
+  r.sessions.end(id);
+});

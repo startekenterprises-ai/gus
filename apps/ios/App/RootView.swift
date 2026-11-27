@@ -13,6 +13,17 @@ struct RootView: View {
     @StateObject private var watchBuilder = WatchSnapshotBuilder()
     @Environment(\.scenePhase) private var scenePhase
     @State private var showBrainSetup = false
+    /// v0.36.0: start-in-a-voice-call — the cover flag and
+    /// its once-per-process latch. RootView's @State is born
+    /// with the process, so the latch IS the cold-launch
+    /// boundary: it can fire at most once per app run, and
+    /// only from the signed-in shell's first appearance
+    /// below. Warm foregrounding re-runs neither (the shell
+    /// stays in the hierarchy; scenePhase changes do not
+    /// re-fire onAppear), so returning to the app never
+    /// re-starts a call.
+    @State private var showStartCall = false
+    @State private var didStartInCall = false
 
     var body: some View {
         Group {
@@ -91,18 +102,54 @@ struct RootView: View {
                 // before the first call. warmUp() is idempotent.
                 .onAppear {
                     KokoroRuntime.shared.warmUp()
-                    // First-launch brain setup (v0.21.0): a
-                    // phone with NO brain on it gets the
-                    // friendly download prompt the moment the
-                    // shell opens — nobody should have to hunt
-                    // Settings for it (Glenn, 2026-11-27). A
-                    // phone with any brain never sees it.
-                    if !ActiveBrain.anyPresent {
+                    // Start in a voice call (v0.36.0): with
+                    // the preference on, a COLD launch opens
+                    // straight into the call screen, call
+                    // started — GUS greets first (on-device)
+                    // or starts listening (Core). This is the
+                    // only place the preference is read, and
+                    // the latch makes it once per process:
+                    // the shell's onAppear fires when the
+                    // signed-in shell is first presented and
+                    // not on warm foregrounding, so coming
+                    // back to the app never re-triggers it.
+                    // No double-start is possible: no call
+                    // screen exists before this cover, and
+                    // CallView's own autoStart latch plus
+                    // CallSession.startCall's phase guard
+                    // stand behind it. Permissions and a
+                    // missing brain are the call screen's
+                    // own business — its existing permission
+                    // flow and "brain isn't ready" state run
+                    // there, in context, so the launch never
+                    // dead-ends. The call wins over the
+                    // first-launch brain sheet below when
+                    // both would fire: the call screen names
+                    // a missing brain itself, and two
+                    // presentations must never race.
+                    if StartInCall.enabled && !didStartInCall {
+                        didStartInCall = true
+                        showStartCall = true
+                        showBrainSetup = false
+                    } else if !ActiveBrain.anyPresent {
+                        // First-launch brain setup (v0.21.0):
+                        // a phone with NO brain on it gets
+                        // the friendly download prompt the
+                        // moment the shell opens — nobody
+                        // should have to hunt Settings for
+                        // it (Glenn, 2026-11-27). A phone
+                        // with any brain never sees it.
                         showBrainSetup = true
                     }
                 }
                 .sheet(isPresented: $showBrainSetup) {
                     BrainSetupSheet()
+                }
+                // The start-in-call cover (v0.36.0): the
+                // same call screen Chat's phone button
+                // presents, with the same one-tap autoStart.
+                .fullScreenCover(isPresented: $showStartCall) {
+                    CallView(autoStart: true)
                 }
             }
         }

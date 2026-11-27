@@ -1,5 +1,7 @@
 import SwiftUI
 import AVKit
+import AVFoundation
+import UIKit
 
 /// The front door: a live call with GUS. Tap Call and talk —
 /// full-duplex, with barge-in; there is deliberately no
@@ -48,6 +50,10 @@ struct CallView: View {
     @ObservedObject private var personaSelection = PersonaSelection.shared
     @State private var didAutoStart = false
     @State private var showPersonaPicker = false
+    /// v0.36.0: the system camera sheet for the in-call
+    /// camera button — presented only after the permission
+    /// gate in openCamera() says the way is clear.
+    @State private var showCamera = false
 
     init(autoStart: Bool = false) {
         self.autoStart = autoStart
@@ -182,6 +188,11 @@ struct CallView: View {
                     // and a fourth control joins: Devices, the
                     // system route picker, for Bluetooth and
                     // every other output the phone can see.
+                    // v0.36.0: a fifth control joins: Camera —
+                    // one tap, one photo, sent as the next
+                    // turn of the call (see openCamera and
+                    // CallSession.sendPhotoTurn). Never
+                    // automatic, never a stream.
                     HStack(spacing: 12) {
                         CallControlButton(
                             title: "Speaker",
@@ -191,6 +202,12 @@ struct CallView: View {
                         ) { call.setSpeaker(!call.outputRouteIsSpeaker) }
 
                         CallRouteButton()
+
+                        CallControlButton(
+                            title: "Camera",
+                            systemImage: "camera.fill",
+                            filled: false
+                        ) { openCamera() }
 
                         CallControlButton(
                             title: call.isMuted ? "Muted" : "Mute",
@@ -250,6 +267,22 @@ struct CallView: View {
             .sheet(isPresented: $showPersonaPicker) {
                 PersonaPickerSheet()
             }
+            // The in-call camera (v0.36.0): the SYSTEM
+            // camera, full-screen, one photo per presentation
+            // — the pragmatic v1 (no custom viewfinder, no
+            // streaming). What comes back goes straight to
+            // CallSession.sendPhotoTurn; a cancel is just a
+            // dismissal, nothing recorded.
+            .fullScreenCover(isPresented: $showCamera) {
+                CallCameraPicker { image in
+                    showCamera = false
+                    if let image,
+                       let raw = image.jpegData(compressionQuality: 0.9) {
+                        call.sendPhotoTurn(rawImageData: raw)
+                    }
+                }
+                .ignoresSafeArea()
+            }
             // Shield quarantine (v0.15.7): a held turn waits
             // here for the operator's one-time decision. Send
             // anyway proceeds with THIS turn only — the scan's
@@ -287,13 +320,31 @@ struct CallView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 10) {
-                        if call.turns.isEmpty && call.liveReplyText.isEmpty && call.liveTranscript.isEmpty {
+                        if call.turns.isEmpty && call.photoEntries.isEmpty && call.liveReplyText.isEmpty && call.liveTranscript.isEmpty {
                             Text("What you say and what GUS answers will appear here as you talk.")
                                 .font(.callout)
                                 .foregroundColor(.secondary)
                         }
-                        ForEach(call.turns) { turn in
+                        // v0.36.0: camera entries interleave at
+                        // their turn anchors — an entry taken
+                        // before turn N renders just before
+                        // turn N's rows (in Core mode that IS
+                        // the photo's own turn: the photo went
+                        // in, the reply came back under it).
+                        // Entries anchored past the last turn
+                        // (an on-device photo, whose spoken
+                        // answer is a local turn that may not
+                        // have landed yet, or a permission
+                        // denial) render after the turns, before
+                        // the live rows.
+                        ForEach(Array(call.turns.enumerated()), id: \.element.id) { index, turn in
+                            ForEach(call.photoEntries.filter { $0.turnAnchor == index }) { entry in
+                                photoEntryRow(entry)
+                            }
                             transcriptTurn(turn)
+                        }
+                        ForEach(call.photoEntries.filter { $0.turnAnchor >= call.turns.count }) { entry in
+                            photoEntryRow(entry)
                         }
                         if showLiveReply {
                             transcriptRow(speaker: "GUS", text: call.liveReplyText, tint: .accentColor)
@@ -308,6 +359,7 @@ struct CallView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .onChange(of: call.turns.count) { _ in scrollTranscript(proxy) }
+                .onChange(of: call.photoEntries.count) { _ in scrollTranscript(proxy) }
                 .onChange(of: call.liveTranscript) { _ in scrollTranscript(proxy) }
                 .onChange(of: call.liveReplyText) { _ in scrollTranscript(proxy) }
             }
@@ -364,6 +416,58 @@ struct CallView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// One camera entry in the transcript (v0.36.0): the
+    /// "You" row for a photo — the thumbnail when there is
+    /// one (a problem entry has none), and under it, in
+    /// caption words, what happened to it. This row is the
+    /// visible record that a photo was taken on this call;
+    /// nothing about a capture is silent.
+    @ViewBuilder
+    private func photoEntryRow(_ entry: CallPhotoEntry) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("You")
+                .font(.caption2)
+                .fontWeight(.semibold)
+                .foregroundColor(.secondary)
+            if let data = entry.imageData, let image = UIImage(data: data) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxHeight: 160)
+                    .cornerRadius(8)
+            }
+            Text(entry.note)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The camera button's gate (v0.36.0). Permission first,
+    /// in context: a denial (or a device with no camera)
+    /// lands as plain words in the transcript via
+    /// CallSession.notePhotoProblem — the operator is never
+    /// left wondering whether a photo happened. Granted (or
+    /// not yet asked — the system prompt then appears over
+    /// this very screen, in context) opens the system
+    /// camera. Exactly one photo per presentation.
+    private func openCamera() {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .denied, .restricted:
+            call.notePhotoProblem(
+                "Camera access is off for GUS — turn it on in Settings → GUS → Camera if you want GUS to see.")
+        case .authorized, .notDetermined:
+            if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                showCamera = true
+            } else {
+                call.notePhotoProblem("This device has no camera GUS can use.")
+            }
+        @unknown default:
+            call.notePhotoProblem("The camera isn't available right now.")
+        }
     }
 
     // MARK: - Composer (v0.23.0)
@@ -665,4 +769,41 @@ private struct RoutePickerView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: AVRoutePickerView, context: Context) {}
+}
+
+/// The system camera, wrapped for SwiftUI (v0.36.0): the
+/// stock UIImagePickerController in camera mode — the
+/// pragmatic v1, no custom viewfinder. One photo per
+/// presentation: the delegate hands back the captured
+/// image (or nil on cancel) and the cover dismisses.
+private struct CallCameraPicker: UIViewControllerRepresentable {
+    let onCapture: (UIImage?) -> Void
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.allowsEditing = false
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator { Coordinator(onCapture: onCapture) }
+
+    final class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+        let onCapture: (UIImage?) -> Void
+        init(onCapture: @escaping (UIImage?) -> Void) { self.onCapture = onCapture }
+
+        func imagePickerController(
+            _ picker: UIImagePickerController,
+            didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
+        ) {
+            onCapture(info[.originalImage] as? UIImage)
+        }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            onCapture(nil)
+        }
+    }
 }

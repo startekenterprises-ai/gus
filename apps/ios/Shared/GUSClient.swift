@@ -94,6 +94,12 @@ struct VoiceSessionState: Decodable {
         let transcript: String?
         let replyText: String?
         let interrupted: Bool
+        /// v0.36.0: photo count on a camera turn — the count
+        /// crosses, never the image data (the call screen's
+        /// own photo entry carries the thumbnail). Declared
+        /// last with a default: the local turn constructors
+        /// in CallSession predate it and omit it.
+        let photos: Int? = nil
         var id: Int { index }
     }
     let ok: Bool
@@ -513,11 +519,25 @@ actor GUSClient {
     /// A final transcript from this phone's own recognizer, for
     /// calls whose resolved STT mode is "local" — it takes the
     /// identical session turn a transcribed utterance takes.
+    ///
+    /// v0.36.0: `images` carries an in-call camera photo
+    /// (JPEG data, downscaled and re-encoded by the same
+    /// transport treatment a chat photo gets). It rides the
+    /// same POST as base64 and takes the same session turn;
+    /// the core presents it to its brain as image input and
+    /// its turn record keeps only the count. A photo-only
+    /// post (empty text) is a valid turn.
     @discardableResult
-    func voiceSessionTranscript(sessionId: String, text: String) async throws -> ActionResult {
-        try decode(ActionResult.self, await request(
+    func voiceSessionTranscript(sessionId: String, text: String, images: [Data] = []) async throws -> ActionResult {
+        var body: [String: Any] = ["sessionId": sessionId, "text": text]
+        if !images.isEmpty {
+            body["images"] = images.map {
+                ["mediaType": "image/jpeg", "data": $0.base64EncodedString()]
+            }
+        }
+        return try decode(ActionResult.self, await request(
             "/api/voice/session/transcript", method: "POST",
-            jsonBody: ["sessionId": sessionId, "text": text]))
+            jsonBody: body))
     }
 
     /// A raw PCM16 audio chunk, for calls whose resolved STT

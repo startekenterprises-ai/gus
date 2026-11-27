@@ -322,6 +322,9 @@ export interface PanelVoiceSessionTurnData {
   index: number;
   startedAt: number;
   transcript?: string;
+  /** v0.36.0: photo count for an in-call camera turn — the
+   *  count crosses, never the image data. */
+  photos?: number;
   kind: string;
   detail: string;
   replyText?: string;
@@ -933,8 +936,15 @@ export interface PanelBackend {
   /** v0.9.6: a final transcript from the app's built-in
    *  recognizer, for a call whose resolved STT mode is local.
    *  The transcript takes the identical session turn a
-   *  transcribed utterance takes — the panel adds no path. */
-  voiceSessionTranscript(sessionId: string, text: string): PanelActionResult;
+   *  transcribed utterance takes — the panel adds no path.
+   *  v0.36.0: `images` carries an in-call camera photo turn's
+   *  pictures — they take the same session turn and ride it
+   *  to the model as image input, as a chat photo does. */
+  voiceSessionTranscript(
+    sessionId: string,
+    text: string,
+    images?: PanelChatImageData[],
+  ): PanelActionResult;
   voiceSessionState(sessionId: string): PanelVoiceSessionData;
   voiceSessionNextAudio(sessionId: string, afterSeq: number): PanelVoiceAudioSegmentData;
   voiceSessionInterrupt(sessionId: string): PanelActionResult;

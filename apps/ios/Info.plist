@@ -80,6 +80,17 @@
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>GUS turns your speech into text during calls so it can answer you. Recognition runs on this iPhone whenever the system allows it.</string>
 	<!--
+		In-call camera (v0.36.0): the call screen's camera
+		button captures ONE photo when the operator taps it —
+		never automatically, never a stream — and sends it as
+		that turn of the call. In Core mode it rides to the
+		operator's own Mac like a chat photo; the on-device
+		brain cannot see pictures and the call says so. This
+		string is the system's ask, in context, at first tap.
+	-->
+	<key>NSCameraUsageDescription</key>
+	<string>GUS uses the camera only when you tap the camera button on a call, to show GUS what you're looking at. Photos are never taken automatically.</string>
+	<!--
 		v0.27.2: the launch screen. Through 0.27.1 this plist
 		carried NO launch-screen configuration at all — no
 		UILaunchStoryboardName, no UILaunchScreen, and no

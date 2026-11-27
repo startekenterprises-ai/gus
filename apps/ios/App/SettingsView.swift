@@ -18,6 +18,10 @@ struct SettingsView: View {
     @State private var kokoroVoice: KokoroVoice = KokoroVoice.selected
     @State private var callMode: CallMode = CallMode.preferred
     @State private var demoPitch: Bool = LocalBrain.demoPitchEnabled
+    /// v0.36.0: start-in-a-voice-call launch preference
+    /// (StartInCall) — read once per cold launch by
+    /// RootView; written here.
+    @State private var startInCall: Bool = StartInCall.enabled
     @State private var personaText: String = LocalBrain.customPrompt ?? ""
     @State private var stockAvatar: String = UserDefaults.standard.string(forKey: "gus.avatar.stock") ?? "boy"
     @State private var shieldEnabled: Bool = ShieldSettings.enabled
@@ -76,6 +80,19 @@ struct SettingsView: View {
                             LocalBrain.demoPitchEnabled = newValue
                         }
                     Text("On, the on-device brain introduces itself with the email pitch — the Gmail demo. Off, it's a general-purpose assistant. Takes effect with your next message or call — the brain reloads in this same app run (v0.31.0).")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    // v0.36.0: start in a voice call — the
+                    // launch preference RootView reads once
+                    // per cold launch (StartInCall). Plain
+                    // copy, one promise: opening the app
+                    // fresh starts a call; coming back to an
+                    // already-open app never does.
+                    Toggle("Start in a voice call", isOn: $startInCall)
+                        .onChange(of: startInCall) { newValue in
+                            StartInCall.enabled = newValue
+                        }
+                    Text("On, opening GUS fresh starts a voice call right away, so GUS can say hello first. Coming back to the app later never re-starts a call.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 } header: {

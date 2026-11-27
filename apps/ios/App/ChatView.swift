@@ -1103,7 +1103,16 @@ final class ChatModel: ObservableObject {
     /// what reaches the core is a few hundred KB in a format
     /// every vision model accepts. A pick that won't decode
     /// keeps its original bytes rather than vanishing.
-    private static func transportPhotoData(_ raw: Data) -> Data {
+    ///
+    /// v0.36.0: internal, not private — the call screen's
+    /// camera turn (CallSession.sendPhotoTurn) runs its
+    /// capture through this SAME treatment. One image
+    /// pipeline, not two: a photo is a photo whichever
+    /// surface took it. nonisolated: it is a pure function
+    /// of its input (decode, scale, re-encode — no model
+    /// state), which is what lets the call session use it
+    /// from its own context.
+    nonisolated static func transportPhotoData(_ raw: Data) -> Data {
         guard let image = UIImage(data: raw) else { return raw }
         let maxEdge: CGFloat = 1568
         let longest = max(image.size.width, image.size.height)

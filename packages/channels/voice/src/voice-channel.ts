@@ -52,6 +52,7 @@ import type {
   ChannelAdapter,
   ChannelEvent,
   JobDeliveryStats,
+  MessageImage,
   OutboundMessage,
 } from "@gus/shared";
 import {
@@ -116,6 +117,43 @@ export interface PendingApprovalLookup {
 const MAX_AUDIO_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REPLY_TIMEOUT_MS = 120_000;
 
+/** v0.36.0: photo caps for one voice turn — the panel Chat
+ *  adapter's own caps (panel-chat.ts MAX_CHAT_IMAGES /
+ *  MAX_CHAT_IMAGE_BASE64_CHARS), mirrored because the two
+ *  adapters accept the same attachment through different
+ *  doors and the caps are the contract, not an implementation
+ *  detail. The app sends a single downscaled JPEG (hundreds
+ *  of KB); these are headroom, not targets. The ChannelHost
+ *  re-validates before anything rides to the runtime. */
+export const MAX_VOICE_IMAGES = 4;
+export const MAX_VOICE_IMAGE_BASE64_CHARS = 8_000_000;
+
+/** v0.36.0: shape-check a voice turn's submitted images —
+ *  the panel adapter's sanitizeChatImage rules, mirrored at
+ *  this door for the same reason (an adapter's claim is
+ *  never trusted downstream, and THIS door refuses a photo
+ *  it cannot carry rather than dropping it silently).
+ *  Returns the sanitized images, or undefined when the
+ *  submission named photos that are not usable image
+ *  payloads — the caller refuses the whole submission then,
+ *  exactly as the chat door does. An absent/empty list is
+ *  "no photos", not a refusal. */
+export function sanitizeVoiceImages(raw: unknown): MessageImage[] | undefined {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw) || raw.length > MAX_VOICE_IMAGES) return undefined;
+  const out: MessageImage[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") return undefined;
+    const r = entry as { mediaType?: unknown; data?: unknown };
+    if (typeof r.mediaType !== "string" || !r.mediaType.startsWith("image/")) return undefined;
+    if (typeof r.data !== "string" || r.data.length === 0) return undefined;
+    if (r.data.length > MAX_VOICE_IMAGE_BASE64_CHARS) return undefined;
+    if (!/^[A-Za-z0-9+/=\s]+$/.test(r.data)) return undefined;
+    out.push({ mediaType: r.mediaType, data: r.data });
+  }
+  return out;
+}
+
 /** One host delivery to the voice conversation: its text plus,
  *  v0.9.8, the delivering job's stage stats when the send carried
  *  them (job outcomes do; locally-composed texts don't exist at
@@ -155,10 +193,20 @@ export class VoiceAdapter implements ChannelAdapter {
    * Control utterances arrive here already translated by the call
    * service ("/stop", "/approve <id>", "/deny <id>") and take the
    * host's existing command paths verbatim.
+   *
+   * v0.36.0: `images` carries a photo turn's pictures (the
+   * in-call camera). They ride the emitted message exactly as
+   * a chat photo rides PanelChatAdapter's — the ChannelHost
+   * re-validates them, frames them for the model, and the
+   * transcript records the count, never the data. A photo-only
+   * submit (no words) is a real message, as on the chat door;
+   * words with no photo and a photo with no words are both
+   * submittable, neither alone is not.
    */
-  submit(text: string): { ok: boolean; detail: string } {
+  submit(text: string, images?: MessageImage[]): { ok: boolean; detail: string } {
     const trimmed = text.trim();
-    if (!trimmed) return { ok: false, detail: "Nothing was heard — nothing was sent." };
+    const photos = images?.length ? images : undefined;
+    if (!trimmed && !photos) return { ok: false, detail: "Nothing was heard — nothing was sent." };
     if (!this.onEvent) {
       return { ok: false, detail: "The voice channel is not running yet — nothing was sent." };
     }
@@ -169,6 +217,7 @@ export class VoiceAdapter implements ChannelAdapter {
         messageId: `voice-${Date.now().toString(36)}-${this.counter++}`,
         senderId: VOICE_SENDER,
         text: trimmed,
+        ...(photos ? { images: photos } : {}),
         receivedAt: Date.now(),
         // v0.9.8: every submit from this adapter is a voice
         // turn's words. The host turns the flag into the job's
@@ -320,7 +369,7 @@ export class VoiceCallService {
    * it sentence by sentence). Public within the package: the
    * session service is the second caller, not a second pipeline.
    */
-  async processTranscript(transcript: string): Promise<VoiceCallResult> {
+  async processTranscript(transcript: string, images?: MessageImage[]): Promise<VoiceCallResult> {
     this.adapter.drainStale();
     const phrase = classifyTranscript(transcript);
     const pending = this.approvals.pendingFor(VOICE_CONVERSATION);
@@ -373,7 +422,13 @@ export class VoiceCallService {
     }
 
     // --- a normal job ------------------------------------------
-    const sent = this.adapter.submit(transcript);
+    // v0.36.0: a photo turn's images ride THIS submit — the
+    // ordinary-job door, the same one a chat photo takes.
+    // The command submits above (/stop, /approve, /deny) are
+    // control paths and never carry pictures: a photo turn
+    // whose words happen to be a speech act is answered as
+    // the speech act, like any spoken turn.
+    const sent = this.adapter.submit(transcript, images);
     if (!sent.ok) return { ok: false, kind: "unavailable", transcript, detail: sent.detail };
     const reply = await this.adapter.waitForReply(this.replyTimeoutMs);
     if (reply === undefined) {

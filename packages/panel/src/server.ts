@@ -36,7 +36,7 @@
  */
 import { createServer, type Server } from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import type { PanelBackend, PanelChatSyncMessageData, PanelChatSyncTombstoneData } from "./types.js";
+import type { PanelBackend, PanelChatImageData, PanelChatSyncMessageData, PanelChatSyncTombstoneData } from "./types.js";
 import { PANEL_HTML } from "./page.js";
 import { HELP_ENTRIES, HELP_HTML } from "./help.js";
 
@@ -413,11 +413,20 @@ export class PanelServer {
     // recognizer (JSON — the words are the body). Same token
     // gate; the session service decides whether the call's
     // resolved mode accepts it.
+    // v0.36.0: an in-call camera photo rides the same post —
+    // `images` as {mediaType, data} pairs, passed through
+    // when it is an array (the session service shape-checks
+    // and caps them, and refuses an unusable photo outright);
+    // the body cap matches the chat route's, since a photo
+    // body is a photo body whichever door it knocks on.
     if (method === "POST" && path === "/api/voice/session/transcript") {
-      const body = await this.readJson(req);
+      const body = await this.readJson(req, MAX_CHAT_BODY_BYTES);
       const result = this.backend.voiceSessionTranscript(
         typeof body.sessionId === "string" ? body.sessionId : "",
         typeof body.text === "string" ? body.text : "",
+        Array.isArray(body.images)
+          ? (body.images as PanelChatImageData[])
+          : undefined,
       );
       return json(result.ok ? 200 : 409, result);
     }

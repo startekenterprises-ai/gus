@@ -143,10 +143,12 @@ import {
 } from "./speech.js";
 import {
   VoiceCallService,
+  sanitizeVoiceImages,
   type PendingApprovalLookup,
   type VoiceAdapter,
   type VoiceCallResult,
 } from "./voice-channel.js";
+import type { MessageImage } from "@gus/shared";
 import {
   UtteranceSegmenter,
   normalizePcm16Gain,
@@ -211,6 +213,11 @@ export interface VoiceSessionTurn {
    *  ("endpoint"). Rides the durable turn record, so a call's
    *  post-mortem says which path its words took. */
   via?: VoiceEngine;
+  /** v0.36.0: how many photos the operator sent with this
+   *  turn (the in-call camera). The image data itself is
+   *  never recorded — the count is the record, exactly as
+   *  on the chat transcript (PanelChatEntry.photos). */
+  photos?: number;
   /** The VoiceCallResult kind, verbatim (reply | pending |
    *  stopped | approval-resolved | awaiting-confirmation |
    *  unavailable). */
@@ -831,8 +838,23 @@ export class VoiceSessionService {
    * route refuses — the ears for the call were resolved at its
    * start, and a second transcript path mid-call would make
    * turns the operator never spoke possible.
+   *
+   * v0.36.0: `images` carries an in-call camera photo turn's
+   * pictures — the photo rides the SAME turn a transcript
+   * takes (the chat photo's own door: the ordinary-job submit
+   * into the ChannelHost, which re-validates, frames, and
+   * delivers it as image input). The photos are shape-checked
+   * HERE, synchronously, so an unusable photo refuses the
+   * post itself with words the app can show — a photo is
+   * never silently dropped. A photo with no words is a real
+   * turn (the empty-transcript rule below applies only when
+   * there are no photos either).
    */
-  submitTranscript(sessionId: string, text: string): { ok: boolean; detail: string } {
+  submitTranscript(
+    sessionId: string,
+    text: string,
+    images?: unknown,
+  ): { ok: boolean; detail: string } {
     const session = this.session;
     if (!session || session.id !== sessionId) {
       return { ok: false, detail: "No live call by that id — the transcript was dropped, nothing was sent to GUS." };
@@ -848,11 +870,22 @@ export class VoiceSessionService {
           "This call is transcribing through its speech endpoint — a built-in transcript was refused and nothing was sent to GUS.",
       };
     }
+    let photos: MessageImage[] | undefined;
+    if (images !== undefined) {
+      const clean = sanitizeVoiceImages(images);
+      if (clean === undefined) {
+        return {
+          ok: false,
+          detail: "One of the attached photos isn't a usable image — nothing was sent.",
+        };
+      }
+      if (clean.length) photos = clean;
+    }
     session.lastSpeechAt = this.now();
     const postedAt = this.now();
     const trimmed = text.trim();
     session.chain = session.chain.then(() =>
-      this.runTranscriptTurn(session, trimmed, postedAt),
+      this.runTranscriptTurn(session, trimmed, postedAt, photos),
     );
     return { ok: true, detail: "Heard." };
   }
@@ -1046,6 +1079,7 @@ export class VoiceSessionService {
     session: ActiveSession,
     transcript: string,
     postedAt: number,
+    images?: MessageImage[],
   ): Promise<void> {
     if (this.session !== session) return;
     session.processing = true;
@@ -1066,7 +1100,7 @@ export class VoiceSessionService {
         this.finish(session, "disabled");
         return;
       }
-      if (!transcript) {
+      if (!transcript && !images?.length) {
         // Loud, on the record, and nowhere else: an empty final
         // from the recognizer is a settled turn that never
         // becomes a job, a scan, or a reply.
@@ -1074,8 +1108,13 @@ export class VoiceSessionService {
           "The built-in recognizer handed over an empty transcript — nothing was sent to GUS.";
         return;
       }
-      turn.transcript = transcript;
-      await this.completeTurn(session, turn, config, transcript, postedAt, 0);
+      // v0.36.0: a photo turn's record carries the photo
+      // COUNT (never the data), and a photo-only turn leaves
+      // the transcript unset — the operator sent a picture,
+      // not words, and the record says exactly that.
+      if (images?.length) turn.photos = images.length;
+      if (transcript) turn.transcript = transcript;
+      await this.completeTurn(session, turn, config, transcript, postedAt, 0, images);
     } finally {
       this.appendTurnRecord(turn);
       session.processing = false;
@@ -1097,6 +1136,7 @@ export class VoiceSessionService {
     transcript: string,
     utteranceEndAt: number,
     sttMs: number,
+    images?: MessageImage[],
   ): Promise<void> {
     const jobStart = this.now();
     // v0.9.8: arm the spoken filler — if the job is still
@@ -1107,7 +1147,7 @@ export class VoiceSessionService {
     const filler = this.armFiller(session, turn, config);
     let result: VoiceCallResult;
     try {
-      result = await this.calls.processTranscript(transcript);
+      result = await this.calls.processTranscript(transcript, images);
     } finally {
       filler.disarm();
     }
@@ -1265,6 +1305,9 @@ export class VoiceSessionService {
         ts: number;
         index: number;
         transcript?: string;
+        /** v0.36.0: photo count for a camera turn — the
+         *  count is the record, never the image data. */
+        photos?: number;
         stt?: VoiceEngine;
         kind: string;
         detail: string;
@@ -1279,6 +1322,7 @@ export class VoiceSessionService {
         ts: this.now(),
         index: turn.index,
         ...(turn.transcript !== undefined ? { transcript: turn.transcript } : {}),
+        ...(turn.photos !== undefined ? { photos: turn.photos } : {}),
         ...(turn.via !== undefined ? { stt: turn.via } : {}),
         kind: turn.kind,
         detail: turn.detail,

@@ -65,6 +65,50 @@ enum CallMode: String, CaseIterable, Identifiable {
     }
 }
 
+/// Start in a voice call (v0.36.0): the operator's launch
+/// preference — when on, a COLD launch opens straight into
+/// the call screen with the call started, so GUS greets the
+/// operator right away instead of waiting to be summoned
+/// (Settings → Call mode). RootView reads it once, when the
+/// signed-in shell first appears — the cold-launch moment.
+/// Warm foregrounding never re-reads it: the shell stays in
+/// the hierarchy across backgrounding, and ambushing the
+/// operator with a call every time they return to the app
+/// would be wrong. Default off.
+enum StartInCall {
+    static var enabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "gus.call.startInCall") }
+        set { UserDefaults.standard.set(newValue, forKey: "gus.call.startInCall") }
+    }
+}
+
+/// One camera moment on the call screen (v0.36.0): the
+/// photo the operator took mid-call (or, with imageData
+/// nil, the plain-words record of why no photo happened —
+/// permission denied, no camera). Memory only, in every
+/// mode: nothing here is ever written to a store on this
+/// phone — the entries are born with the call screen's
+/// session and cleared at the next call's start. In a
+/// Core-mode call the photo itself rides to the Mac like
+/// the call's audio does (the v0.34.0 incognito boundary:
+/// the Mac side of a call is the call); on-device, it
+/// never leaves this struct.
+struct CallPhotoEntry: Identifiable {
+    let id = UUID()
+    /// The capture, after the chat pipeline's transport
+    /// treatment (long edge ≤1568 px, JPEG q0.8).
+    let imageData: Data?
+    /// What happened to the photo, in plain words — set at
+    /// capture, and rewritten if the Core refuses or the
+    /// post fails, so the record never claims a delivery
+    /// that didn't happen.
+    var note: String
+    /// turns.count at capture: the entry renders in the
+    /// transcript panel just before the turn that followed
+    /// it — in Core mode, the photo's own reply turn.
+    let turnAnchor: Int
+}
+
 /// A user turn held by Agent Shield (v0.15.7): the scanned
 /// text and the rule that caught it, for the call screen's
 /// override prompt. The receipt is already written by the time
@@ -105,6 +149,10 @@ final class CallSession: NSObject, ObservableObject {
     /// transcript store.
     @Published private(set) var liveReplyText: String = ""
     @Published private(set) var turns: [VoiceSessionState.Turn] = []
+    /// v0.36.0: the call's camera moments (CallPhotoEntry),
+    /// rendered in the transcript panel at their turn
+    /// anchors. Memory only — see the struct.
+    @Published private(set) var photoEntries: [CallPhotoEntry] = []
     @Published private(set) var isMuted: Bool = false
     /// Output route: speaker (the default — calls start on
     /// speaker) or earpiece, toggled from the call screen.
@@ -273,6 +321,7 @@ final class CallSession: NSObject, ObservableObject {
         liveTranscript = ""
         liveReplyText = ""
         turns = []
+        photoEntries = []
         lastSeq = 0
         playbackFailuresThisCall = 0
         callMode = CallMode.preferred
@@ -880,6 +929,97 @@ final class CallSession: NSObject, ObservableObject {
         }
     }
 
+    // MARK: - Camera turns (v0.36.0)
+
+    /// One captured photo, sent as the operator's turn.
+    /// The capture is run through the chat pipeline's ONE
+    /// transport treatment (ChatModel.transportPhotoData —
+    /// long edge ≤1568 px, JPEG q0.8) and recorded as a
+    /// CallPhotoEntry BEFORE anything is dispatched, so the
+    /// transcript panel always shows that a photo was taken
+    /// and what happened to it — a capture is never silently
+    /// dropped. Then:
+    ///
+    /// - On-device: the photo is NOT dispatched — the
+    ///   LocalBrain has no vision projector, so it could
+    ///   only pretend to look. The entry carries the
+    ///   established honest line (the same words chat stamps
+    ///   on an on-device photo) and GUS says it out loud
+    ///   through the normal pump, as a "[Photo]" turn.
+    /// - Core: the photo rides the voice-session transcript
+    ///   post as a photo-only turn — the same door a chat
+    ///   photo takes into the pipeline (the core frames it
+    ///   for its vision-capable brain; its turn record keeps
+    ///   the count). The reply arrives through the normal
+    ///   poll-and-speak flow and is SPOKEN. If GUS is mid-
+    ///   reply, the photo barges in exactly like a typed
+    ///   message does. If the core refuses the post or the
+    ///   post fails, the entry's note is rewritten with the
+    ///   refusal's own words — the record never claims a
+    ///   delivery that didn't happen.
+    ///
+    /// Incognito: the photo lives only in this session's
+    /// memory (the entry) — nothing is written to any store
+    /// on this phone in any mode. In a Core-mode incognito
+    /// call it travels to the Mac exactly like the call's
+    /// audio does; that is the v0.34.0 boundary, unchanged.
+    func sendPhotoTurn(rawImageData: Data) {
+        guard phase == .live else { return }
+        let data = ChatModel.transportPhotoData(rawImageData)
+        if transport == .local {
+            appendPhotoEntry(
+                imageData: data,
+                note: "This brain can't look at photos yet — switch to Core to ask about pictures.")
+            speakCannedLocalTurn(
+                transcript: "[Photo]",
+                canned: "This brain can't look at photos yet — switch to Core to ask about pictures.")
+            return
+        }
+        guard let id = sessionId else { return }
+        appendPhotoEntry(
+            imageData: data,
+            note: "Photo sent to your Mac — GUS can see it there.")
+        guard let entryID = photoEntries.last?.id else { return }
+        liveReplyText = ""
+        if gusSpeaking {
+            cutSpeech()
+            Task { _ = try? await client.voiceSessionInterrupt(sessionId: id) }
+        }
+        Task {
+            do {
+                let result = try await client.voiceSessionTranscript(
+                    sessionId: id, text: "", images: [data])
+                if !result.ok {
+                    self.updatePhotoEntryNote(
+                        entryID, "The photo wasn't sent — \(result.detail)")
+                }
+            } catch {
+                self.updatePhotoEntryNote(
+                    entryID,
+                    "The photo wasn't sent — \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Record, in plain words in the transcript panel, why
+    /// a camera tap produced no photo — permission denied,
+    /// no camera on this device. The call screen calls this
+    /// from its permission gate; the words are the record.
+    func notePhotoProblem(_ note: String) {
+        guard phase == .live else { return }
+        appendPhotoEntry(imageData: nil, note: note)
+    }
+
+    private func appendPhotoEntry(imageData: Data?, note: String) {
+        photoEntries.append(CallPhotoEntry(
+            imageData: imageData, note: note, turnAnchor: turns.count))
+    }
+
+    private func updatePhotoEntryNote(_ id: UUID, _ note: String) {
+        guard let idx = photoEntries.firstIndex(where: { $0.id == id }) else { return }
+        photoEntries[idx].note = note
+    }
+
     /// Endpoint mode: convert a mic buffer to 16 kHz mono
     /// PCM16 and post ~100 ms chunks to the core. Runs on the
     /// audio tap's thread; the converter and accumulator are
@@ -1088,12 +1228,23 @@ final class CallSession: NSObject, ObservableObject {
     /// reply attached, so the call screen shows what GUS
     /// stopped and what he said about it.
     private func speakShieldBlockedTurn(for text: String) {
-        let canned = "I stopped that — it matched a known injection pattern."
+        speakCannedLocalTurn(
+            transcript: text,
+            canned: "I stopped that — it matched a known injection pattern.")
+    }
+
+    /// Speak one locally-composed line as a complete turn:
+    /// the transcript row, the phase, and the mouth, with
+    /// nothing dispatched anywhere. Shared by the Shield
+    /// block above and the camera turn's honest line below —
+    /// both are cases where the app itself owes the operator
+    /// an answer in words, out loud, on the record.
+    private func speakCannedLocalTurn(transcript: String, canned: String) {
         localTurnCounter += 1
         let turnID = localTurnCounter
         turns.append(VoiceSessionState.Turn(
             index: turns.count, kind: "voice", detail: "",
-            transcript: text, replyText: nil, interrupted: false))
+            transcript: transcript, replyText: nil, interrupted: false))
         corePhase = "thinking"
         if localAnswerTask != nil {
             localBrain?.stop()
