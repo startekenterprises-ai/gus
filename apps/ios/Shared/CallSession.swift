@@ -1034,7 +1034,7 @@ final class CallSession: NSObject, ObservableObject {
         guard pendingShieldQuarantine == nil else { return }
         if ShieldSettings.enabled {
             let scan = ShieldScanner.scan(text, posture: ShieldSettings.posture)
-            ShieldReceiptLog.shared.record(scan, direction: .user)
+            recordShieldReceipt(scan, direction: .user)
             switch scan.verdict {
             case .block:
                 speakShieldBlockedTurn(for: text)
@@ -1305,8 +1305,24 @@ final class CallSession: NSObject, ObservableObject {
     private func replySentenceBlocked(_ sentence: String) -> Bool {
         guard ShieldSettings.enabled else { return false }
         let scan = ShieldScanner.scan(sentence, posture: ShieldSettings.posture)
-        ShieldReceiptLog.shared.record(scan, direction: .assistant)
+        recordShieldReceipt(scan, direction: .assistant)
         return scan.verdict == .block
+    }
+
+    /// The call's one receipt seam (v0.34.0): in incognito
+    /// the receipt is EPHEMERAL — the verdict is real and
+    /// shown in the moment, but nothing is written to the
+    /// persistent Shield log, so a call taken while
+    /// incognito leaves no transcript-shaped trace behind.
+    /// (The call's turns themselves are memory-only in
+    /// every mode — this seam is the call surface's only
+    /// persistence, and it is the one incognito closes.)
+    private func recordShieldReceipt(_ scan: ShieldScanResult, direction: ShieldDirection) {
+        if IncognitoMode.shared.isOn {
+            ShieldReceiptLog.shared.recordEphemeral(scan, direction: direction)
+        } else {
+            ShieldReceiptLog.shared.record(scan, direction: direction)
+        }
     }
 
     /// Barge-in's local half: stop the brain, drop every

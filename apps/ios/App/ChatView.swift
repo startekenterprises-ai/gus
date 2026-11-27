@@ -38,6 +38,14 @@ import UIKit
 /// button — and message text is selectable, copyable, and
 /// shareable, with a Share conversation export in the
 /// header. Copy and share always move the displayed text.
+///
+/// Privacy (v0.34.0): history can be DELETED — per message
+/// from its menu, or all of it in Settings → Privacy — and
+/// deletion is a synced fact (a tombstone), so it lands on
+/// the Mac too; and INCOGNITO (the eye-slash in the header)
+/// runs a conversation that is never stored, never synced,
+/// and gone when you leave it, with Shield still scanning
+/// every word in the moment.
 struct ChatView: View {
     /// Extra bottom room that clears the floating tab
     /// bar's pill (v0.17.4) — the Call screen's figure,
@@ -53,6 +61,13 @@ struct ChatView: View {
     /// until the next message forced a redraw (Glenn,
     /// 2026-11-27).
     @ObservedObject private var personaSelection = PersonaSelection.shared
+    /// Incognito, observed (v0.34.0): the toggle, the
+    /// banner, and the mode line all render from the one
+    /// shared flag the model and the call session read.
+    @ObservedObject private var incognitoMode = IncognitoMode.shared
+    /// Leaving incognito discards the conversation — the
+    /// confirm is the last chance to stay.
+    @State private var confirmLeaveIncognito = false
     @State private var expandedExchanges: Set<UUID> = []
     @FocusState private var composerFocused: Bool
     /// The call, presented as a full-screen cover from the
@@ -83,7 +98,9 @@ struct ChatView: View {
             VStack(spacing: 0) {
                 headerAvatar
 
-                Text(model.mode == .onDevice
+                Text(incognitoMode.isOn
+                     ? "Incognito — on this iPhone only; nothing is saved or sent to your Mac."
+                     : model.mode == .onDevice
                      ? "On-device — the brain lives on this iPhone."
                      : "Core — replies come from your GUS core.")
                     .font(.caption)
@@ -94,6 +111,10 @@ struct ChatView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.horizontal, 16)
                     .padding(.top, 8)
+
+                if incognitoMode.isOn {
+                    incognitoBanner
+                }
 
                 debateBar
 
@@ -164,6 +185,22 @@ struct ChatView: View {
             // small toolbar chip is gone so the face shows
             // once, not twice.
             .toolbar {
+                // v0.34.0: incognito, at the leading edge —
+                // the ghost affordance other apps taught
+                // (an eye-slash: this conversation is not
+                // being kept). Filled while it's on.
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        if incognitoMode.isOn {
+                            confirmLeaveIncognito = true
+                        } else {
+                            model.setIncognito(true)
+                        }
+                    } label: {
+                        Image(systemName: incognitoMode.isOn ? "eye.slash.fill" : "eye.slash")
+                    }
+                    .accessibilityLabel(incognitoMode.isOn ? "Leave incognito" : "Start an incognito chat")
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     ShareLink(item: model.exportText()) {
                         Image(systemName: "square.and.arrow.up")
@@ -186,8 +223,49 @@ struct ChatView: View {
             .sheet(isPresented: $showPersonaPicker) {
                 PersonaPickerSheet()
             }
+            // Leaving incognito is destructive by design —
+            // the conversation was never saved, so there is
+            // nothing to keep and no undo to offer. The
+            // confirm exists so the discard is a decision,
+            // never a slip.
+            .confirmationDialog(
+                "Leave incognito?",
+                isPresented: $confirmLeaveIncognito
+            ) {
+                Button("Leave incognito", role: .destructive) {
+                    model.setIncognito(false)
+                }
+                Button("Stay in incognito", role: .cancel) {}
+            } message: {
+                Text("This conversation was never saved — leaving incognito makes it disappear for good.")
+            }
             .onAppear { model.refreshMode() }
         }
+    }
+
+    /// The incognito banner (v0.34.0): while incognito is
+    /// on, this strip never leaves the screen — the mode
+    /// must be unmistakable at a glance, and the bargain is
+    /// stated here, before the first word is typed: never
+    /// saved, gone when you leave. Inverted colors on
+    /// purpose (it reads dark in light mode, light in dark
+    /// mode) so it can never blend into the conversation.
+    private var incognitoBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "eye.slash.fill")
+            Text("Incognito — this conversation is never saved and disappears when you leave incognito.")
+                .lineLimit(2)
+                .minimumScaleFactor(0.85)
+            Spacer()
+            Button("Leave") { confirmLeaveIncognito = true }
+                .fontWeight(.semibold)
+        }
+        .font(.caption)
+        .foregroundColor(Color(UIColor.systemBackground))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.primary)
+        .padding(.top, 8)
     }
 
     // MARK: - Header avatar + debate bar (v0.31.0)
@@ -377,6 +455,10 @@ struct ChatView: View {
     /// what the operator sees on screen is what lands on
     /// the pasteboard or in the share sheet, never the
     /// store's verbatim record behind it.
+    /// v0.34.0: Delete joins the menu for durable messages
+    /// only (ChatModel.isRecordBacked) — it tombstones the
+    /// record: gone from this phone in the same beat, gone
+    /// from the Mac on the next sync.
     @ViewBuilder
     private func messageMenu(_ message: ChatMessage) -> some View {
         let text = message.shareText
@@ -388,6 +470,13 @@ struct ChatView: View {
             }
             ShareLink(item: text) {
                 Label("Share", systemImage: "square.and.arrow.up")
+            }
+        }
+        if model.isRecordBacked(message) {
+            Button(role: .destructive) {
+                model.deleteMessage(message)
+            } label: {
+                Label("Delete", systemImage: "trash")
             }
         }
     }
@@ -707,6 +796,40 @@ final class ChatModel: ObservableObject {
     /// Debate messages that already carry the canned line
     /// (one per message, as replies elsewhere).
     private var debateCannedMessages: Set<UUID> = []
+
+    // MARK: Incognito state (v0.34.0)
+
+    /// Incognito: a conversation that is never saved. The
+    /// mode flag itself lives in IncognitoMode (memory
+    /// only — the app launches in normal mode by
+    /// construction); this model tracks WHICH exchanges
+    /// were born incognito, because everything about them
+    /// is different: no store record at birth, no dispatch
+    /// to the core, no sync through either door, ephemeral
+    /// Shield receipts, and total discard when the mode
+    /// turns off.
+    var incognito: Bool { IncognitoMode.shared.isOn }
+    private var incognitoExchangeIDs: Set<UUID> = []
+
+    /// Turn incognito on or off. Turning it OFF discards
+    /// the incognito conversation entirely — the bargain
+    /// the banner states before the first word is typed.
+    /// Nothing here touches the store: there is nothing to
+    /// delete, because nothing was ever written.
+    func setIncognito(_ on: Bool) {
+        if on {
+            IncognitoMode.shared.isOn = true
+            return
+        }
+        for exchangeID in incognitoExchangeIDs {
+            receiptsByExchange.removeValue(forKey: exchangeID)
+        }
+        messages.removeAll { incognitoExchangeIDs.contains($0.exchangeID) }
+        incognitoExchangeIDs = []
+        IncognitoMode.shared.isOn = false
+        reloadHistoryIfStoreChanged()
+        syncWithCore()
+    }
     private let client = GUSClient.shared
     private var localChain: Task<Void, Never>?
     private var replyingCount = 0 {
@@ -719,7 +842,16 @@ final class ChatModel: ObservableObject {
     /// record-backed messages ARE store records (same UUID);
     /// notices and the streaming reply bubble stay session
     /// ephemera and are never stored or synced.
-    private let store = ChatHistoryStore()
+    /// v0.34.0: the store is the shared instance — Settings'
+    /// Privacy section deletes through the same store, and
+    /// the revision check in refreshMode is how those
+    /// deletions land in this view.
+    private let store = ChatHistoryStore.shared
+    /// The store revision the view's record-backed messages
+    /// were built from; a mismatch on appear means the store
+    /// changed under the view (a Settings-side deletion) and
+    /// the history is rebuilt.
+    private var builtStoreRevision = -1
     /// Record UUID → the exchange the view groups it under.
     private var exchangeByRecordId: [UUID: UUID] = [:]
     /// Exchange → the operator's store record for it, so a
@@ -729,6 +861,28 @@ final class ChatModel: ObservableObject {
 
     init() {
         loadStoredHistory()
+        builtStoreRevision = store.revision
+    }
+
+    /// Rebuild the view's record-backed history from the
+    /// store (v0.34.0) — after a deletion landed outside
+    /// this model (Settings → Privacy). Session-only
+    /// surfaces keep their own state and are not rebuilt
+    /// here: while a debate or an incognito conversation is
+    /// live, the rebuild waits — the store is already
+    /// correct, and the view reconciles on the next appear
+    /// after they end (endDebate and setIncognito both call
+    /// refreshMode).
+    private func reloadHistoryIfStoreChanged() {
+        guard store.revision != builtStoreRevision else { return }
+        guard !debateActive, !incognito else { return }
+        messages = []
+        receiptsByExchange = [:]
+        exchangeByRecordId = [:]
+        userRecordByExchange = [:]
+        cannedReplyExchanges = []
+        loadStoredHistory()
+        builtStoreRevision = store.revision
     }
 
     /// The view's opening state is the store's canonical
@@ -769,6 +923,7 @@ final class ChatModel: ObservableObject {
 
     func refreshMode() {
         mode = CallMode.preferred
+        reloadHistoryIfStoreChanged()
         // Appearing is a sync moment: whatever the desk said
         // while this screen was away folds in, and whatever
         // this phone said offline flows out.
@@ -789,6 +944,15 @@ final class ChatModel: ObservableObject {
     /// out.
     func exportText() -> String {
         messages.compactMap { message in
+            // v0.34.0: incognito exchanges never export. A
+            // bulk export is a retention machine — one tap
+            // would write the conversation incognito exists
+            // to forget into a file. (Copying a single
+            // message by hand stays the operator's own act,
+            // like a screenshot; the export is not.)
+            if incognitoExchangeIDs.contains(message.exchangeID) {
+                return nil
+            }
             switch message.role {
             case .notice:
                 return nil
@@ -870,6 +1034,13 @@ final class ChatModel: ObservableObject {
             sendDebate(text: text, photoAttached: photo != nil)
             return
         }
+        // Incognito (v0.34.0) forks before the store too —
+        // further than debate: an incognito message is never
+        // born as a record AT ALL (see sendIncognito).
+        if incognito {
+            sendIncognito(text: text, photo: photo)
+            return
+        }
         let exchangeID = UUID()
         // v0.26.0: the message is BORN as a sync record —
         // in the durable store, chained to the conversation
@@ -881,6 +1052,7 @@ final class ChatModel: ObservableObject {
         // submission before its pipeline scan.
         let syncRecord = store.appendLocal(
             direction: "in", text: text, photos: photo != nil ? 1 : 0)
+        builtStoreRevision = store.revision
         let recordUUID = UUID(uuidString: syncRecord.id) ?? UUID()
         exchangeByRecordId[recordUUID] = exchangeID
         userRecordByExchange[exchangeID] = syncRecord
@@ -922,6 +1094,15 @@ final class ChatModel: ObservableObject {
         // its exchange was born there, not in dispatch.
         if debateExchangeIDs.contains(message.exchangeID) {
             runDebate(exchangeID: message.exchangeID, text: message.text)
+            return
+        }
+        // A held INCOGNITO message goes back to the
+        // incognito dispatch (v0.34.0) — never to the
+        // store-born path, or the override would write the
+        // very record incognito exists to avoid.
+        if incognitoExchangeIDs.contains(message.exchangeID) {
+            dispatchIncognito(
+                exchangeID: message.exchangeID, text: message.text, photo: message.photoData)
             return
         }
         dispatch(exchangeID: message.exchangeID, text: message.text, photo: message.photoData)
@@ -1025,9 +1206,15 @@ final class ChatModel: ObservableObject {
                 // never delivered, so they are not the
                 // message). It syncs to the desk like
                 // everything else in the store.
-                let replyRecord = self.store.appendLocal(direction: "out", text: assembled)
-                if let rid = UUID(uuidString: replyRecord.id) {
-                    self.exchangeByRecordId[rid] = exchangeID
+                // v0.34.0: an INCOGNITO reply is shown and
+                // forgotten — it is not born into the store,
+                // exactly like the words that asked for it.
+                if !self.incognitoExchangeIDs.contains(exchangeID) {
+                    let replyRecord = self.store.appendLocal(direction: "out", text: assembled)
+                    self.builtStoreRevision = self.store.revision
+                    if let rid = UUID(uuidString: replyRecord.id) {
+                        self.exchangeByRecordId[rid] = exchangeID
+                    }
                 }
             }
             self.replyingCount -= 1
@@ -1095,6 +1282,60 @@ final class ChatModel: ObservableObject {
         return loaded
     }
 
+    // MARK: Incognito (v0.34.0)
+
+    /// One incognito message: the operator's words appear
+    /// at once, the Shield gate runs exactly as it does for
+    /// any message (protection without retention — the
+    /// verdicts show in the moment, from ephemeral
+    /// receipts), and the on-device brain answers. NO store
+    /// record is born — the deliberate contrast with send(),
+    /// where the record precedes the gate — nothing is
+    /// dispatched to the core, and nothing syncs through
+    /// either door: incognito stays on this iPhone by
+    /// construction, so it answers with the on-device brain
+    /// even when the mode picker says Core.
+    private func sendIncognito(text: String, photo: Data?) {
+        let exchangeID = UUID()
+        incognitoExchangeIDs.insert(exchangeID)
+        let message = ChatMessage(
+            id: UUID(), exchangeID: exchangeID, role: .user,
+            text: text, photoData: photo)
+        messages.append(message)
+        if ShieldSettings.enabled, !text.isEmpty {
+            let scan = ShieldScanner.scan(text, posture: ShieldSettings.posture)
+            record(scan, direction: .user, exchangeID: exchangeID)
+            switch scan.verdict {
+            case .block:
+                update(message.id) { $0.blocked = true }
+                appendNotice(exchangeID: exchangeID,
+                    text: "Shield stopped that message — it matched \(scan.primaryRuleID). It never reached the brain, and in incognito nothing about it is kept.")
+                return
+            case .quarantine:
+                update(message.id) { $0.held = true }
+                return
+            case .allow:
+                break
+            }
+        }
+        dispatchIncognito(exchangeID: exchangeID, text: text, photo: photo)
+    }
+
+    /// Incognito dispatch: on-device only. A photo cannot
+    /// be dispatched — the on-device brains are text-only,
+    /// and the one surface that could see it (the core) is
+    /// exactly where incognito words never go — so the note
+    /// on the message says so in plain words, and a
+    /// photo-only incognito message ends there.
+    private func dispatchIncognito(exchangeID: UUID, text: String, photo: Data?) {
+        if photo != nil {
+            setPhotoNote(exchangeID: exchangeID,
+                note: "Incognito stays on this iPhone, and this brain can't look at photos — the photo wasn't sent anywhere.")
+            if text.isEmpty { return }
+        }
+        dispatchOnDevice(exchangeID: exchangeID, text: text)
+    }
+
     // MARK: Debate (v0.31.0)
 
     /// The two debaters, resolved from the slot ids —
@@ -1151,6 +1392,9 @@ final class ChatModel: ObservableObject {
         debateActive = false
         debateTranscript = []
         appendNotice(exchangeID: UUID(), text: "Debate ended — back to one voice.")
+        // A store change that waited out the debate (a
+        // Settings-side deletion) reconciles now.
+        reloadHistoryIfStoreChanged()
     }
 
     /// Change a debater mid-debate: the new voice joins
@@ -1405,6 +1649,14 @@ final class ChatModel: ObservableObject {
     /// wants. Best-effort by design — offline is a normal
     /// state for this app, a failed exchange changes nothing,
     /// and the stores converge on the next one that lands.
+    ///
+    /// v0.34.0: tombstones ride both steps — the answer's
+    /// missingTombstones fold in with the arrivals (and take
+    /// their targets off this screen), and the push step
+    /// sends wanted tombstones beside wanted messages. The
+    /// have-list already names tombstone IDs (the store's
+    /// allIds is one record space), which is what stops the
+    /// core from ever asking for a deleted message back.
     func syncWithCore() {
         guard coreConnected, !syncInFlight else { return }
         syncInFlight = true
@@ -1417,20 +1669,71 @@ final class ChatModel: ObservableObject {
                     haveIds: self.store.allIds,
                     messages: [])
                 let arrivals = self.store.ingest(
-                    first.missing.map { SyncedChatRecord(wire: $0) })
+                    first.missing.map { SyncedChatRecord(wire: $0) },
+                    tombstones: (first.missingTombstones ?? []).map {
+                        SyncedChatTombstone(wire: $0)
+                    })
                 self.processArrivals(arrivals.added)
-                if !first.wantIds.isEmpty {
-                    let wanted = self.store.messages(forIds: first.wantIds)
+                if !arrivals.removedIds.isEmpty {
+                    self.removeViewMessages(forRecordIds: arrivals.removedIds)
+                }
+                self.builtStoreRevision = self.store.revision
+                let wantedMessages = self.store.messages(forIds: first.wantIds)
+                let wantedTombstones = self.store.tombstones(forIds: first.wantIds)
+                if !wantedMessages.isEmpty || !wantedTombstones.isEmpty {
                     _ = try await self.client.chatSync(
                         deviceId: self.store.deviceId,
                         haveIds: self.store.allIds,
-                        messages: wanted.map { $0.wire })
+                        messages: wantedMessages.map { $0.wire },
+                        tombstones: wantedTombstones.map { $0.wire })
                 }
             } catch {
                 // Unreachable core: nothing folded, nothing
                 // lost — every record is durable on this side.
             }
         }
+    }
+
+    // MARK: Deletion (v0.34.0)
+
+    /// Whether a view message is a durable store record —
+    /// the context menu's Delete shows only for these.
+    /// Notices, debate turns, and incognito turns are
+    /// session-only: there is nothing durable to delete,
+    /// and offering a Delete that deletes nothing would be
+    /// a lie in the menu.
+    func isRecordBacked(_ message: ChatMessage) -> Bool {
+        store.record(id: message.id.uuidString.lowercased()) != nil
+    }
+
+    /// Delete one message, everywhere it lives: the store
+    /// tombstones it (its content leaves the file; the
+    /// tombstone — content-free — stays and syncs), the
+    /// bubble leaves this screen in the same beat, and the
+    /// sync kicked off here carries the tombstone to the
+    /// core, where the same removal lands on the Mac.
+    func deleteMessage(_ message: ChatMessage) {
+        let targetId = message.id.uuidString.lowercased()
+        guard store.record(id: targetId) != nil else { return }
+        store.deleteLocal(targetId: targetId)
+        removeViewMessages(forRecordIds: [targetId])
+        builtStoreRevision = store.revision
+        syncWithCore()
+    }
+
+    /// Take record-backed bubbles off the screen — a local
+    /// delete, or tombstones that arrived in a sync. The
+    /// exchange bookkeeping for the removed records goes
+    /// with them.
+    private func removeViewMessages(forRecordIds ids: [String]) {
+        let uuids = Set(ids.compactMap { UUID(uuidString: $0) })
+        guard !uuids.isEmpty else { return }
+        messages.removeAll { uuids.contains($0.id) }
+        for uuid in uuids {
+            exchangeByRecordId.removeValue(forKey: uuid)
+        }
+        let idSet = Set(ids)
+        userRecordByExchange = userRecordByExchange.filter { !idSet.contains($0.value.id) }
     }
 
     /// Fold newly arrived records into the view, at their
@@ -1530,7 +1833,19 @@ final class ChatModel: ObservableObject {
     // MARK: Shared helpers
 
     private func record(_ scan: ShieldScanResult, direction: ShieldDirection, exchangeID: UUID) {
-        let receipt = ShieldReceiptLog.shared.record(scan, direction: direction)
+        // v0.34.0: incognito exchanges — and a debate
+        // running inside incognito — get EPHEMERAL receipts:
+        // the verdict displays in the moment exactly as
+        // usual, but nothing is written to the persistent
+        // Shield log. The log's receipts bind a content hash
+        // and a timestamp to this device forever; in
+        // incognito that is retention by the back door, and
+        // retention by the back door is still retention.
+        let ephemeral = incognitoExchangeIDs.contains(exchangeID)
+            || (incognito && debateExchangeIDs.contains(exchangeID))
+        let receipt = ephemeral
+            ? ShieldReceiptLog.shared.recordEphemeral(scan, direction: direction)
+            : ShieldReceiptLog.shared.record(scan, direction: direction)
         receiptsByExchange[exchangeID, default: []].append(receipt)
     }
 

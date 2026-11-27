@@ -36,6 +36,13 @@
  * is reported in `conflicts` so the caller can archive and log
  * it. The winner rule compares (deviceId, seq, ts, direction,
  * text, prevId) in that order.
+ *
+ * v0.34.0: deletion joins the model as the TOMBSTONE (below):
+ * an immutable record naming the message it kills. A delete
+ * that only hid a message locally would be fake privacy —
+ * the other device's copy would sync it back — so the
+ * tombstone syncs like any record and wins over its target
+ * whenever the target arrives.
  */
 
 export interface SyncedChatMessage {
@@ -249,4 +256,193 @@ export function chatIdsLacking(
 ): string[] {
   const held = new Set(mine.map((m) => m.id));
   return theirIds.filter((id) => !held.has(id));
+}
+
+// ------------------------------------------------------------
+// v0.34.0: tombstones — deletion as a synced fact.
+//
+// Append-only union merge has no honest way to say "this
+// message is gone": a delete that only hides a message on
+// one device is fake privacy, because the other device's
+// copy syncs it straight back. So deletion is itself a
+// record. A TOMBSTONE is an immutable synced record with
+// the same identity discipline as a message — its own ID,
+// the deleting device's ID, a sequence number from the
+// SAME per-device counter its messages draw from, a causal
+// pointer, a display-only timestamp — plus the one field
+// that is its whole purpose: `targetId`, the message it
+// kills. A tombstone carries no content.
+//
+// The rule is set-shaped, not order-shaped: a tombstone
+// wins over ANY copy of its target, whenever the copy
+// arrives — before the tombstone, with it, or long after
+// (a device that was offline when the deletion happened
+// still holds the message, and its late push must not
+// resurrect it). Stores therefore keep the tombstone set
+// as first-class state: the canonical message view is the
+// union merge MINUS every tombstoned target, the physical
+// stores remove the target's content, and the have/want
+// arithmetic never asks for a tombstoned ID again.
+// A tombstoned message is NOT a conflict: no copy of it is
+// archived anywhere — archiving deleted content would
+// defeat the deletion.
+
+export interface SyncedChatTombstone {
+  /** Discriminant — the wire and store lines carry it. */
+  kind: "tombstone";
+  /** The tombstone's own globally unique ID (UUID). */
+  id: string;
+  /** The device that performed the deletion. */
+  deviceId: string;
+  /** Per-device sequence number on the deleting device —
+   *  the same counter that device's messages draw from, so
+   *  (deviceId, seq) stays unique across both record kinds. */
+  seq: number;
+  /** Causal pointer: the last record the deleter had seen,
+   *  or null when its view was empty. */
+  prevId: string | null;
+  /** Creation time, milliseconds — DISPLAY ONLY. */
+  ts: number;
+  /** The message this tombstone deletes. */
+  targetId: string;
+}
+
+export interface ChatTombstoneConflict {
+  id: string;
+  kept: SyncedChatTombstone;
+  dropped: SyncedChatTombstone;
+}
+
+/** Strict shape check for a tombstone arriving from another
+ *  device (or read back from a store file) — same discipline
+ *  as validateSyncedChatMessage. */
+export function validateSyncedChatTombstone(raw: unknown): SyncedChatTombstone | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  if (r.kind !== "tombstone") return undefined;
+  if (typeof r.id !== "string" || r.id.length === 0 || r.id.length > 128) return undefined;
+  if (typeof r.deviceId !== "string" || r.deviceId.length === 0 || r.deviceId.length > 128) {
+    return undefined;
+  }
+  if (typeof r.seq !== "number" || !Number.isInteger(r.seq) || r.seq < 0) return undefined;
+  if (r.prevId !== undefined && r.prevId !== null && typeof r.prevId !== "string") return undefined;
+  if (typeof r.prevId === "string" && (r.prevId.length === 0 || r.prevId.length > 128)) {
+    return undefined;
+  }
+  if (typeof r.ts !== "number" || !Number.isFinite(r.ts) || r.ts < 0) return undefined;
+  if (typeof r.targetId !== "string" || r.targetId.length === 0 || r.targetId.length > 128) {
+    return undefined;
+  }
+  // A tombstone never targets itself.
+  if (r.targetId === r.id) return undefined;
+  return {
+    kind: "tombstone",
+    id: r.id,
+    deviceId: r.deviceId,
+    seq: r.seq,
+    prevId: (r.prevId ?? null) as string | null,
+    ts: r.ts,
+    targetId: r.targetId,
+  };
+}
+
+/** Field-by-field identity for tombstone copies. */
+export function sameChatTombstone(a: SyncedChatTombstone, b: SyncedChatTombstone): boolean {
+  return (
+    a.id === b.id &&
+    a.deviceId === b.deviceId &&
+    a.seq === b.seq &&
+    a.prevId === b.prevId &&
+    a.ts === b.ts &&
+    a.targetId === b.targetId
+  );
+}
+
+/** The tombstone conflict comparison: negative when `a`
+ *  wins. The same field order discipline as messages —
+ *  (deviceId, seq, ts, then the payload: targetId, prevId) —
+ *  pure value comparison, so every implementation picks the
+ *  same winner from the same pair. */
+export function compareChatTombstoneCopies(a: SyncedChatTombstone, b: SyncedChatTombstone): number {
+  if (a.deviceId !== b.deviceId) return a.deviceId < b.deviceId ? -1 : 1;
+  if (a.seq !== b.seq) return a.seq - b.seq;
+  if (a.ts !== b.ts) return a.ts - b.ts;
+  if (a.targetId !== b.targetId) return a.targetId < b.targetId ? -1 : 1;
+  const ap = a.prevId ?? "";
+  const bp = b.prevId ?? "";
+  if (ap !== bp) return ap < bp ? -1 : 1;
+  return 0;
+}
+
+/** Deterministic tombstone order: (deviceId, seq, id) —
+ *  the sibling order of the message rules, so a store's
+ *  tombstone list reads identically on every device. */
+function compareTombstones(a: SyncedChatTombstone, b: SyncedChatTombstone): number {
+  if (a.deviceId !== b.deviceId) return a.deviceId < b.deviceId ? -1 : 1;
+  if (a.seq !== b.seq) return a.seq - b.seq;
+  if (a.id !== b.id) return a.id < b.id ? -1 : 1;
+  return 0;
+}
+
+/**
+ * Union merge for tombstones: the union of both sets by ID,
+ * in deterministic order. Divergent copies of one tombstone
+ * ID resolve by compareChatTombstoneCopies and are reported
+ * as conflicts (the caller archives the loser — a tombstone
+ * carries no content, so archiving one leaks nothing).
+ */
+export function mergeChatTombstones(
+  local: readonly SyncedChatTombstone[],
+  remote: readonly SyncedChatTombstone[],
+): { tombstones: SyncedChatTombstone[]; conflicts: ChatTombstoneConflict[] } {
+  const byId = new Map<string, SyncedChatTombstone>();
+  const conflicts: ChatTombstoneConflict[] = [];
+  const fold = (t: SyncedChatTombstone): void => {
+    const held = byId.get(t.id);
+    if (!held) {
+      byId.set(t.id, t);
+      return;
+    }
+    if (sameChatTombstone(held, t)) return;
+    const winner = compareChatTombstoneCopies(held, t) <= 0 ? held : t;
+    const loser = winner === held ? t : held;
+    byId.set(t.id, winner);
+    conflicts.push({ id: t.id, kept: winner, dropped: loser });
+  };
+  for (const t of local) fold(t);
+  for (const t of remote) fold(t);
+  return { tombstones: [...byId.values()].sort(compareTombstones), conflicts };
+}
+
+/** The set of message IDs a tombstone set deletes. */
+export function chatTombstoneTargets(
+  tombstones: readonly SyncedChatTombstone[],
+): Set<string> {
+  return new Set(tombstones.map((t) => t.targetId));
+}
+
+/**
+ * The canonical view with deletion applied: every message
+ * whose ID any tombstone names is removed, whatever order
+ * the copies arrived in. This is the tombstone-first rule —
+ * a target that syncs in AFTER its tombstone is suppressed
+ * by the same filter, because the filter reads the set, not
+ * the arrival order.
+ */
+export function applyChatTombstones(
+  messages: readonly SyncedChatMessage[],
+  tombstones: readonly SyncedChatTombstone[],
+): SyncedChatMessage[] {
+  if (tombstones.length === 0) return [...messages];
+  const targets = chatTombstoneTargets(tombstones);
+  return messages.filter((m) => !targets.has(m.id));
+}
+
+/** What `mine` holds that a peer listing `theirIds` lacks —
+ *  the tombstones one sync push should carry. */
+export function chatTombstonesMissingFrom(
+  mine: readonly SyncedChatTombstone[],
+  theirIds: ReadonlySet<string>,
+): SyncedChatTombstone[] {
+  return mine.filter((t) => !theirIds.has(t.id));
 }

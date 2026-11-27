@@ -36,7 +36,7 @@
  */
 import { createServer, type Server } from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import type { PanelBackend, PanelChatSyncMessageData } from "./types.js";
+import type { PanelBackend, PanelChatSyncMessageData, PanelChatSyncTombstoneData } from "./types.js";
 import { PANEL_HTML } from "./page.js";
 import { HELP_ENTRIES, HELP_HTML } from "./help.js";
 
@@ -315,6 +315,9 @@ export class PanelServer {
           : [],
         messages: Array.isArray(body.messages)
           ? (body.messages as PanelChatSyncMessageData[])
+          : undefined,
+        tombstones: Array.isArray(body.tombstones)
+          ? (body.tombstones as PanelChatSyncTombstoneData[])
           : undefined,
       });
       return json(200, result);

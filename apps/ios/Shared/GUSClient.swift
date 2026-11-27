@@ -159,12 +159,48 @@ struct ChatSyncMessage: Decodable {
     }
 }
 
+/// One synced tombstone (v0.34.0) — the wire shape of a
+/// deletion, mirroring @gus/shared's SyncedChatTombstone:
+/// the same identity discipline as a message (UUID, device,
+/// sequence, causal pointer) plus the target it kills. It
+/// carries no content.
+struct ChatSyncTombstone: Decodable {
+    let id: String
+    let deviceId: String
+    let seq: Int
+    let prevId: String?
+    let ts: Double
+    let targetId: String
+
+    /// The JSON body shape for a push — the kind
+    /// discriminant rides along, as the wire contract names
+    /// it on every tombstone.
+    var wireDictionary: [String: Any] {
+        var d: [String: Any] = [
+            "kind": "tombstone",
+            "id": id, "deviceId": deviceId, "seq": seq, "ts": ts,
+            "targetId": targetId,
+        ]
+        if let prevId {
+            d["prevId"] = prevId
+        } else {
+            d["prevId"] = NSNull()
+        }
+        return d
+    }
+}
+
 /// POST /api/chat/sync — one exchange's answer: the records
 /// the caller lacks, and the caller's IDs the core still
 /// wants (sent in a follow-up exchange).
 struct ChatSyncResponse: Decodable {
     let deviceId: String
     let missing: [ChatSyncMessage]
+    /// v0.34.0: tombstones this phone lacks. Optional in the
+    /// decode: a core older than the privacy pack sends
+    /// none, and its absence means no deletions to apply —
+    /// never a decode failure.
+    let missingTombstones: [ChatSyncTombstone]?
     let wantIds: [String]
     let conflicts: Int
 }
@@ -438,10 +474,18 @@ actor GUSClient {
     /// never emitted as channel events (they were answered,
     /// or deliberately never dispatched, where they were
     /// born). Live dispatch is chat() above, never this.
-    func chatSync(deviceId: String, haveIds: [String], messages: [ChatSyncMessage]) async throws -> ChatSyncResponse {
+    ///
+    /// v0.34.0: `tombstones` pushes deletions the same way —
+    /// the core applies them before filing anything else in
+    /// the exchange, and its answer's missingTombstones are
+    /// the deletions this phone has not applied yet.
+    func chatSync(deviceId: String, haveIds: [String], messages: [ChatSyncMessage], tombstones: [ChatSyncTombstone] = []) async throws -> ChatSyncResponse {
         var body: [String: Any] = ["deviceId": deviceId, "haveIds": haveIds]
         if !messages.isEmpty {
             body["messages"] = messages.map { $0.wireDictionary }
+        }
+        if !tombstones.isEmpty {
+            body["tombstones"] = tombstones.map { $0.wireDictionary }
         }
         return try decode(ChatSyncResponse.self, await request("/api/chat/sync", method: "POST", jsonBody: body))
     }

@@ -24,6 +24,10 @@ struct SettingsView: View {
     @State private var shieldEnabled: Bool = ShieldSettings.enabled
     @State private var shieldPosture: ShieldPosture = ShieldSettings.posture
     @State private var savedNote = false
+    /// v0.34.0: the delete-history confirm, and the line
+    /// that says it landed.
+    @State private var confirmDeleteHistory = false
+    @State private var historyDeleted = false
 
     var body: some View {
         NavigationStack {
@@ -286,6 +290,47 @@ struct SettingsView: View {
                     Text("About")
                 } footer: {
                     Text("The voice lines are the call path's own record — formats, route, and any playback failure with its error — kept so a silent call can say why.")
+                }
+
+                // v0.34.0: Privacy — the delete that is
+                // actually a delete. It tombstones every
+                // message in the phone's store (the store
+                // is shared with Chat, so the conversation
+                // empties there in the same beat) and the
+                // tombstones sync to the core, where the
+                // same content leaves the Mac's transcript.
+                // The confirm copy says all of that,
+                // including what is NOT deleted: the Shield
+                // receipts — verdicts and hashes, never
+                // content — are the audit trail, and they
+                // stay.
+                Section {
+                    Button(role: .destructive) {
+                        confirmDeleteHistory = true
+                    } label: {
+                        Text("Delete chat history")
+                    }
+                    if historyDeleted {
+                        Text("Deleted — the conversation is empty, here and (on the next sync) on your Mac.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                } header: {
+                    Text("Privacy")
+                } footer: {
+                    Text("Deletes every chat message on this iPhone and, on the next sync, on your Mac too — removed, not just hidden. Shield security receipts are not chat content and are kept: they hold verdicts and hashes, never your words, and they are your audit trail. For a single conversation that leaves nothing behind at all, use Incognito in Chat.")
+                }
+                .confirmationDialog(
+                    "Delete all chat history?",
+                    isPresented: $confirmDeleteHistory
+                ) {
+                    Button("Delete everything", role: .destructive) {
+                        ChatHistoryStore.shared.deleteAllLocal()
+                        historyDeleted = true
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("Every chat message on this iPhone is deleted now, and the deletion reaches your Mac on the next sync — the messages are removed there too, not just hidden. Shield security receipts are not chat content and are kept: they're your audit trail. This cannot be undone.")
                 }
 
                 Section {

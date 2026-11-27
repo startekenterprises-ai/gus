@@ -61,6 +61,22 @@
  * merge core picks the deterministic winner for the canonical
  * view, and the losing copy is archived whole to
  * <stateDir>/chat-sync-conflicts.jsonl.
+ *
+ * v0.34.0: deletion. A tombstone (see @gus/shared's chat-sync)
+ * is a synced record naming the message it kills; it travels
+ * the same exchange as messages, under the same identity
+ * discipline. Applying one REMOVES the target's line(s) from
+ * chat.jsonl — a compacting rewrite in the migration's
+ * atomic pattern, non-transcript lines preserved — because a
+ * delete that leaves the words on disk is not a delete. The
+ * tombstone line itself stays (it carries no content), so
+ * the deletion is durable state: the have/want arithmetic
+ * never asks for a tombstoned ID again, a late-arriving copy
+ * of the target is refused at ingest, and a fresh device
+ * syncing against this store receives the tombstones, not
+ * the messages. A tombstoned message is never archived to
+ * the conflicts file — archiving deleted content would
+ * defeat the deletion.
  */
 import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -70,14 +86,19 @@ import type {
   MessageImage,
   OutboundMessage,
   SyncedChatMessage,
+  SyncedChatTombstone,
 } from "@gus/shared";
 import {
-  chatIdsLacking,
+  applyChatTombstones,
   chatMessagesMissingFrom,
+  chatTombstoneTargets,
+  chatTombstonesMissingFrom,
   mergeChatMessages,
+  mergeChatTombstones,
   orderChatMessages,
   sameChatMessage,
   validateSyncedChatMessage,
+  validateSyncedChatTombstone,
 } from "@gus/shared";
 import { JsonlLogCache } from "./log-cache.js";
 
@@ -126,6 +147,9 @@ export interface ChatSyncExchangeRequest {
   deviceId: string;
   haveIds: string[];
   messages?: unknown[];
+  /** v0.34.0: tombstones the peer pushes (deletions it made
+   *  or carries). Validated one by one, like messages. */
+  tombstones?: unknown[];
 }
 
 export interface ChatSyncExchangeResult {
@@ -133,8 +157,15 @@ export interface ChatSyncExchangeResult {
   /** Store records the caller lacks (its haveIds didn't name
    *  them), in canonical causal order. */
   missing: SyncedChatMessage[];
+  /** v0.34.0: tombstones the caller lacks — deletions it has
+   *  not applied yet. It needs these BEFORE any message push
+   *  can be trusted: a tombstone is what stops a held copy
+   *  of a deleted message from being wanted back. */
+  missingTombstones: SyncedChatTombstone[];
   /** Of the caller's haveIds, the ones this store lacks — the
-   *  caller sends those records in a follow-up exchange. */
+   *  caller sends those records in a follow-up exchange.
+   *  Tombstoned target IDs are never wanted: asking for one
+   *  would resurrect a deleted message. */
   wantIds: string[];
   /** Divergent copies archived during this exchange. */
   conflicts: number;
@@ -199,6 +230,18 @@ function mapChatLine(raw: unknown): PanelChatEntry | undefined {
   return entry;
 }
 
+/** v0.34.0: a tombstone line on the transcript file — the
+ *  second derivation the file carries (the log cache's rule:
+ *  one cache instance per derivation). A tombstone line is a
+ *  panel-chat line whose record validates as a tombstone;
+ *  anything else on the file is not one. */
+function mapTombstoneLine(raw: unknown): SyncedChatTombstone | undefined {
+  const r = raw as { conversationId?: string };
+  if (!r || typeof r !== "object") return undefined;
+  if (r.conversationId !== PANEL_CHAT_CONVERSATION) return undefined;
+  return validateSyncedChatTombstone(raw);
+}
+
 /** A transcript entry as a synced record, or undefined when it
  *  carries no sync identity (pre-migration — the migration runs
  *  before any sync surface answers, so sync code never sees
@@ -243,9 +286,27 @@ export class PanelChatAdapter implements ChannelAdapter {
   private syncIngestedIds = new Set<string>();
   /** The canonical (merged, causally ordered) sync view,
    *  memoized on the history cache's revision + entry count:
-   *  either changing means the file grew or was replaced. */
-  private canonicalCache: { revision: number; count: number; messages: SyncedChatMessage[] } | null =
-    null;
+   *  either changing means the file grew or was replaced.
+   *  v0.34.0: the tombstone view's revision + count ride the
+   *  key too — a deletion changes the view without touching
+   *  a single message line. */
+  private canonicalCache: {
+    revision: number;
+    count: number;
+    tombRevision: number;
+    tombCount: number;
+    messages: SyncedChatMessage[];
+  } | null = null;
+  /** v0.34.0: the tombstone derivation of the same file — a
+   *  second log cache instance, per the cache's one-mapper-
+   *  per-path rule — and its folded view, memoized the same
+   *  way as the canonical message view. */
+  private tombstoneCache = new JsonlLogCache<SyncedChatTombstone>();
+  private tombstoneViewCache: {
+    revision: number;
+    count: number;
+    tombstones: SyncedChatTombstone[];
+  } | null = null;
 
   constructor(private stateDir: string) {}
 
@@ -316,10 +377,17 @@ export class PanelChatAdapter implements ChannelAdapter {
 
     // Next core sequence: one past the highest the core has
     // used (its own records, migrated ones included).
+    // v0.34.0: tombstones draw from the SAME per-device
+    // counter, so the core's own tombstones count here too.
     let max = 0;
     for (const entry of this.allEntries()) {
       if (entry.deviceId === this.coreDeviceId && typeof entry.seq === "number") {
         if (entry.seq > max) max = entry.seq;
+      }
+    }
+    for (const tombstone of this.allTombstones()) {
+      if (tombstone.deviceId === this.coreDeviceId && tombstone.seq > max) {
+        max = tombstone.seq;
       }
     }
     this.nextSeq = max + 1;
@@ -408,17 +476,53 @@ export class PanelChatAdapter implements ChannelAdapter {
     return [...this.historyCache.read(this.logPath(), mapChatLine)];
   }
 
+  /** v0.34.0: every tombstone in the store, folded by the
+   *  merge core (the file can hold two copies of one
+   *  tombstone ID exactly as it can for messages — a winning
+   *  ingested copy appended beside the filed one) and in the
+   *  core's deterministic order. Memoized on the tombstone
+   *  cache's revision + line count, like the message view. */
+  private allTombstones(): SyncedChatTombstone[] {
+    const revision = this.tombstoneCache.revision(this.logPath());
+    const lines = this.tombstoneCache.read(this.logPath(), mapTombstoneLine);
+    if (
+      this.tombstoneViewCache &&
+      this.tombstoneViewCache.revision === revision &&
+      this.tombstoneViewCache.count === lines.length
+    ) {
+      return this.tombstoneViewCache.tombstones;
+    }
+    const tombstones = mergeChatTombstones([...lines], []).tombstones;
+    this.tombstoneViewCache = { revision, count: lines.length, tombstones };
+    return tombstones;
+  }
+
+  /** The IDs this store has deleted — the suppression set
+   *  every door checks before recording anything. */
+  private tombstonedTargets(): Set<string> {
+    return chatTombstoneTargets(this.allTombstones());
+  }
+
   /** Every synced record in the store, in canonical causal
    *  order (the merge core's order over the file's set — file
    *  order and causal order agree for single-device history,
-   *  and diverge exactly where offline branches interleave). */
+   *  and diverge exactly where offline branches interleave).
+   *  v0.34.0: tombstoned records are NOT part of the view —
+   *  the merge result passes through applyChatTombstones, so
+   *  even a target whose line somehow survived compaction
+   *  (a crash between doors, a hand-edited file) never
+   *  renders, syncs, or dispatches from here. */
   private canonicalMessages(): SyncedChatMessage[] {
     const revision = this.historyCache.revision(this.logPath());
     const entries = this.allEntries();
+    const tombstones = this.allTombstones();
+    const tombRevision = this.tombstoneCache.revision(this.logPath());
     if (
       this.canonicalCache &&
       this.canonicalCache.revision === revision &&
-      this.canonicalCache.count === entries.length
+      this.canonicalCache.count === entries.length &&
+      this.canonicalCache.tombRevision === tombRevision &&
+      this.canonicalCache.tombCount === tombstones.length
     ) {
       return this.canonicalCache.messages;
     }
@@ -434,8 +538,15 @@ export class PanelChatAdapter implements ChannelAdapter {
     // syncExchange). The fold dedupes identical copies and
     // resolves divergent ones by the same deterministic rule,
     // so the view is a pure function of the file's set.
-    const messages = mergeChatMessages(records, []).messages;
-    this.canonicalCache = { revision, count: entries.length, messages };
+    const merged = mergeChatMessages(records, []).messages;
+    const messages = applyChatTombstones(merged, tombstones);
+    this.canonicalCache = {
+      revision,
+      count: entries.length,
+      tombRevision,
+      tombCount: tombstones.length,
+      messages,
+    };
     return messages;
   }
 
@@ -514,6 +625,19 @@ export class PanelChatAdapter implements ChannelAdapter {
       return { ok: false, detail: "The chat channel is not running yet — nothing was sent." };
     }
     this.ensureSyncReady();
+
+    // v0.34.0: a tombstoned ID is refused at the live door
+    // too. Honest use cannot produce this (the phone mints
+    // an ID once and a deleted message is never re-sent),
+    // but without the guard the fall-through below would
+    // record and emit a message the operator deleted —
+    // deletion has to win at every door, not just sync.
+    if (identity && this.tombstonedTargets().has(identity.id)) {
+      return {
+        ok: false,
+        detail: "That message was deleted — deleted messages don't come back. Nothing was sent.",
+      };
+    }
 
     // The record's sync identity: the creating device's, when
     // one rides along and validates against this submission;
@@ -655,6 +779,185 @@ export class PanelChatAdapter implements ChannelAdapter {
     this.canonicalCache = null;
   }
 
+  // -- deletion (v0.34.0) ---------------------------------------
+
+  /** The store's tombstones, folded and ordered — the public
+   *  read of allTombstones for the sync surface and tests. */
+  syncTombstones(): SyncedChatTombstone[] {
+    this.ensureSyncReady();
+    return this.allTombstones();
+  }
+
+  /**
+   * Delete one message from this store, core-born: mint a
+   * tombstone under the core's own identity (its sequence
+   * counter is shared with its messages) and apply it. The
+   * tombstone is returned either way — deleting an unknown
+   * or already-deleted ID still yields the standing
+   * tombstone, because its job is suppression, not just
+   * removal: a copy of the target that arrives later is
+   * refused by it.
+   */
+  deleteMessage(targetId: string): SyncedChatTombstone {
+    this.ensureSyncReady();
+    const existing = this.allTombstones().find((t) => t.targetId === targetId);
+    if (existing) return existing;
+    const tombstone: SyncedChatTombstone = {
+      kind: "tombstone",
+      id: randomUUID(),
+      deviceId: this.coreDeviceId,
+      seq: this.nextSeq++,
+      prevId: this.headId(),
+      ts: Date.now(),
+      targetId,
+    };
+    this.applyTombstones([tombstone], undefined);
+    return tombstone;
+  }
+
+  /**
+   * The one funnel every tombstone enters through — minted
+   * here (deleteMessage) or pushed by a peer (syncExchange):
+   * fold against the held set, archive a divergent copy
+   * (a tombstone carries no content; the archive stays
+   * content-free), file the new state, and REMOVE the
+   * targets' content from the transcript file. Returns how
+   * many tombstones were newly applied and how many
+   * divergent copies were archived.
+   */
+  private applyTombstones(
+    incoming: readonly SyncedChatTombstone[],
+    peerDeviceId: string | undefined,
+  ): { applied: number; conflicts: number } {
+    if (incoming.length === 0) return { applied: 0, conflicts: 0 };
+    const held = new Map(this.allTombstones().map((t) => [t.id, t]));
+    const toFile: SyncedChatTombstone[] = [];
+    let conflicts = 0;
+    for (const candidate of incoming) {
+      const existing = held.get(candidate.id);
+      if (!existing) {
+        held.set(candidate.id, candidate);
+        toFile.push(candidate);
+        continue;
+      }
+      const { conflicts: found } = mergeChatTombstones([existing], [candidate]);
+      for (const conflict of found) {
+        conflicts++;
+        appendFileSync(
+          this.conflictsPath(),
+          JSON.stringify({
+            ts: Date.now(),
+            kind: "tombstone",
+            id: conflict.id,
+            kept: conflict.kept,
+            dropped: conflict.dropped,
+            ...(peerDeviceId ? { peerDeviceId } : {}),
+          }) + "\n",
+        );
+        held.set(conflict.id, conflict.kept);
+        if (conflict.kept === candidate) toFile.push(candidate);
+      }
+    }
+    if (toFile.length === 0) return { applied: 0, conflicts };
+
+    // Does any newly-tombstoned target still have content in
+    // the file? Then the file is rewritten without it (the
+    // compaction below). If not — the common case for a
+    // deletion of something this store never held — the
+    // tombstone lines simply append, and the append-only
+    // discipline is untouched.
+    const newTargets = new Set(toFile.map((t) => t.targetId));
+    const contentHeld = this.allEntries().some(
+      (entry) => entry.id !== undefined && newTargets.has(entry.id),
+    );
+    if (contentHeld) {
+      this.compactChatFile(toFile);
+    } else {
+      for (const tombstone of toFile) {
+        appendFileSync(
+          this.logPath(),
+          JSON.stringify({ conversationId: PANEL_CHAT_CONVERSATION, ...tombstone }) + "\n",
+        );
+      }
+      this.tombstoneViewCache = null;
+    }
+    // A removed target's provenance goes with its line: it is
+    // no longer "recorded as history" for submit's exception,
+    // and submit refuses a tombstoned ID outright besides.
+    for (const targetId of newTargets) this.syncIngestedIds.delete(targetId);
+    this.canonicalCache = null;
+    return { applied: toFile.length, conflicts };
+  }
+
+  /**
+   * Rewrite chat.jsonl without the tombstoned targets' lines
+   * — the physical half of deletion. The migration's atomic
+   * pattern (tmp + rename): every line that is not a
+   * panel-chat transcript line naming a tombstoned target is
+   * preserved byte-for-byte (other conversations, torn
+   * tails, and all standing tombstone lines included); the
+   * newly applied tombstones append at the end. Both log
+   * caches drop their state for the path, so the next read
+   * of either derivation is a clean full parse.
+   */
+  private compactChatFile(newTombstones: readonly SyncedChatTombstone[]): void {
+    const path = this.logPath();
+    const targets = this.tombstonedTargets();
+    for (const tombstone of newTombstones) targets.add(tombstone.targetId);
+    const filedTombstoneIds = new Set(this.allTombstones().map((t) => t.id));
+    const out: string[] = [];
+    if (existsSync(path)) {
+      const rawLines = readFileSync(path, "utf8").split("\n");
+      // The split's final element is what follows the file's
+      // last newline: "" for a well-formed file (not a line
+      // at all), or a torn tail's bytes. It is handled after
+      // the loop — every line this rewrite emits is newline-
+      // terminated (the write below), which is also what
+      // lets a torn tail finally parse.
+      const tail = rawLines.pop() ?? "";
+      for (const line of rawLines) {
+        if (!line.trim()) {
+          out.push(line);
+          continue;
+        }
+        let parsed: Record<string, unknown> | undefined;
+        try {
+          parsed = JSON.parse(line) as Record<string, unknown>;
+        } catch {
+          parsed = undefined;
+        }
+        if (
+          parsed &&
+          parsed.conversationId === PANEL_CHAT_CONVERSATION &&
+          parsed.kind !== "tombstone" &&
+          typeof parsed.id === "string" &&
+          targets.has(parsed.id)
+        ) {
+          continue; // the deleted content — the whole point
+        }
+        out.push(line);
+      }
+      if (tail) out.push(tail);
+    }
+    for (const tombstone of newTombstones) {
+      if (filedTombstoneIds.has(tombstone.id)) continue;
+      out.push(JSON.stringify({ conversationId: PANEL_CHAT_CONVERSATION, ...tombstone }));
+    }
+    const tmp = `${path}.tmp`;
+    // The trailing newline is load-bearing: the log caches
+    // hold a newline-less final line as a torn tail and
+    // never parse it — a compaction that ended the file
+    // without one would file its own tombstones invisibly,
+    // and the deletion would silently stop applying (and
+    // stop propagating) on the very next read.
+    writeFileSync(tmp, out.length > 0 ? out.join("\n") + "\n" : "");
+    renameSync(tmp, path);
+    this.historyCache.clear(path);
+    this.tombstoneCache.clear(path);
+    this.tombstoneViewCache = null;
+    this.canonicalCache = null;
+  }
+
   /** The durable transcript, oldest first, capped. A torn final
    *  line (a crash mid-append) is skipped, never fatal — the
    *  cache holds it unparsed until its newline lands. slice()
@@ -681,26 +984,54 @@ export class PanelChatAdapter implements ChannelAdapter {
 
   /**
    * One sync exchange with a peer device:
+   *  0. (v0.34.0) INGEST the peer's tombstones FIRST and
+   *     apply them — targets' content leaves the file here.
+   *     Deletion leads because everything after it depends
+   *     on the suppression set: a message pushed in the same
+   *     exchange as its own tombstone must never be filed.
    *  1. INGEST the records the peer pushes (the history door —
    *     recorded verbatim, never emitted). Unknown IDs append;
    *     identical copies skip; divergent copies resolve by the
    *     merge core's deterministic winner for the canonical
    *     view and the loser is archived whole to the conflicts
-   *     file — never silently dropped.
+   *     file — never silently dropped. A record whose ID is
+   *     tombstoned is refused outright: not recorded, not
+   *     archived (archiving it would keep the very content
+   *     the deletion exists to remove), not a conflict.
    *  2. ANSWER from the post-ingest store: the records the
-   *     peer lacks (missing) and the peer's IDs this store
-   *     lacks (wantIds), which the peer sends in a follow-up
-   *     exchange.
+   *     peer lacks (missing + missingTombstones) and the
+   *     peer's IDs this store lacks (wantIds), which the peer
+   *     sends in a follow-up exchange. wantIds never names a
+   *     tombstoned target — asking for one would resurrect
+   *     it — so a store that deleted a message the peer still
+   *     holds simply never asks, and refuses the copy if the
+   *     peer pushes it unasked.
    */
   syncExchange(req: ChatSyncExchangeRequest): ChatSyncExchangeResult {
     this.ensureSyncReady();
     let conflicts = 0;
 
+    const pushedTombstones: SyncedChatTombstone[] = [];
+    if (Array.isArray(req.tombstones)) {
+      for (const raw of req.tombstones.slice(0, MAX_SYNC_MESSAGES)) {
+        const validated = validateSyncedChatTombstone(raw);
+        if (validated) pushedTombstones.push(validated);
+      }
+    }
+    if (pushedTombstones.length > 0) {
+      const applied = this.applyTombstones(pushedTombstones, req.deviceId);
+      conflicts += applied.conflicts;
+    }
+    const targets = this.tombstonedTargets();
+
     const pushed: SyncedChatMessage[] = [];
     if (Array.isArray(req.messages)) {
       for (const raw of req.messages.slice(0, MAX_SYNC_MESSAGES)) {
         const validated = validateSyncedChatMessage(raw);
-        if (validated) pushed.push(validated);
+        // A tombstoned record is refused, full stop — see
+        // step 1 above. (Validation runs first: a malformed
+        // record is refused as malformed either way.)
+        if (validated && !targets.has(validated.id)) pushed.push(validated);
       }
     }
     if (pushed.length > 0) {
@@ -771,10 +1102,19 @@ export class PanelChatAdapter implements ChannelAdapter {
         (id): id is string => typeof id === "string",
       ),
     );
+    // The want list runs over the store's whole record set —
+    // messages AND tombstones (a tombstone this store lacks
+    // is a deletion it has not applied) — minus the
+    // tombstoned targets, which are never wanted back.
+    const heldRecordIds = new Set<string>([
+      ...store.map((m) => m.id),
+      ...this.allTombstones().map((t) => t.id),
+    ]);
     return {
       deviceId: this.coreDeviceId,
       missing: chatMessagesMissingFrom(store, have),
-      wantIds: chatIdsLacking(store, [...have]),
+      missingTombstones: chatTombstonesMissingFrom(this.allTombstones(), have),
+      wantIds: [...have].filter((id) => !heldRecordIds.has(id) && !targets.has(id)),
       conflicts,
     };
   }

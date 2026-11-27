@@ -618,13 +618,34 @@ export interface PanelChatSyncRequestData {
   deviceId: string;
   haveIds: string[];
   messages?: PanelChatSyncMessageData[];
+  /** v0.34.0: tombstones the caller pushes — deletions it
+   *  made or carries, applied by the core before any pushed
+   *  message is filed. */
+  tombstones?: PanelChatSyncTombstoneData[];
 }
 
 export interface PanelChatSyncResultData {
   deviceId: string;
   missing: PanelChatSyncMessageData[];
+  /** v0.34.0: tombstones the caller lacks. Optional in this
+   *  shape only because test backends stub the result; the
+   *  real backend always sends it. */
+  missingTombstones?: PanelChatSyncTombstoneData[];
   wantIds: string[];
   conflicts: number;
+}
+
+/** v0.34.0: one tombstone — mirrors @gus/shared's
+ *  SyncedChatTombstone. The wire shape of a deletion: it
+ *  names the message it kills and carries no content. */
+export interface PanelChatSyncTombstoneData {
+  kind: "tombstone";
+  id: string;
+  deviceId: string;
+  seq: number;
+  prevId: string | null;
+  ts: number;
+  targetId: string;
 }
 
 /** v0.24.0: one photo attached to a chat submission — mirrors

@@ -115,8 +115,57 @@ public final class ShieldReceiptLog: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         loadIfNeeded()
+        let receipt = buildReceipt(
+            result, direction: direction, seq: receipts.count, prevHash: lastHash)
+        receipts.append(receipt)
+        lastHash = receipt.hash
+        appendLine(receipt)
+        return receipt
+    }
+
+    // MARK: - Ephemeral receipts (v0.34.0 — incognito)
+
+    /// The ephemeral chain's next sequence: negative and
+    /// counting down, so an ephemeral receipt can never be
+    /// mistaken for a link in the persistent chain (whose
+    /// seqs count up from 0) — and stays unique among its
+    /// own kind for as long as the process lives.
+    private var ephemeralSeq = 0
+    /// The ephemeral chain's own hash link — genesis zeros,
+    /// then each ephemeral receipt's hash. It lives and dies
+    /// in this process's memory, exactly like the receipts
+    /// it links.
+    private var ephemeralPrevHash = String(repeating: "0", count: 64)
+
+    /// A receipt for a scan that must leave NO trace
+    /// (incognito mode): built and signed exactly like a
+    /// recorded one — same canonical form, same hash, same
+    /// device key — so the verdict shown in the moment is
+    /// the real, verifiable article. But it is never
+    /// appended to the chain, never written to the log file,
+    /// and never moves the persistent chain's head: when the
+    /// caller drops it, nothing about the scan remains
+    /// anywhere. Retention by the back door is still
+    /// retention; this is the door staying shut.
+    @discardableResult
+    public func recordEphemeral(_ result: ShieldScanResult, direction: ShieldDirection) -> ShieldReceipt {
+        lock.lock()
+        defer { lock.unlock() }
+        ephemeralSeq -= 1
+        let receipt = buildReceipt(
+            result, direction: direction, seq: ephemeralSeq, prevHash: ephemeralPrevHash)
+        ephemeralPrevHash = receipt.hash
+        return receipt
+    }
+
+    /// Build and sign one receipt over a scan — the shared
+    /// half of record() and recordEphemeral(): the canonical
+    /// form, its hash, and the active key's signature.
+    private func buildReceipt(
+        _ result: ShieldScanResult, direction: ShieldDirection, seq: Int, prevHash: String
+    ) -> ShieldReceipt {
         let draft = ShieldReceipt(
-            seq: receipts.count,
+            seq: seq,
             timestamp: Self.isoFormatter.string(from: Date()),
             direction: direction,
             verdict: result.verdict,
@@ -125,7 +174,7 @@ public final class ShieldReceiptLog: @unchecked Sendable {
             ruleID: result.primaryRuleID,
             rulesVersion: result.rulesVersion,
             contentHash: result.contentHash,
-            prevHash: lastHash,
+            prevHash: prevHash,
             hash: "",
             signature: "",
             signingKey: nil)
@@ -133,8 +182,8 @@ public final class ShieldReceiptLog: @unchecked Sendable {
         let hash = SHA256.hash(data: Data(canonical.utf8))
             .map { String(format: "%02x", $0) }.joined()
         let signed = sign(canonical)
-        let receipt = ShieldReceipt(
-            seq: draft.seq,
+        return ShieldReceipt(
+            seq: seq,
             timestamp: draft.timestamp,
             direction: draft.direction,
             verdict: draft.verdict,
@@ -143,14 +192,10 @@ public final class ShieldReceiptLog: @unchecked Sendable {
             ruleID: draft.ruleID,
             rulesVersion: draft.rulesVersion,
             contentHash: draft.contentHash,
-            prevHash: draft.prevHash,
+            prevHash: prevHash,
             hash: hash,
             signature: signed.signature,
             signingKey: signed.keyTag)
-        receipts.append(receipt)
-        lastHash = hash
-        appendLine(receipt)
-        return receipt
     }
 
     /// All receipts on this device, oldest first.
