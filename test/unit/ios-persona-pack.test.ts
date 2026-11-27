@@ -1,5 +1,6 @@
 /**
  * v0.31.0: the persona pack pins. v0.32.0: the polish pins.
+ * v0.33.0: the voice pack + conversation-quality pins.
  *
  * What is pinned here:
  *  - LocalBrain.personaStarters carries exactly the six
@@ -124,21 +125,26 @@ test("personas: every declared voice exists in the Kokoro catalog", () => {
   for (const voice of voices) {
     assert.ok(catalog.has(voice), `persona voice ${voice} is not in the catalog`);
   }
-  // The mapping's load-bearing picks (v0.32.0 lock-in):
-  // Gus keeps the default feel (af_heart); the therapist is
-  // a warm MALE now (am_michael — distinct from the
-  // priest's bm_george and the Devil's am_puck); the Devil
-  // moved to am_puck; Debbie moved off the doctor's
-  // af_bella to af_nicole, so no two personas share a voice.
+  // The mapping's load-bearing picks (v0.33.0 lock-in,
+  // Glenn's calls after hearing the v0.32.0 roster):
+  // Gus takes am_michael — the boy's face with af_heart's
+  // female voice was the mismatch he named; the Devil
+  // takes bm_george, the deep British voice he picked;
+  // the Priest yields George to am_fenrir, the catalog's
+  // other deep male; the Therapist yields Michael to
+  // am_puck, the one male left. Debbie keeps af_nicole
+  // (moved off the doctor's af_bella in v0.32.0), the
+  // doctor keeps af_bella — no two personas share a voice.
   const byId = new Map(
     [...block.matchAll(/id: "([^"]+)"[\s\S]*?voiceID: "([^"]+)"/g)].map((m) => [
       m[1],
       m[2],
     ]),
   );
-  assert.equal(byId.get("gus"), "af_heart");
-  assert.equal(byId.get("therapist"), "am_michael");
-  assert.equal(byId.get("devil"), "am_puck");
+  assert.equal(byId.get("gus"), "am_michael");
+  assert.equal(byId.get("therapist"), "am_puck");
+  assert.equal(byId.get("devil"), "bm_george");
+  assert.equal(byId.get("ai-priest"), "am_fenrir");
   assert.equal(byId.get("debbie-downer"), "af_nicole");
   assert.equal(byId.get("ai-doctor"), "af_bella");
   assert.equal(new Set(voices).size, 6, "no two personas share a voice");
@@ -202,13 +208,15 @@ test("style: one shared style block at the composition layer", () => {
   // and every branch goes through composedPrompt.
   assert.ok(localBrain.includes("return composedPrompt(emailDemoPrompt)"));
   assert.ok(localBrain.includes("composedPrompt(customPrompt ?? generalPrompt)"));
-  // The block's three jobs, in its own words: short by
-  // default, conversational, and the occasional depth offer.
+  // The block's jobs, in its own words: short by default,
+  // conversational, the person can ask for more detail —
+  // and (v0.33.0) anti-template: no repeated stock phrases.
   const blockStart = localBrain.indexOf("static let styleBlock");
   const block = localBrain.slice(blockStart, blockStart + 1600);
   assert.match(block, /short/i);
   assert.match(block, /conversation/i);
   assert.match(block, /deeper|more detail/i);
+  assert.match(block, /stock phrases/i);
 });
 
 test("background calls: the plist declares the audio background mode", () => {
@@ -309,4 +317,109 @@ test("routes: one owner in CallSession, the picker on the call screen", () => {
   );
   assert.ok(callView.includes("AVRoutePickerView"));
   assert.ok(callView.includes("call.outputRouteIsSpeaker"));
+});
+
+test("voices: the no-pick default is the male voice (v0.33.0)", () => {
+  // Gus IS the no-persona state (his name, the boy's
+  // face), and Glenn's verdict was that the boy's face
+  // with the female Heart voice is a mismatch — so the
+  // never-picked fallback moved to Michael. A saved pick
+  // still wins (the getter reads the key first).
+  assert.ok(
+    kokoroTTS.includes('KokoroVoice(id: "am_michael", displayName: "Michael — male (default)")'),
+    "Michael carries the (default) marker in the catalog",
+  );
+  assert.ok(
+    kokoroTTS.includes('?? all.first(where: { $0.id == "am_michael" })'),
+    "the selected getter falls back to am_michael",
+  );
+  assert.ok(
+    !kokoroTTS.includes('displayName: "Heart — female (default)")'),
+    "Heart no longer claims the default marker",
+  );
+});
+
+test("previews: real synthesis in a named voice, its own player, never in a call", () => {
+  // The named-voice synthesis is the runtime's own path —
+  // same manager, same gate — so a preview sounds like a
+  // call in that voice because it IS the call's synthesis.
+  assert.ok(kokoroTTS.includes("func synthesize(_ text: String, voice voiceID: String)"));
+  assert.ok(kokoroTTS.includes("final class VoicePreviewPlayer: ObservableObject"));
+  // Its own KokoroPlayer (private engine) — never the
+  // call's shared graph, prime, or shim path.
+  assert.ok(kokoroTTS.includes("private let player = KokoroPlayer()"));
+  // The call-live guard lives in both the player and the
+  // button, and CallSession keeps the flag.
+  assert.ok(kokoroTTS.includes("guard !CallSession.isAnyCallLive else { return }"));
+  assert.ok(callSession.includes("static private(set) var isAnyCallLive = false"));
+  assert.ok(callSession.includes("Self.isAnyCallLive = true"));
+  assert.ok(callSession.includes("Self.isAnyCallLive = false"));
+  // Every voice list carries the audition: Settings'
+  // rows and the Personas voice card share VoiceChoiceRow,
+  // and the preview button hides while a call is live.
+  const settings = readFileSync(
+    join(root, "apps/ios/App/SettingsView.swift"),
+    "utf8",
+  );
+  const picker = readFileSync(
+    join(root, "apps/ios/App/PersonaPickerView.swift"),
+    "utf8",
+  );
+  assert.ok(settings.includes("VoiceChoiceRow("), "Settings voices are previewable rows");
+  assert.ok(settings.includes("voicePreviewLine(voice)"));
+  assert.ok(picker.includes("VoiceChoiceRow("), "the persona voice card is previewable rows");
+  assert.ok(picker.includes("struct VoicePreviewButton: View"));
+  assert.ok(picker.includes("if !CallSession.isAnyCallLive"));
+  // Previewing must not select: the player's toggle never
+  // writes the persisted pick.
+  const playerStart = kokoroTTS.indexOf("final class VoicePreviewPlayer");
+  const playerBlock = kokoroTTS.slice(playerStart);
+  assert.ok(
+    !playerBlock.includes("KokoroVoice.selected ="),
+    "a preview never changes the selected voice",
+  );
+});
+
+test("persona voices: per-persona assignment storage, defaults as fallback", () => {
+  assert.ok(kokoroTTS.includes("enum PersonaVoiceAssignment"));
+  assert.ok(kokoroTTS.includes('"gus.voice.persona.\\(id)"'));
+  // A starter's effective voice is assignment-or-shipped,
+  // and the picker applies the effective one on a pick.
+  assert.ok(localBrain.includes("var assignedVoiceID: String"));
+  assert.ok(localBrain.includes("PersonaVoiceAssignment.voiceID(forPersona: id) ?? voiceID"));
+  const picker = readFileSync(
+    join(root, "apps/ios/App/PersonaPickerView.swift"),
+    "utf8",
+  );
+  assert.ok(picker.includes("starter.assignedVoiceID"));
+  assert.ok(picker.includes("PersonaVoiceAssignment.setVoiceID(voice.id, forPersona: starter.id)"));
+  assert.ok(picker.includes("PersonaVoiceAssignment.setVoiceID(nil, forPersona: starter.id)"));
+  // Each persona has its own preview line to audition with.
+  assert.ok(localBrain.includes("var previewLine: String"));
+});
+
+test("session style: rotation, suppression, and stance live at composition", () => {
+  assert.ok(localBrain.includes("final class PersonaSessionStyle"));
+  // Composition appends the session's lines after the
+  // standing block — one composition path, as before.
+  assert.ok(localBrain.includes("PersonaSessionStyle.composedAppendix()"));
+  assert.ok(localBrain.includes("static func noteUserTurn"));
+  assert.ok(localBrain.includes("static func noteReply"));
+  // The offer's discipline, in the state's own words:
+  // suppression exists, and the offer text tells the model
+  // to phrase it in its own words.
+  assert.ok(localBrain.includes("offersSuppressed"));
+  assert.ok(localBrain.includes("Phrase the"));
+  assert.ok(localBrain.includes("never the same wording twice"));
+  // The holders report through the two doors: chat
+  // (answers + debate), the call (answers), and the
+  // session boundaries reset (call connect, debate start).
+  const chat = readFileSync(join(root, "apps/ios/App/ChatView.swift"), "utf8");
+  assert.ok(chat.includes("PersonaSessionStyle.noteUserTurn(text)"));
+  assert.ok(chat.includes("PersonaSessionStyle.noteReply(reply)"));
+  assert.ok(chat.includes("PersonaSessionStyle.noteReply(replies)"));
+  assert.ok(chat.includes("PersonaSessionStyle.reset()"));
+  assert.ok(callSession.includes("PersonaSessionStyle.reset()"));
+  assert.ok(callSession.includes("PersonaSessionStyle.noteUserTurn(text)"));
+  assert.ok(callSession.includes("PersonaSessionStyle.noteReply(reply)"));
 });

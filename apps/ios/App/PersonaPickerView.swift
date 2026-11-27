@@ -46,6 +46,10 @@ struct PersonaPickerView: View {
     /// screen read, so one pick moves every highlight, face,
     /// and name in the same beat.
     @ObservedObject private var selection = PersonaSelection.shared
+    /// The voice audition's state (v0.33.0) — observed so
+    /// the voice card's error line lands when a preview
+    /// fails, not on some later redraw.
+    @ObservedObject private var preview = VoicePreviewPlayer.shared
     @AppStorage("gus.avatar.stock") private var stockAvatar = "boy"
 
     /// The stored pick, mirrored live by PersonaSelection.
@@ -56,6 +60,12 @@ struct PersonaPickerView: View {
     /// One plain line after a brain switch, so the switch
     /// is said out loud instead of happening silently.
     @State private var switchNote: String?
+    /// The voice card's current voice for the persona on
+    /// (v0.33.0) — a mirror of its assignment-or-default,
+    /// refreshed when the pick changes and when a row is
+    /// tapped, since the assignment store is defaults, not
+    /// observable state.
+    @State private var cardVoiceID: String?
 
     /// A saved prompt that no starter matches — the
     /// operator's own edited words from Settings.
@@ -82,6 +92,9 @@ struct PersonaPickerView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 strip
+                if let starter = LocalBrain.activeStarter {
+                    voiceCard(starter)
+                }
                 if let offer = downloadOffer {
                     downloadCard(offer)
                 }
@@ -90,11 +103,17 @@ struct PersonaPickerView: View {
                         .font(.callout)
                         .foregroundColor(.secondary)
                 }
-                Text("A pick is a package: the persona's words, its voice, and its face change together, and they land right away — the brain reloads in this same app run with your next message or call. While the Gmail demo pitch is on (Settings → Call mode), it wins over any persona. Making a starter's words your own still happens in Settings — nothing here is locked.")
+                Text("A pick is a package: the persona's words, its voice, and its face change together, and they land right away — the brain reloads in this same app run with your next message or call. While the Gmail demo pitch is on (Settings → Call mode), it wins over any persona. Making a starter's words your own still happens in Settings — nothing here is locked. A persona's voice can be changed in the card above (the Personas tab is its home — a pick made from the avatar sheet closes the sheet first): tap the play button to hear a voice say the persona's line before you choose it.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
             .padding(16)
+        }
+        .onAppear {
+            cardVoiceID = LocalBrain.activeStarter?.assignedVoiceID
+        }
+        .onChange(of: selection.prompt) { _ in
+            cardVoiceID = LocalBrain.activeStarter?.assignedVoiceID
         }
         // The offered download landed: if the persona that
         // wanted this brain is still picked, switch to it
@@ -170,10 +189,13 @@ struct PersonaPickerView: View {
         switchNote = nil
         downloadOffer = nil
         if let starter {
-            // The persona's voice comes with it — the same
-            // persisted pick Settings' voice picker reads,
-            // so the two never disagree about who speaks.
-            if let voice = KokoroVoice.all.first(where: { $0.id == starter.voiceID }) {
+            // The persona's voice comes with it — the
+            // operator's own assignment when one is saved
+            // (v0.33.0), else the persona's shipped voice —
+            // written to the same persisted pick Settings'
+            // voice picker reads, so the two never disagree
+            // about who speaks.
+            if let voice = KokoroVoice.all.first(where: { $0.id == starter.assignedVoiceID }) {
                 KokoroVoice.selected = voice
             }
             pairBrain(for: starter)
@@ -214,6 +236,58 @@ struct PersonaPickerView: View {
         guard LocalBrain.activeStarter?.pairedBrainID == entry.id else { return }
         library.useBrain(entry)
         switchNote = "The \(entry.plainName) is ready — switched to it. It loads with your next message or call."
+    }
+
+    // MARK: - The voice card
+
+    /// The persona-on's voice card (v0.33.0): every catalog
+    /// voice as a row — tap to make it this persona's (the
+    /// assignment persists per persona, and because this
+    /// persona is the one on, the live voice pick follows),
+    /// tap the play button to hear that voice say the
+    /// persona's own line first. A reset row appears only
+    /// while an assignment exists, returning the persona to
+    /// its shipped voice.
+    private func voiceCard(_ starter: PersonaStarter) -> some View {
+        let current = cardVoiceID ?? starter.assignedVoiceID
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("Voice for \(starter.name)")
+                .font(.callout)
+                .fontWeight(.semibold)
+            Text("Hear a voice before you choose it — the play button speaks \(starter.name)'s line in that voice. A first listen may take a moment while the voice is fetched.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            ForEach(KokoroVoice.all) { voice in
+                VoiceChoiceRow(
+                    voice: voice,
+                    selected: current == voice.id,
+                    previewLine: starter.previewLine
+                ) {
+                    PersonaVoiceAssignment.setVoiceID(voice.id, forPersona: starter.id)
+                    cardVoiceID = voice.id
+                    KokoroVoice.selected = voice
+                }
+            }
+            if PersonaVoiceAssignment.voiceID(forPersona: starter.id) != nil {
+                Button("Back to \(starter.name)'s shipped voice") {
+                    PersonaVoiceAssignment.setVoiceID(nil, forPersona: starter.id)
+                    cardVoiceID = starter.voiceID
+                    if let shipped = KokoroVoice.all.first(where: { $0.id == starter.voiceID }) {
+                        KokoroVoice.selected = shipped
+                    }
+                }
+                .font(.callout)
+            }
+            if let error = preview.lastError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundColor(.orange)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.08))
+        .cornerRadius(12)
     }
 
     // MARK: - The download card
@@ -326,5 +400,75 @@ struct ActivePersonaAvatarView: View {
         PersonaAvatarView(
             face: PersonaFace.current(stockGirl: stockAvatar == "girl"),
             side: side)
+    }
+}
+
+/// One voice's row in a chooser list (v0.33.0) — Settings'
+/// voice lists and the Personas tab's voice card share it:
+/// the name, a check when this voice is the current pick,
+/// and the audition button. Tapping the row CHOOSES the
+/// voice; the play button never chooses anything — hearing
+/// and picking are separate acts, so a voice can be
+/// auditioned without disturbing the one in use.
+struct VoiceChoiceRow: View {
+    let voice: KokoroVoice
+    let selected: Bool
+    let previewLine: String
+    let onSelect: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button(action: onSelect) {
+                HStack {
+                    Text(voice.displayName)
+                        .foregroundColor(.primary)
+                    Spacer()
+                    if selected {
+                        Image(systemName: "checkmark")
+                            .foregroundColor(.accentColor)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            VoicePreviewButton(voice: voice, line: previewLine)
+        }
+    }
+}
+
+/// The audition button (v0.33.0): speaks a few words in
+/// this voice, on the spot (VoicePreviewPlayer) — tap
+/// again to stop it. While a call is live the button is
+/// not offered at all: a preview must never reach into a
+/// call, so the control simply isn't there (and the
+/// player refuses besides).
+struct VoicePreviewButton: View {
+    let voice: KokoroVoice
+    let line: String
+    @ObservedObject private var preview = VoicePreviewPlayer.shared
+
+    var body: some View {
+        if !CallSession.isAnyCallLive {
+            Button {
+                preview.toggle(voice: voice, line: line)
+            } label: {
+                if preview.activeVoiceID == voice.id {
+                    if preview.isPreparing {
+                        ProgressView()
+                    } else {
+                        Image(systemName: "stop.circle.fill")
+                            .font(.title3)
+                    }
+                } else {
+                    Image(systemName: "play.circle")
+                        .font(.title3)
+                }
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel(
+                preview.activeVoiceID == voice.id
+                    ? "Stop the preview"
+                    : "Hear \(voice.shortName)")
+        }
     }
 }

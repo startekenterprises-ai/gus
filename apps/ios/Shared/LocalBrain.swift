@@ -42,6 +42,40 @@ struct PersonaStarter: Identifiable {
     let voiceID: String
     let pairedBrainID: String?
     let face: PersonaFace
+
+    /// The voice this persona actually speaks with
+    /// (v0.33.0): the operator's own assignment when one is
+    /// saved (Personas tab → the persona's voice card),
+    /// else the shipped voiceID above. The picker applies
+    /// THIS when the persona is picked, so an assignment
+    /// survives every later pick of the same persona.
+    var assignedVoiceID: String {
+        PersonaVoiceAssignment.voiceID(forPersona: id) ?? voiceID
+    }
+
+    /// The line this persona's voice preview speaks
+    /// (v0.33.0): a few words in character, so auditioning
+    /// voices FOR a persona (the Personas tab's voice card)
+    /// hears each candidate the way the persona would
+    /// actually sound — not a generic test sentence.
+    var previewLine: String {
+        switch id {
+        case "gus":
+            return "Hi, I'm Gus — your everyday helper. Ask me anything."
+        case "therapist":
+            return "Hi, I'm here to listen. We can take this at your pace."
+        case "ai-doctor":
+            return "Hi, I'm the Doctor. I explain health in plain words."
+        case "ai-priest":
+            return "Hello, I'm the Priest. I'm here for comfort and prayer."
+        case "debbie-downer":
+            return "Hi. I'm Debbie. I'm sure this will go fine. It usually doesn't."
+        case "devil":
+            return "Well, hello. I'm the Devil — I argue the tempting side, and I argue it well."
+        default:
+            return "Hi, I'm \(name). This is my voice."
+        }
+    }
 }
 
 /// One face's framing (v0.31.0): which portrait, and the
@@ -137,6 +171,260 @@ final class PersonaSelection: ObservableObject {
         } else {
             DispatchQueue.main.async(execute: apply)
         }
+    }
+}
+
+/// The conversation's session style state (v0.33.0) —
+/// what this conversation has taught the house style, held
+/// in memory only and never persisted: it resets when a
+/// call connects, when a debate starts, and with the app
+/// run itself. Two lessons live here, both from Glenn's
+/// verdict on the v0.31.0 personas ("weak and shallow,"
+/// and the depth offer repeating in a loop):
+///
+/// THE DEPTH OFFER, under discipline. The offer instruction
+/// rides in the composed prompt (composedAppendix) with a
+/// rotating lead suggestion drawn from this state and a
+/// rule to phrase it in the persona's own words, never the
+/// same wording twice. The holders report every reply
+/// (noteReply): a reply that appears to have made the
+/// offer leaves one OUTSTANDING. The person's next turn
+/// (noteUserTurn) resolves it: an acceptance clears it (and
+/// the fuller answer follows naturally); a decline — or
+/// simply talking about something else, which is what
+/// ignoring an offer looks like — SUPPRESSES offers for the
+/// rest of the session. Suppression changes the composed
+/// prompt, so the holders' staleness reload lands it on
+/// the next answer; a "stop asking" suppresses on its own,
+/// offer or no offer.
+///
+/// THE LENGTH STANCE. Default is the house default (short,
+/// conversational — the style block's own words). The
+/// person's explicit words about length move it: fuller
+/// ("more detail," "too short," "tell me more") or briefer
+/// ("keep it short," "too long"), for the rest of the
+/// session. Three very short turns in a row also drift it
+/// briefer — someone answering in two-word turns is not
+/// asking for essays. Detection is deliberately simple:
+/// the person's own phrases, matched plainly. No sentiment
+/// engine, no guessing at mood.
+///
+/// Debate composes through the same path — each pass
+/// builds its prompt fresh — so the rotation advances and
+/// suppression applies inside a debate exactly as in chat
+/// or a call; the chat model notes the debate's user turns
+/// and both debaters' replies through the same two doors.
+final class PersonaSessionStyle {
+    static let shared = PersonaSessionStyle()
+
+    /// Where the conversation's length stance stands.
+    enum LengthStance {
+        case briefer
+        case standard
+        case fuller
+    }
+
+    private let lock = NSLock()
+    private var offersSuppressed = false
+    private var offerOutstanding = false
+    private var offersMade = 0
+    private var stance: LengthStance = .standard
+    private var terseStreak = 0
+
+    /// Lead suggestions for the offer, rotated by how many
+    /// offers this session has already made — the composed
+    /// prompt carries the current one plus the standing
+    /// instruction to find the persona's own words anyway.
+    private static let offerSuggestions = [
+        "Want me to go deeper on that?",
+        "Shall I unpack that a bit?",
+        "Want the fuller story?",
+        "I can go into more detail if you'd like.",
+        "Want me to expand on that?",
+    ]
+
+    private static let fullerSignals = [
+        "more detail", "in detail", "tell me more", "go deeper",
+        "too short", "elaborate", "explain more", "longer answer",
+        "more thorough", "keep going",
+    ]
+    private static let brieferSignals = [
+        "shorter", "keep it short", "too long", "be brief",
+        "briefly", "less detail", "sum it up", "summarize it",
+        "tl;dr", "tldr",
+    ]
+    private static let stopSignals = [
+        "stop asking", "don't ask", "dont ask",
+        "no more questions", "stop offering",
+    ]
+    /// An acceptance can be a whole short turn ("yes,"
+    /// "sure") or an explicit phrase anywhere in the turn.
+    private static let acceptPhrases = [
+        "tell me more", "more detail", "go deeper", "go on",
+        "go ahead", "yes please", "do it",
+    ]
+    private static let acceptFirstWords: Set<String> = [
+        "yes", "yeah", "yep", "sure", "ok", "okay", "please",
+    ]
+    /// What a reply that made the offer looks like: a
+    /// question carrying one of these. Plain markers, on
+    /// purpose — this decides only whether the NEXT user
+    /// turn counts as the offer's answer.
+    private static let offerMarkers = [
+        "deeper", "go further", "more detail", "dig in",
+        "elaborate", "want me to", "would you like",
+        "shall i", "longer version", "say more",
+    ]
+
+    // MARK: The holders' two doors
+
+    /// A user turn, noted BEFORE the turn's answer is
+    /// composed (so a stance change or a suppression lands
+    /// in the prompt that answers this very turn).
+    static func noteUserTurn(_ text: String) { shared.noteUserTurn(text) }
+
+    /// A completed reply, noted as it lands.
+    static func noteReply(_ text: String) { shared.noteReply(text) }
+
+    /// A new session: a call connecting, a debate starting.
+    /// The app run itself is the chat's session.
+    static func reset() { shared.resetState() }
+
+    private func noteUserTurn(_ raw: String) {
+        let text = raw.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+
+        // The person's explicit words about length move the
+        // stance — fuller signals first, because "tell me
+        // more" must never read as anything else.
+        if Self.fullerSignals.contains(where: { text.contains($0) }) {
+            stance = .fuller
+        } else if Self.brieferSignals.contains(where: { text.contains($0) }) {
+            stance = .briefer
+        }
+
+        // "Stop asking" needs no outstanding offer.
+        if Self.stopSignals.contains(where: { text.contains($0) }) {
+            offersSuppressed = true
+            offerOutstanding = false
+        }
+
+        // An outstanding offer is answered by this turn,
+        // one way or the other.
+        var resolvedOffer = false
+        if offerOutstanding {
+            offerOutstanding = false
+            resolvedOffer = true
+            if !Self.isAcceptance(text) {
+                // Declined, or the subject changed — the
+                // offer is done for this session.
+                offersSuppressed = true
+            }
+        }
+
+        // Terse drift: three very short turns in a row (that
+        // weren't an offer being answered) move the stance
+        // briefer. Any longer turn resets the streak.
+        if resolvedOffer {
+            terseStreak = 0
+        } else if text.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" }).count <= 3 {
+            terseStreak += 1
+            if terseStreak >= 3, stance == .standard { stance = .briefer }
+        } else {
+            terseStreak = 0
+        }
+    }
+
+    private func noteReply(_ raw: String) {
+        let text = raw.lowercased()
+        lock.lock()
+        defer { lock.unlock() }
+        guard !offersSuppressed, text.contains("?") else { return }
+        if Self.offerMarkers.contains(where: { text.contains($0) }) {
+            offerOutstanding = true
+            offersMade += 1
+        }
+    }
+
+    private func resetState() {
+        lock.lock()
+        offersSuppressed = false
+        offerOutstanding = false
+        offersMade = 0
+        stance = .standard
+        terseStreak = 0
+        lock.unlock()
+    }
+
+    private static func isAcceptance(_ text: String) -> Bool {
+        if acceptPhrases.contains(where: { text.contains($0) }) { return true }
+        guard text.count <= 48 else { return false }
+        let first = text.split(whereSeparator: { $0 == " " || $0 == "," || $0 == "." })
+            .first.map(String.init) ?? ""
+        return acceptFirstWords.contains(first)
+    }
+
+    // MARK: Composition
+
+    /// The session's lines, appended after the standing
+    /// style block at every composition — empty when the
+    /// session has nothing to add (standard stance, offers
+    /// live: the offer discipline itself is always said,
+    /// because the undisciplined version is what looped).
+    static func composedAppendix() -> String {
+        shared.composedAppendix()
+    }
+
+    private func composedAppendix() -> String {
+        lock.lock()
+        let suppressed = offersSuppressed
+        let currentStance = stance
+        let made = offersMade
+        lock.unlock()
+
+        var parts: [String] = []
+        switch currentStance {
+        case .fuller:
+            parts.append("""
+                Length, in this conversation: the person has asked for \
+                fuller answers — give the complete answer in proper detail, \
+                still in plain spoken words, still no lists or markdown, and \
+                still in this persona's character.
+                """)
+        case .briefer:
+            parts.append("""
+                Length, in this conversation: the person wants it brief — \
+                one or two short sentences, the headline only, and do not \
+                offer to expand.
+                """)
+        case .standard:
+            break
+        }
+        if currentStance != .briefer {
+            if suppressed {
+                parts.append("""
+                    Going deeper: do not offer to go further in this \
+                    conversation — the person has already passed on it. Just \
+                    answer what is asked.
+                    """)
+            } else {
+                let lead = Self.offerSuggestions[made % Self.offerSuggestions.count]
+                parts.append("""
+                    Going deeper, when it fits: every so often — never twice \
+                    in a row, and never right after a fuller answer — after a \
+                    short answer you may offer ONCE to go further. Phrase the \
+                    offer in your own words, and never the same wording twice \
+                    in one conversation; shapes that work: "\(lead)", "Want \
+                    the longer version?", "I can say more about that if you \
+                    like" — or find your own. If the person says no, changes \
+                    the subject, or answers something else, that was the \
+                    answer: do not offer again in this conversation.
+                    """)
+            }
+        }
+        return parts.isEmpty ? "" : "\n\n" + parts.joined(separator: "\n\n")
     }
 }
 
@@ -239,27 +527,45 @@ final class LocalBrain {
         personaStarters.first { $0.id == id }
     }
 
-    /// The shared conversational style (v0.31.0), appended
-    /// to EVERY base prompt at composition — the general
-    /// prompt, the demo pitch, and every persona starter
-    /// (debate passes compose through here too) — so the
-    /// house style lives in exactly one place instead of
-    /// being pasted into each prompt: short by default,
-    /// conversational, and every so often an offer to go
-    /// deeper rather than a lecture unasked.
+    /// The shared conversational style (v0.31.0; deepened
+    /// v0.33.0), appended to EVERY base prompt at
+    /// composition — the general prompt, the demo pitch,
+    /// and every persona starter (debate passes compose
+    /// through here too) — so the house style lives in
+    /// exactly one place instead of being pasted into each
+    /// prompt. This base block is the standing part: short
+    /// by default, conversational, and — new in v0.33.0 —
+    /// anti-template, because Glenn's field verdict on the
+    /// v0.31.0 personas was "weak and shallow," with the
+    /// same stock offer repeated in a loop. The parts that
+    /// depend on how THIS conversation is going — the
+    /// depth-offer discipline and the length stance — are
+    /// session state, appended after this block by
+    /// PersonaSessionStyle (see composedPrompt).
     static let styleBlock = """
         House style, whatever the topic: keep every reply short and \
         conversational — a few sentences at most, the way a person talks, \
-        never an essay. Answer what was asked, then stop. Every so often — \
-        not every turn — after a short answer, offer once to go further, in \
-        words like "Want me to go deeper on that?" If the person says yes, \
-        then give the fuller answer; if they move on, let it go.
+        never an essay. Answer what was asked, then stop; the person can \
+        always ask for more detail. Sound like a person, not a template: \
+        vary how you open and close your replies, never start two replies \
+        the same way, and do not repeat stock phrases from one reply to \
+        the next — if a sentence could come out of any assistant, say it \
+        again in this persona's own words and character.
         """
 
     /// A base prompt with the house style appended — the
-    /// one composition every load goes through.
+    /// one composition every load goes through: the base,
+    /// the standing style block, and the session's current
+    /// lines (PersonaSessionStyle: the depth-offer
+    /// discipline and the length stance, which change as
+    /// the conversation teaches them). A session change
+    /// therefore changes the composed prompt, and the
+    /// holders' ordinary staleness check (isCurrent) reloads
+    /// the brain between turns — the same mechanism a
+    /// persona pick has used since v0.31.0, so a decline or
+    /// a "more detail" lands on the very next answer.
     static func composedPrompt(_ base: String) -> String {
-        base + "\n\n" + styleBlock
+        base + "\n\n" + styleBlock + PersonaSessionStyle.composedAppendix()
     }
 
     /// The general-purpose default (v0.20.0): spoken answers,
@@ -323,6 +629,21 @@ final class LocalBrain {
     /// from a retired starter no longer matches anything
     /// here, so it shows as Custom — the operator's words
     /// are never silently rewritten to fit the new shelf.
+    ///
+    /// Voices rebalanced in v0.33.0 (Glenn's calls, from
+    /// hearing the v0.32.0 roster): Gus speaks with
+    /// am_michael now — the boy's face with af_heart's
+    /// female voice was the mismatch he named — and the
+    /// Devil takes bm_george, the deep British voice Glenn
+    /// picked for him. Those two moves cascade: the Priest
+    /// yields George and takes am_fenrir, the catalog's
+    /// other deep male; the Therapist yields Michael and
+    /// takes am_puck, the one male left — brighter than a
+    /// therapist ideally wants, and said so in the build
+    /// report. Every persona's voice is the operator's to
+    /// reassign now anyway (PersonaVoiceAssignment, auditioned
+    /// by preview in the Personas tab); these are only the
+    /// shipped defaults an unassigned persona falls back to.
     static let personaStarters: [PersonaStarter] = [
         PersonaStarter(
             id: "gus",
@@ -348,7 +669,7 @@ final class LocalBrain {
                 is written into a signed record they can check, and anything \
                 that matters waits for their say-so.
                 """,
-            voiceID: "af_heart", pairedBrainID: nil, face: .boy),
+            voiceID: "am_michael", pairedBrainID: nil, face: .boy),
         PersonaStarter(
             id: "therapist",
             name: "Therapist",
@@ -367,7 +688,7 @@ final class LocalBrain {
                 reaches people who help with exactly this — and stay with them in \
                 the conversation.
                 """,
-            voiceID: "am_michael", pairedBrainID: nil, face: PersonaFace(
+            voiceID: "am_puck", pairedBrainID: nil, face: PersonaFace(
                 imageName: "AvatarTherapist",
                 cropOriginX: 0.185, cropOriginY: 0.11, cropSide: 0.62,
                 mouthCenterX: 0.516, mouthCenterY: 0.795, mouthWidth: 0.281)),
@@ -409,7 +730,7 @@ final class LocalBrain {
                 speaking for God — a companion who can sit with a person and point \
                 toward the comfort they already believe in.
                 """,
-            voiceID: "bm_george", pairedBrainID: nil, face: PersonaFace(
+            voiceID: "am_fenrir", pairedBrainID: nil, face: PersonaFace(
                 imageName: "AvatarPriest",
                 cropOriginX: 0.175, cropOriginY: 0.10, cropSide: 0.66,
                 mouthCenterX: 0.500, mouthCenterY: 0.785, mouthWidth: 0.273)),
@@ -450,7 +771,7 @@ final class LocalBrain {
                 it clearly is how they choose better. And if the person is in real \
                 trouble or real grief, the act drops: be simply kind.
                 """,
-            voiceID: "am_puck",
+            voiceID: "bm_george",
             pairedBrainID: "brain-qwen3-4b-instruct-2507-hauhaucs-aggressive-q4km",
             face: PersonaFace(
                 imageName: "AvatarDevil",

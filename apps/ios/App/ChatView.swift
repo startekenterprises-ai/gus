@@ -988,6 +988,11 @@ final class ChatModel: ObservableObject {
     }
 
     private func runOnDeviceAnswer(exchangeID: UUID, text: String) async {
+        // The session style hears the turn first (v0.33.0):
+        // a length ask or an answered depth offer changes
+        // the composed prompt, and loadBrain's staleness
+        // check then loads the brain this turn deserves.
+        PersonaSessionStyle.noteUserTurn(text)
         guard let brain = await loadBrain(exchangeID: exchangeID) else {
             replyingCount -= 1
             return
@@ -999,6 +1004,9 @@ final class ChatModel: ObservableObject {
                 }
             }
         }
+        // And it hears the reply, so the next turn can
+        // resolve a depth offer this one made.
+        PersonaSessionStyle.noteReply(reply)
         // Sentence hops were submitted before this one, and
         // the main actor runs them in order — by the time this
         // lands, the exchange shows the whole reply (the call
@@ -1125,6 +1133,10 @@ final class ChatModel: ObservableObject {
                 text: "Debate needs the on-device brain — two personas take turns thinking right here on the phone. Switch the call brain to On-device in Settings → Call mode, then start the debate.")
             return
         }
+        // A debate is a new session (v0.33.0): the session
+        // style (offer suppression, length stance) starts
+        // fresh for it, as it does for a call.
+        PersonaSessionStyle.reset()
         debateActive = true
         debateTranscript = []
         let names = [debateLeftID, debateRightID]
@@ -1197,9 +1209,26 @@ final class ChatModel: ObservableObject {
             replyingCount -= 1
             return
         }
+        // The session style hears the turn before the
+        // passes compose (v0.33.0): each pass builds its
+        // prompt fresh through composedPrompt, so a stance
+        // change or an offer suppression applies from this
+        // message's first answer — rotation and suppression
+        // work inside a debate exactly as in a plain chat.
+        PersonaSessionStyle.noteUserTurn(text)
+        let transcriptBefore = debateTranscript.count
         debateTranscript.append((speaker: "Person", text: text))
         for starter in pair {
             await runDebatePass(exchangeID: exchangeID, starter: starter)
+        }
+        // And it hears both replies together, so the next
+        // message can resolve an offer either debater made.
+        let replies = debateTranscript.dropFirst(transcriptBefore)
+            .filter { $0.speaker != "Person" }
+            .map(\.text)
+            .joined(separator: " ")
+        if !replies.isEmpty {
+            PersonaSessionStyle.noteReply(replies)
         }
         replyingCount -= 1
     }

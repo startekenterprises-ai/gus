@@ -46,21 +46,29 @@ import Foundation
 
 /// Which Kokoro voice speaks. Kokoro ships many; these are
 /// the curated few the Settings picker offers (v0.15.4) —
-/// the female default Glenn picked, the male options he
-/// asked for the same night, and two British voices for
-/// range. The selection persists in UserDefaults; warm-up
-/// preloads the selected voice's pack, and the SDK fetches
-/// any other pack on demand (~0.5 MB) the first time that
-/// voice is used.
+/// the male default (v0.33.0 — see `selected`), the female
+/// voice that was the default through v0.32.0, and British
+/// options for range. The selection persists in
+/// UserDefaults; warm-up preloads the selected voice's
+/// pack, and the SDK fetches any other pack on demand
+/// (~0.5 MB) the first time that voice is used.
 struct KokoroVoice: Identifiable, Equatable, Hashable {
     let id: String
     let displayName: String
 
+    /// The short spoken name — the first word of the
+    /// display name ("Heart", "Michael") — for lines the
+    /// voice itself speaks (the v0.33.0 preview's
+    /// self-introduction).
+    var shortName: String {
+        displayName.components(separatedBy: " ").first ?? displayName
+    }
+
     static let all: [KokoroVoice] = [
-        KokoroVoice(id: "af_heart", displayName: "Heart — female (default)"),
+        KokoroVoice(id: "af_heart", displayName: "Heart — female"),
         KokoroVoice(id: "af_bella", displayName: "Bella — female"),
         KokoroVoice(id: "af_nicole", displayName: "Nicole — female"),
-        KokoroVoice(id: "am_michael", displayName: "Michael — male"),
+        KokoroVoice(id: "am_michael", displayName: "Michael — male (default)"),
         KokoroVoice(id: "am_fenrir", displayName: "Fenrir — male"),
         KokoroVoice(id: "am_puck", displayName: "Puck — male"),
         KokoroVoice(id: "bf_emma", displayName: "Emma — British female"),
@@ -68,19 +76,20 @@ struct KokoroVoice: Identifiable, Equatable, Hashable {
     ]
 
     /// The simple level (v0.23.0): three voices up front —
-    /// Heart (the default), Emma (a clearly different voice:
-    /// British, where Heart is American), and Michael (the
-    /// male voice). The full eight stay one disclosure away
-    /// in Settings. Michael has been in the catalog since
-    /// v0.15.4 and rides the same delivery as every voice:
-    /// warm-up preloads the SELECTED voice's pack, and the
-    /// SDK fetches any other pack on demand (~0.5 MB) the
+    /// Heart (the female voice), Emma (a clearly different
+    /// voice: British, where Heart is American), and Michael
+    /// (the male voice, and the default since v0.33.0). The
+    /// full eight stay one disclosure away in Settings.
+    /// Michael has been in the catalog since v0.15.4 and
+    /// rides the same delivery as every voice: warm-up
+    /// preloads the SELECTED voice's pack, and the SDK
+    /// fetches any other pack on demand (~0.5 MB) the
     /// first time that voice speaks — no separate asset
     /// pipeline exists or is needed.
     static let curated: [KokoroVoice] = [
-        KokoroVoice(id: "af_heart", displayName: "Heart — female (default)"),
+        KokoroVoice(id: "af_heart", displayName: "Heart — female"),
         KokoroVoice(id: "bf_emma", displayName: "Emma — British female"),
-        KokoroVoice(id: "am_michael", displayName: "Michael — male"),
+        KokoroVoice(id: "am_michael", displayName: "Michael — male (default)"),
     ]
 
     /// The simple picker's options: the curated three, plus
@@ -95,13 +104,53 @@ struct KokoroVoice: Identifiable, Equatable, Hashable {
         return options
     }
 
-    /// The operator's pick, persisted. Default: af_heart.
+    /// The operator's pick, persisted. Default: am_michael
+    /// (v0.33.0). Through v0.32.0 the no-pick default was
+    /// af_heart — the female voice Glenn chose in v0.15.4,
+    /// before GUS had a face. Since v0.32.0 the no-persona
+    /// state IS Gus (his name, the boy's face), and Glenn's
+    /// verdict on that pairing was plain: a boy's face with
+    /// a woman's voice is a mismatch. The default is the
+    /// warm male voice now; Heart stays in the catalog one
+    /// tap away, and any pick already saved on a phone is
+    /// untouched — only the never-picked fallback moved.
     static var selected: KokoroVoice {
         get {
             let raw = UserDefaults.standard.string(forKey: "gus.voice.kokoroVoice") ?? ""
-            return all.first(where: { $0.id == raw }) ?? all[0]
+            return all.first(where: { $0.id == raw })
+                ?? all.first(where: { $0.id == "am_michael" })
+                ?? all[0]
         }
         set { UserDefaults.standard.set(newValue.id, forKey: "gus.voice.kokoroVoice") }
+    }
+}
+
+/// One persona's own voice (v0.33.0): the operator may give
+/// any persona any catalog voice (the Personas tab's voice
+/// card), and the assignment persists per persona, keyed by
+/// the starter's stable id. Absent an assignment, the
+/// starter's shipped voiceID is the persona's voice — this
+/// store only ever holds the operator's own overrides, so a
+/// future build's rebalanced defaults still reach everyone
+/// who never overrode them. A stored id that is no longer
+/// in the catalog reads as no assignment, never as a voice
+/// the engine doesn't have.
+enum PersonaVoiceAssignment {
+    private static func key(forPersona id: String) -> String {
+        "gus.voice.persona.\(id)"
+    }
+
+    static func voiceID(forPersona id: String) -> String? {
+        let raw = UserDefaults.standard.string(forKey: key(forPersona: id)) ?? ""
+        return KokoroVoice.all.contains(where: { $0.id == raw }) ? raw : nil
+    }
+
+    static func setVoiceID(_ voiceID: String?, forPersona id: String) {
+        if let voiceID, KokoroVoice.all.contains(where: { $0.id == voiceID }) {
+            UserDefaults.standard.set(voiceID, forKey: key(forPersona: id))
+        } else {
+            UserDefaults.standard.removeObject(forKey: key(forPersona: id))
+        }
     }
 }
 
@@ -152,6 +201,20 @@ final class KokoroRuntime: ObservableObject {
     /// at once (a barged-in sentence may still be finishing
     /// when the next begins).
     func synthesize(_ text: String) async throws -> (samples: [Float], sampleRate: Double) {
+        try await synthesize(text, voice: KokoroVoice.selected.id)
+    }
+
+    /// The same synthesis in a NAMED voice (v0.33.0) — the
+    /// voice preview's path. It is the app's real synthesis,
+    /// not a sample clip: same manager, same one-at-a-time
+    /// gate, same on-demand pack fetch (a voice whose pack
+    /// isn't on the phone yet is fetched by the SDK inside
+    /// this call, which is why a first preview can take a
+    /// moment — the button shows the wait, honestly). What
+    /// the operator hears in a preview is what a call in
+    /// that voice would sound like, because it is the same
+    /// code making the sound.
+    func synthesize(_ text: String, voice voiceID: String) async throws -> (samples: [Float], sampleRate: Double) {
         try await awaitReady()
         guard let manager else {
             throw NSError(domain: "GUS.Kokoro", code: 1, userInfo: [
@@ -160,7 +223,7 @@ final class KokoroRuntime: ObservableObject {
         }
         await gate.acquire()
         do {
-            let result = try await manager.synthesizeDetailed(text: text, voice: KokoroVoice.selected.id)
+            let result = try await manager.synthesizeDetailed(text: text, voice: voiceID)
             await gate.release()
             return (result.samples, Double(result.sampleRate))
         } catch {
@@ -1077,5 +1140,121 @@ final class KokoroPlayer {
         // be zeroed by this buffer's ending.
         if callback != nil { onLevelChange?(0) }
         callback?()
+    }
+}
+
+// MARK: - Voice previews
+
+/// The voice audition (v0.33.0, Glenn's ask): a play button
+/// beside every voice in Settings and in the Personas tab
+/// speaks a few words in that voice, on the spot — so a
+/// voice is chosen by ear, not by entering a call, hearing
+/// it, backing out, and trying the next. The preview NEVER
+/// changes any selection: it synthesizes through the
+/// runtime's named-voice path (the real engine — a first
+/// preview of an unfetched voice includes its pack fetch,
+/// which is the wait the button shows) and plays through
+/// its OWN KokoroPlayer on its OWN private engine.
+///
+/// Why it cannot disturb a call: the call's playback rides
+/// the call session's shared voice-processing engine (or
+/// that player's own fallback), and this player is a
+/// separate instance with a separate engine that no call
+/// code ever touches — the only shared resource is the
+/// synthesis manager, which the runtime's gate already
+/// serializes. On top of the structural separation, the
+/// preview is simply not offered while a call is live
+/// (CallSession.isAnyCallLive — the buttons hide, and
+/// toggle() refuses), and starting one sets the audio
+/// session to plain playback, a state a call's own setup
+/// (prepareCallAudio) fully reconfigures when it starts.
+final class VoicePreviewPlayer: ObservableObject {
+    static let shared = VoicePreviewPlayer()
+
+    /// The voice currently being prepared or played, if any.
+    @Published private(set) var activeVoiceID: String?
+    /// True while the active preview is still synthesizing
+    /// (or fetching its voice pack) — the button's spinner.
+    @Published private(set) var isPreparing = false
+    /// The last preview failure, in words, for the host
+    /// view to show under its list. Cleared on the next try.
+    @Published private(set) var lastError: String?
+
+    private let player = KokoroPlayer()
+    private var task: Task<Void, Never>?
+    private var generation = 0
+
+    /// Play this voice's line, or stop it if it's the one
+    /// already sounding. Switching voices mid-preview stops
+    /// the old one first — one audition at a time.
+    func toggle(voice: KokoroVoice, line: String) {
+        if activeVoiceID == voice.id {
+            stop()
+            return
+        }
+        guard !CallSession.isAnyCallLive else { return }
+        stop()
+        lastError = nil
+        activeVoiceID = voice.id
+        isPreparing = true
+        generation += 1
+        let gen = generation
+        task = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let result = try await KokoroRuntime.shared.synthesize(line, voice: voice.id)
+                guard gen == self.generation else { return }
+                // Plain playback for a few spoken words.
+                // No call is live (checked above), and a
+                // call that starts later reconfigures the
+                // session for itself from the ground up.
+                let session = AVAudioSession.sharedInstance()
+                try? session.setCategory(.playback, mode: .default)
+                try? session.setActive(true)
+                self.publish { self.isPreparing = false }
+                try self.player.playSamples(result.samples, sampleRate: result.sampleRate) { [weak self] in
+                    guard let self, gen == self.generation else { return }
+                    self.publish {
+                        self.activeVoiceID = nil
+                        self.isPreparing = false
+                    }
+                }
+            } catch {
+                guard gen == self.generation else { return }
+                VoiceFailureLog.shared.recordInfo("Voice preview (\(voice.id)) failed: \(error.localizedDescription)")
+                self.publish {
+                    self.activeVoiceID = nil
+                    self.isPreparing = false
+                    self.lastError = "That voice couldn't speak just now: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    /// Silence the audition and forget it. A late synthesis
+    /// or buffer completion from the stopped preview is
+    /// generation-stale and lands nowhere.
+    func stop() {
+        generation += 1
+        task?.cancel()
+        task = nil
+        player.stop()
+        if activeVoiceID != nil || isPreparing {
+            publish {
+                self.activeVoiceID = nil
+                self.isPreparing = false
+            }
+        }
+    }
+
+    /// Published state is read by views, so it is written on
+    /// the main queue — synthesis and playback complete on
+    /// their own threads.
+    private func publish(_ change: @escaping () -> Void) {
+        if Thread.isMainThread {
+            change()
+        } else {
+            DispatchQueue.main.async(execute: change)
+        }
     }
 }

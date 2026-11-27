@@ -79,6 +79,15 @@ struct ShieldQuarantine {
 final class CallSession: NSObject, ObservableObject {
     enum Phase { case idle, connecting, live, ended }
 
+    /// Whether any call is live right now (v0.33.0): set
+    /// where a call goes live (both transports) and cleared
+    /// where one ends or fails. Its one consumer is the
+    /// voice preview (VoicePreviewPlayer / VoicePreviewButton):
+    /// an audition is never offered into a live call. It is
+    /// a plain flag, not a control — nothing in the call
+    /// path reads it.
+    static private(set) var isAnyCallLive = false
+
     @Published private(set) var phase: Phase = .idle
     /// The core's word for the moment: listening | thinking |
     /// speaking | ended — drives the call screen's status line.
@@ -589,6 +598,7 @@ final class CallSession: NSObject, ObservableObject {
             if let notice = state.speechNotice { speechNotice = notice }
             corePhase = state.phase ?? "listening"
             phase = .live
+            Self.isAnyCallLive = true
             startHearing()
             startWatchdog()
             pollTask = Task { [weak self] in await self?.pollLoop() }
@@ -611,6 +621,12 @@ final class CallSession: NSObject, ObservableObject {
         guard await prepareCallAudio() else { return }
         primeCallAudioPath()
         transport = .local
+        // A call is a new conversation session (v0.33.0):
+        // the session style state (depth-offer suppression,
+        // length stance) starts fresh, and it resets BEFORE
+        // the staleness check below so the brain this call
+        // loads composes its prompt from the fresh state.
+        PersonaSessionStyle.reset()
         if let kept = localBrain, !kept.isCurrent() {
             localBrain = nil
         }
@@ -633,6 +649,7 @@ final class CallSession: NSObject, ObservableObject {
         sttMode = "local"
         corePhase = "listening"
         phase = .live
+        Self.isAnyCallLive = true
         startHearing()
         startWatchdog()
         // GUS speaks first (v0.31.0): the greeting turn goes
@@ -666,6 +683,7 @@ final class CallSession: NSObject, ObservableObject {
     func endCall() {
         guard phase == .live || phase == .connecting else { return }
         phase = .ended
+        Self.isAnyCallLive = false
         removeAudioLifecycleObservers()
         pendingShieldQuarantine = nil
         watchdogTask?.cancel(); watchdogTask = nil
@@ -691,6 +709,7 @@ final class CallSession: NSObject, ObservableObject {
         removeAudioLifecycleObservers()
         pendingShieldQuarantine = nil
         phase = .ended
+        Self.isAnyCallLive = false
         watchdogTask?.cancel(); watchdogTask = nil
         if audioEngine.isRunning { audioEngine.stop() }
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
@@ -1029,6 +1048,14 @@ final class CallSession: NSObject, ObservableObject {
                 break
             }
         }
+        // The session style hears the turn (v0.33.0) only
+        // once Shield has let it through — a blocked turn
+        // never reaches the brain, so it teaches the style
+        // nothing either (an injection's "tell me more"
+        // must not move the stance). Noted BEFORE the
+        // answer composes, so a stance change or an offer
+        // suppression lands in this turn's prompt.
+        PersonaSessionStyle.noteUserTurn(text)
         beginLocalAnswer(text)
     }
 
@@ -1041,6 +1068,10 @@ final class CallSession: NSObject, ObservableObject {
         guard let held = pendingShieldQuarantine else { return }
         pendingShieldQuarantine = nil
         guard phase == .live else { return }
+        // The operator's own override: the turn is theirs
+        // again, and the session style hears it now (it was
+        // not noted while held — see answerLocally).
+        PersonaSessionStyle.noteUserTurn(held.text)
         beginLocalAnswer(held.text)
     }
 
@@ -1093,6 +1124,25 @@ final class CallSession: NSObject, ObservableObject {
     /// greetLocally). Everything downstream — the pump, the
     /// reply-side Shield seam, barge-in — is shared verbatim.
     private func beginLocalTurn(input: String, transcript: String?) {
+        // Session-style staleness (v0.33.0): the kept brain
+        // was loaded with the prompt composed when it
+        // loaded; a session-style change since (an offer
+        // declined on the last turn, a length ask) makes it
+        // stale in exactly the sense a persona pick does,
+        // and it is dropped and reloaded here, between
+        // turns — the connect path's own discipline, applied
+        // mid-call. A reload that fails ends the turn
+        // quietly rather than answering with the wrong
+        // prompt; the next turn retries the load.
+        if let kept = localBrain, !kept.isCurrent() {
+            localBrain = nil
+        }
+        if localBrain == nil {
+            guard let entry = ActiveBrain.resolved(),
+                  let loaded = LocalBrain(modelURL: ModelStore.fileURL(for: entry))
+            else { return }
+            localBrain = loaded
+        }
         guard let brain = localBrain, phase == .live else { return }
         localTurnCounter += 1
         let turnID = localTurnCounter
@@ -1129,6 +1179,14 @@ final class CallSession: NSObject, ObservableObject {
             // this lands, the queue holds the whole reply.
             Task { @MainActor in
                 guard let self, self.localTurnCounter == turnID else { return }
+                // The session style hears the reply (v0.33.0):
+                // a real turn's answer is scanned for the
+                // depth offer, so the person's NEXT turn can
+                // resolve it. The greeting (transcript nil)
+                // answers nobody and is never noted.
+                if transcript != nil {
+                    PersonaSessionStyle.noteReply(reply)
+                }
                 self.localCompletedReply = reply
                 self.localGenerationDone = true
             }

@@ -9,6 +9,9 @@ struct SettingsView: View {
     @ObservedObject var model: SessionModel
     @ObservedObject private var library = ModelLibrary.shared
     @ObservedObject private var kokoro = KokoroRuntime.shared
+    /// The voice audition's state (v0.33.0) — observed so
+    /// a failed preview's words land under the voice list.
+    @ObservedObject private var preview = VoicePreviewPlayer.shared
     @State private var coreAddress = GUSSettings.baseURLString
     @State private var coreToken = GUSSettings.token
     @State private var engineKind: SpeechEngineKind = .preferred
@@ -129,33 +132,49 @@ struct SettingsView: View {
                     // curated voices — Heart, Emma (British),
                     // and Michael (male) — with the full set
                     // of eight under the disclosure below,
-                    // both pickers bound to the same saved
+                    // both levels bound to the same saved
                     // pick (gus.voice.kokoroVoice, untouched
                     // by the restructure: a pick made from
                     // the full list rides along in the simple
-                    // picker rather than being reset).
-                    Picker("Kokoro voice", selection: $kokoroVoice) {
-                        ForEach(KokoroVoice.simpleOptions(current: kokoroVoice)) { voice in
-                            Text(voice.displayName).tag(voice)
+                    // level rather than being reset).
+                    // v0.33.0: the pickers became rows, so
+                    // every voice carries its audition button
+                    // (VoiceChoiceRow) — hear a few words in
+                    // a voice before picking it, instead of
+                    // learning how it sounds mid-call. Tapping
+                    // a row is the pick, exactly as the
+                    // pickers' selection was.
+                    ForEach(KokoroVoice.simpleOptions(current: kokoroVoice)) { voice in
+                        VoiceChoiceRow(
+                            voice: voice,
+                            selected: kokoroVoice == voice,
+                            previewLine: voicePreviewLine(voice)
+                        ) {
+                            kokoroVoice = voice
+                            KokoroVoice.selected = voice
                         }
-                    }
-                    .onChange(of: kokoroVoice) { newValue in
-                        KokoroVoice.selected = newValue
                     }
                     DisclosureGroup("All voices") {
-                        Picker("Full voice list", selection: $kokoroVoice) {
-                            ForEach(KokoroVoice.all) { voice in
-                                Text(voice.displayName).tag(voice)
+                        ForEach(KokoroVoice.all) { voice in
+                            VoiceChoiceRow(
+                                voice: voice,
+                                selected: kokoroVoice == voice,
+                                previewLine: voicePreviewLine(voice)
+                            ) {
+                                kokoroVoice = voice
+                                KokoroVoice.selected = voice
                             }
                         }
-                        .onChange(of: kokoroVoice) { newValue in
-                            KokoroVoice.selected = newValue
-                        }
+                    }
+                    if let error = preview.lastError {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundColor(.orange)
                     }
                 } header: {
                     Text("Call voice")
                 } footer: {
-                    Text("Kokoro is GUS's voice — it runs on this iPhone and prepares itself automatically when the app opens. There is no setup tap and no fallback voice behind it. Three voices sit up front; the full set is under All voices. Studio Voice is a future cloud opt-in — off until you configure it.")
+                    Text("Kokoro is GUS's voice — it runs on this iPhone and prepares itself automatically when the app opens. There is no setup tap and no fallback voice behind it. Three voices sit up front; the full set is under All voices. The play button beside a voice speaks a few words in it, so you can choose by ear — a first listen may take a moment while that voice is fetched. Each persona can also carry its own voice (Personas tab). Studio Voice is a future cloud opt-in — off until you configure it.")
                 }
 
                 // v0.20.0: the stock avatar pair — the face
@@ -298,6 +317,13 @@ struct SettingsView: View {
                 kokoroVoice = KokoroVoice.selected
             }
         }
+    }
+
+    /// The line a Settings voice preview speaks (v0.33.0):
+    /// the voice introduces ITSELF — hearing "I'm Michael"
+    /// in Michael's voice is the whole audition.
+    private func voicePreviewLine(_ voice: KokoroVoice) -> String {
+        "Hi, I'm \(voice.shortName) — this is how I sound. Ask me anything."
     }
 
     /// The voice row: Kokoro's assets are fetched and verified
