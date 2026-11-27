@@ -148,6 +148,7 @@
  */
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import {
   loadVoiceConfig,
   voiceConfigured,
@@ -171,7 +172,11 @@ import {
   type VoiceAdapter,
   type VoiceCallResult,
 } from "./voice-channel.js";
-import type { MessageImage } from "@gus/shared";
+import {
+  MAX_PERSONA_CONTEXT_BYTES,
+  utf8ByteLength,
+  type MessageImage,
+} from "@gus/shared";
 import {
   UtteranceSegmenter,
   normalizePcm16Gain,
@@ -452,6 +457,19 @@ interface ActiveSession {
      *  arriving, a watched call is not idle (see tick). */
     lastFrameAt: number;
   };
+  /** v0.40.0: the call's persona context — the phone's
+   *  composed persona prompt (persona + house style + that
+   *  persona's memories), supplied at start and replaceable
+   *  mid-call via setPersonaContext. Held in MEMORY ONLY,
+   *  exactly like the Watch frames: never written to disk,
+   *  never in a turn record (a context event in voice-turns
+   *  .jsonl records presence, character count, and a short
+   *  hash — never the content), dropped whole when the call
+   *  ends. Every turn this session submits carries it, so the
+   *  core answers the call as the persona the operator picked
+   *  on the phone. Absent (older phone) the call is exactly a
+   *  pre-0.40.0 call. */
+  personaContext?: string;
 }
 
 const DEFAULT_IDLE_TIMEOUT_MS = 180_000;
@@ -693,7 +711,7 @@ export class VoiceSessionService {
    *  to built-in for this call, with the notice on the state.
    *  The config on file is never rewritten by a fallback: fix
    *  the endpoint and the next call uses it again. */
-  async start(): Promise<VoiceSessionStateData> {
+  async start(personaContext?: string): Promise<VoiceSessionStateData> {
     if (this.session) {
       return {
         ...this.state(this.session.id),
@@ -721,6 +739,25 @@ export class VoiceSessionService {
       };
     }
     const { sttMode, ttsMode, ttsBaseUrl, speechNotice } = await this.resolveModes(config);
+    // v0.40.0: the call's opening persona context, sanitized
+    // at the door — a blank value is no context, and an
+    // over-cap one is refused (the call starts without it and
+    // the refusal rides the start detail in words; the phone
+    // pre-checks with the same cap, so honest apps never see
+    // this). Nothing here is stored or logged: the session
+    // holds the accepted value in memory only.
+    let openingContext: string | undefined;
+    let personaNote: string | undefined;
+    if (typeof personaContext === "string" && personaContext.trim().length > 0) {
+      if (utf8ByteLength(personaContext) > MAX_PERSONA_CONTEXT_BYTES) {
+        personaNote =
+          `The persona context from your phone was over the ${MAX_PERSONA_CONTEXT_BYTES / 1024} KB ` +
+          "limit, so this call runs without it — trim the persona's prompt or its remembered " +
+          "lines on the phone to bring it along.";
+      } else {
+        openingContext = personaContext;
+      }
+    }
     const now = this.now();
     const session: ActiveSession = {
       id: `call-${now.toString(36)}-${this.counter++}`,
@@ -761,8 +798,13 @@ export class VoiceSessionService {
         lastAmbientAt: 0,
         lastFrameAt: 0,
       },
+      ...(openingContext ? { personaContext: openingContext } : {}),
     };
     this.session = session;
+    // v0.40.0: the context's arrival (or its over-cap refusal)
+    // is on the call record — presence, size, and hash only.
+    if (openingContext) this.appendPersonaContextEvent(session, openingContext);
+    else if (personaNote) this.appendPersonaContextEvent(session, personaContext, true);
     this.endedSnapshot = undefined;
     // The timeouts also run on a clock, not only when audio or a
     // poll happens to arrive — a call the operator walked away
@@ -782,7 +824,8 @@ export class VoiceSessionService {
       detail:
         "Call started. Speak naturally — a pause ends your turn. Talking over a reply cuts it off; \"GUS stop\" ends the call and trips the kill switch." +
         (speechNotice ? ` ${speechNotice}` : "") +
-        (greetingNote ? ` ${greetingNote}` : ""),
+        (greetingNote ? ` ${greetingNote}` : "") +
+        (personaNote ? ` ${personaNote}` : ""),
     };
   }
 
@@ -1141,6 +1184,60 @@ export class VoiceSessionService {
   }
 
   /**
+   * v0.40.0: a persona-context update for this call — the
+   * phone posts its newly composed prompt when it changes
+   * mid-session (a persona switch, a memory write, a session
+   * style shift); the session applies it to SUBSEQUENT turns
+   * only (a turn already running keeps the context it began
+   * with). The replacement is whole, never merged — the phone
+   * composes the full prompt every time, so the newest post
+   * IS the persona, exactly as the on-device brain's reload
+   * makes the newest composition the loaded one.
+   *
+   * An absent or blank context CLEARS the held one (the phone
+   * saying "no persona rides this call anymore"). An over-cap
+   * context is refused in words and the session KEEPS the
+   * context it already had — an edit that outgrows the cap
+   * must not silently strip the persona from a live call. The
+   * content itself is held in memory only and never logged:
+   * the durable record (appendPersonaContextEvent) keeps
+   * presence, character count, and a short hash.
+   */
+  setPersonaContext(
+    sessionId: string,
+    personaContext?: string,
+  ): { ok: boolean; detail: string } {
+    const session = this.session;
+    if (!session || session.id !== sessionId) {
+      return { ok: false, detail: "No live call by that id — nothing was changed." };
+    }
+    this.tick();
+    if (this.session !== session) {
+      return { ok: false, detail: "The call ended (timeout) as that arrived — nothing was changed." };
+    }
+    if (typeof personaContext !== "string" || personaContext.trim().length === 0) {
+      if (session.personaContext) {
+        session.personaContext = undefined;
+        this.appendPersonaContextEvent(session, undefined);
+      }
+      return { ok: true, detail: "Persona context cleared — the call continues without one." };
+    }
+    if (utf8ByteLength(personaContext) > MAX_PERSONA_CONTEXT_BYTES) {
+      this.appendPersonaContextEvent(session, personaContext, true);
+      return {
+        ok: false,
+        detail:
+          `That persona context is over the ${MAX_PERSONA_CONTEXT_BYTES / 1024} KB limit — ` +
+          "the call keeps the context it already had. Trim the persona's prompt or its " +
+          "remembered lines on the phone to update it.",
+      };
+    }
+    session.personaContext = personaContext;
+    this.appendPersonaContextEvent(session, personaContext);
+    return { ok: true, detail: "Persona context updated — it shapes the call from the next turn on." };
+  }
+
+  /**
    * One Watch frame from the app: the session's new eyes for
    * one camera. The frame is shape-checked HERE, synchronously,
    * like a photo turn's — an unusable frame refuses the post
@@ -1341,6 +1438,50 @@ export class VoiceSessionService {
         join(this.stateDir, "voice-turns.jsonl"),
         JSON.stringify({ ts: this.now(), session: session.id, kind: "watch", detail }) + "\n",
       );
+    } catch {
+      /* a lost line loses a clue, never a call */
+    }
+  }
+
+  /**
+   * v0.40.0: a persona context's only durable trace in the
+   * call record — that one arrived (or was cleared, or was
+   * refused over-cap), its character count, and a short hash:
+   * enough to tell two contexts apart across a call's turns,
+   * never enough to reconstruct one. The content is the
+   * operator's private data (it can carry the persona's
+   * memory lines) and is written NOWHERE — the same
+   * discipline as the Watch frames' fingerprints. Same
+   * best-effort posture as appendWatchEvent: a lost line
+   * loses a clue, never a call.
+   */
+  private appendPersonaContextEvent(
+    session: ActiveSession,
+    context: string | undefined,
+    refused = false,
+  ): void {
+    try {
+      const rec: {
+        ts: number;
+        session: string;
+        kind: string;
+        chars?: number;
+        hash?: string;
+        cleared?: boolean;
+        refused?: boolean;
+      } = {
+        ts: this.now(),
+        session: session.id,
+        kind: "persona_context",
+        ...(context !== undefined
+          ? {
+              chars: context.length,
+              hash: createHash("sha256").update(context, "utf8").digest("hex").slice(0, 12),
+            }
+          : { cleared: true }),
+        ...(refused ? { refused: true } : {}),
+      };
+      appendFileSync(join(this.stateDir, "voice-turns.jsonl"), JSON.stringify(rec) + "\n");
     } catch {
       /* a lost line loses a clue, never a call */
     }
@@ -1621,6 +1762,12 @@ export class VoiceSessionService {
     images?: MessageImage[],
     opts?: { liveView?: boolean; silentReply?: string },
   ): Promise<void> {
+    // v0.40.0: the session's persona context rides the turn —
+    // the same ordinary-job door as the words, so a spoken turn
+    // is answered by the same persona a typed one is. Read at
+    // turn time (not captured earlier): an update posted
+    // mid-call shapes the very next turn.
+    const personaContext = session.personaContext;
     const jobStart = this.now();
     // v0.9.8: arm the spoken filler — if the job is still
     // running when the delay elapses, ONE "Just a second." is
@@ -1638,6 +1785,7 @@ export class VoiceSessionService {
     try {
       result = await this.calls.processTranscript(transcript, images, {
         liveView: opts?.liveView === true,
+        personaContext,
       });
     } finally {
       filler.disarm();

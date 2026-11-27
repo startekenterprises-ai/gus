@@ -81,8 +81,22 @@ VERSION=$(node -p "require('$REPO_DIR/package.json').version")
 BUILD=$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || date +%Y%m%d)
 echo "build-ipa: GUS $VERSION (build $BUILD) — scheme $SCHEME, $CONFIGURATION"
 
+# v0.40.0: preserve this attempt's archive log per version. The
+# build command redirects this script's output to
+# /tmp/gus-archive.log, and the NEXT attempt truncates that file
+# on launch — which destroyed the v0.38.1 attempt's final error
+# before it could be read. On exit (success or fail — the EXIT
+# trap below runs either way, fail() included), copy the log to
+# /tmp/gus-archive-$VERSION.log so each version's latest attempt
+# survives later attempts. Best-effort and silent: the copy emits
+# nothing and a failed copy changes nothing about the build.
+ARCHIVE_LOG=/tmp/gus-archive.log
+preserve_archive_log() {
+  [ -f "$ARCHIVE_LOG" ] && cp "$ARCHIVE_LOG" "/tmp/gus-archive-$VERSION.log" 2>/dev/null || true
+}
+
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+trap 'rm -rf "$WORK"; preserve_archive_log' EXIT
 ARCHIVE="$WORK/$SCHEME.xcarchive"
 EXPORT_DIR="$WORK/export"
 

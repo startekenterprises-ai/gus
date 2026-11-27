@@ -240,6 +240,16 @@ final class CallSession: NSObject, ObservableObject {
     private let client = GUSClient.shared
     private var sessionId: String?
     private var sttMode: String = "local"
+    /// The persona context the core currently holds for this
+    /// call (v0.40.0): the composed prompt this phone sent at
+    /// start, or with the latest accepted update.
+    /// syncCorePersonaContext compares the live composition
+    /// against it and posts only a difference — the Core
+    /// call's version of the on-device brain's staleness
+    /// reload. The context's content lives nowhere else on
+    /// this phone beyond LocalBrain's own composition inputs,
+    /// and on the core it is session memory only.
+    private var corePersonaContext: String?
 
     // On-device transport (chunk 2): the local brain, its
     // in-flight answer, and the sentence pump that speaks the
@@ -718,14 +728,27 @@ final class CallSession: NSObject, ObservableObject {
         primeCallAudioPath()
         transport = .core
         do {
-            let state = try await client.voiceSessionStart()
+            // v0.40.0: the phone's composed persona prompt
+            // opens the call — the core answers as the persona
+            // picked here, memories included, from the first
+            // turn. Over the transport cap the call starts
+            // without it and says so (the core's own door
+            // words it the same way); the marker stays nil, so
+            // the sync below keeps offering the composition
+            // and a trim mid-call brings the persona along.
+            let persona = PersonaContextTransport.current()
+            let state = try await client.voiceSessionStart(personaContext: persona.context)
             guard state.ok, let id = state.sessionId else {
                 fail(state.detail)
                 return
             }
             sessionId = id
+            corePersonaContext = persona.context
             sttMode = state.sttMode ?? "local"
             if let notice = state.speechNotice { speechNotice = notice }
+            if persona.overCap, speechNotice == nil {
+                speechNotice = "The persona context from your phone was over the 16 KB limit, so this call runs without it — trim the persona's prompt or its remembered lines on the phone to bring it along."
+            }
             corePhase = state.phase ?? "listening"
             phase = .live
             Self.isAnyCallLive = true
@@ -735,6 +758,33 @@ final class CallSession: NSObject, ObservableObject {
             playbackTask = Task { [weak self] in await self?.playbackLoop() }
         } catch {
             fail(error.localizedDescription)
+        }
+    }
+
+    /// Bring the core's held persona context current
+    /// (v0.40.0): recompose the phone's prompt (LocalBrain
+    /// .activePrompt folds in the persona pick, that
+    /// persona's memories, and the session style) and post
+    /// it when it differs from what the core already holds.
+    /// Only an ACCEPTED post moves the marker, so a failed
+    /// update is retried by the next sync rather than lost.
+    /// An over-cap composition posts nothing — the call
+    /// keeps the context it already had, the same refusal
+    /// the core's own door makes. Called from the poll loop
+    /// (so a change made on another screen while the call
+    /// runs in the background lands within a beat, and turns
+    /// the core starts itself — endpoint transcription,
+    /// Watch observations — are covered) and awaited ahead
+    /// of the turns this phone dispatches itself, so a
+    /// change made a breath before speaking is already
+    /// there when the turn runs.
+    private func syncCorePersonaContext() async {
+        guard transport == .core, let id = sessionId else { return }
+        let current = PersonaContextTransport.current()
+        guard let context = current.context, context != corePersonaContext else { return }
+        if let result = try? await client.voiceSessionContext(sessionId: id, personaContext: context),
+           result.ok {
+            corePersonaContext = context
         }
     }
 
@@ -835,6 +885,9 @@ final class CallSession: NSObject, ObservableObject {
             Task { _ = try? await client.voiceSessionEnd(sessionId: id) }
         }
         sessionId = nil
+        // v0.40.0: the core drops the call's persona context
+        // with the session; the phone's marker goes with it.
+        corePersonaContext = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
@@ -1013,6 +1066,11 @@ final class CallSession: NSObject, ObservableObject {
             answerLocally(text)
         } else if let id = sessionId {
             Task {
+                // Persona (v0.40.0): the core's context is
+                // brought current first, so a persona switch
+                // or memory write made a breath ago already
+                // shapes this turn.
+                await self.syncCorePersonaContext()
                 // Watch (v0.37.0): the fresh frame goes
                 // FIRST, awaited, so the core's eyes are
                 // current before this message's turn runs —
@@ -1082,6 +1140,10 @@ final class CallSession: NSObject, ObservableObject {
         }
         Task {
             do {
+                // Persona (v0.40.0): the core's context is
+                // brought current before the photo's turn
+                // runs (see sendTypedMessage).
+                await self.syncCorePersonaContext()
                 let result = try await client.voiceSessionTranscript(
                     sessionId: id, text: "", images: [data])
                 if !result.ok {
@@ -1440,6 +1502,10 @@ final class CallSession: NSObject, ObservableObject {
                     answerLocally(trimmed)
                 } else if sttMode == "local", let id = sessionId {
                     Task {
+                        // Persona (v0.40.0): the core's
+                        // context is brought current first
+                        // (see sendTypedMessage).
+                        await self.syncCorePersonaContext()
                         // Watch (v0.37.0): the fresh frame
                         // goes FIRST, awaited — the core's
                         // eyes are current before the turn
@@ -1862,6 +1928,12 @@ final class CallSession: NSObject, ObservableObject {
 
     private func pollLoop() async {
         while !Task.isCancelled, phase == .live, let id = sessionId {
+            // v0.40.0: a persona change made while the call
+            // runs (another screen, the background) reaches
+            // the core within a poll beat — see
+            // syncCorePersonaContext. A no-op when nothing
+            // changed, which is nearly every beat.
+            await syncCorePersonaContext()
             if let state = try? await client.voiceSessionState(sessionId: id) {
                 turns = state.turns
                 corePhase = state.phase ?? corePhase

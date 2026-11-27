@@ -295,6 +295,11 @@ export class PanelServer {
         typeof body.text === "string" ? body.text : "",
         Array.isArray(body.images) ? body.images : undefined,
         identity,
+        // v0.40.0: the phone's persona context for this job —
+        // passed through only when it is a string; the chat
+        // adapter enforces the cap and refuses over-cap in
+        // words. The field is never echoed or stored here.
+        typeof body.personaContext === "string" ? body.personaContext : undefined,
       );
       return json(result.ok ? 200 : 400, result);
     }
@@ -406,8 +411,36 @@ export class PanelServer {
     if (method === "POST" && path === "/api/voice/session/start") {
       // v0.9.6: start resolves the call's speech modes (an
       // endpoint probe), so the backend's answer is async.
-      const result = await this.backend.voiceSessionStart();
+      // v0.40.0: the phone's persona context for the call may
+      // ride the start body — readJson answers {} for the
+      // body-less posts older apps make, so their starts are
+      // unchanged. The session holds the context in memory
+      // only; this route never echoes or stores it.
+      const body = await this.readJson(req);
+      const result = await this.backend.voiceSessionStart(
+        typeof body.personaContext === "string" ? body.personaContext : undefined,
+      );
       return json(result.ok ? 200 : 400, result);
+    }
+    // v0.40.0: a persona-context update for a live call — the
+    // phone posts its newly composed prompt when it changes
+    // mid-session (a persona switch, a memory write); the
+    // session applies it to subsequent turns only. The body
+    // carries the context itself, so it is read and handed on,
+    // never logged or stored by this route.
+    if (method === "POST" && path === "/api/voice/session/context") {
+      const body = await this.readJson(req);
+      if (!this.backend.voiceSessionContext) {
+        return json(501, {
+          ok: false,
+          detail: "Persona context isn't wired in this deployment. The call keeps the context it already had.",
+        });
+      }
+      const result = this.backend.voiceSessionContext(
+        typeof body.sessionId === "string" ? body.sessionId : "",
+        typeof body.personaContext === "string" ? body.personaContext : undefined,
+      );
+      return json(result.ok ? 200 : 409, result);
     }
     // v0.9.6: a final transcript from the app's built-in
     // recognizer (JSON — the words are the body). Same token

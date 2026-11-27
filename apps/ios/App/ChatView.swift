@@ -1726,7 +1726,29 @@ final class ChatModel: ObservableObject {
                         id: $0.id, deviceId: $0.deviceId, seq: $0.seq,
                         prevId: $0.prevId, ts: $0.ts)
                 }
-                let result = try await self.client.chat(text: text, images: images, sync: identity)
+                // v0.40.0: the phone's composed persona prompt
+                // rides the job, so the core answers as the
+                // persona picked here — memories included. It
+                // is recomposed per job, so a persona switch
+                // or a memory write applies to the very next
+                // message, exactly as the on-device brain's
+                // staleness reload applies it. Over the
+                // transport cap the job is refused in words,
+                // unsent — the core refuses in the same words
+                // at its own door, and a truncated persona
+                // would be a wrong one.
+                let persona = PersonaContextTransport.current()
+                if persona.overCap {
+                    if !images.isEmpty {
+                        self.setPhotoNote(exchangeID: exchangeID,
+                            note: "The photo wasn't sent — the persona context is over the size limit.")
+                    }
+                    self.appendNotice(exchangeID: exchangeID,
+                        text: "The persona context from your phone is over the 16 KB limit for one job — nothing was sent. Trim the persona's prompt or its remembered lines, then try again.")
+                    self.replyingCount -= 1
+                    return
+                }
+                let result = try await self.client.chat(text: text, images: images, sync: identity, personaContext: persona.context)
                 guard result.ok else {
                     if !images.isEmpty {
                         self.setPhotoNote(exchangeID: exchangeID,

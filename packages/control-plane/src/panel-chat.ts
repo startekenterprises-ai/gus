@@ -99,6 +99,8 @@ import {
   sameChatMessage,
   validateSyncedChatMessage,
   validateSyncedChatTombstone,
+  MAX_PERSONA_CONTEXT_BYTES,
+  utf8ByteLength,
 } from "@gus/shared";
 import { JsonlLogCache } from "./log-cache.js";
 
@@ -600,8 +602,34 @@ export class PanelChatAdapter implements ChannelAdapter {
     text: string,
     images?: MessageImage[],
     identity?: ChatSubmitIdentity,
+    personaContext?: string,
   ): { ok: boolean; detail: string } {
     const trimmed = text.trim();
+    // v0.40.0: the phone's persona context for this job — its
+    // composed persona prompt (persona + style + that
+    // persona's memories), sent per job so a persona switch or
+    // a memory write applies to the very next message, exactly
+    // as the on-device brain's staleness reload applies it.
+    // It rides the emitted event only: the transcript record
+    // below is built from the operator's words and never sees
+    // it. A blank value is no context; an over-cap one refuses
+    // the whole submission in words (never a silent truncate —
+    // a cut persona prompt is a wrong persona). The phone
+    // refuses over-cap before sending, in the same words; this
+    // is the door's own enforcement.
+    let persona: string | undefined;
+    if (typeof personaContext === "string" && personaContext.trim().length > 0) {
+      if (utf8ByteLength(personaContext) > MAX_PERSONA_CONTEXT_BYTES) {
+        return {
+          ok: false,
+          detail:
+            `The persona context from your phone is over the ${MAX_PERSONA_CONTEXT_BYTES / 1024} KB ` +
+            "limit for one job — nothing was sent. Trim the persona's prompt or its remembered " +
+            "lines on the phone, then try again.",
+        };
+      }
+      persona = personaContext;
+    }
     let photos: MessageImage[] | undefined;
     if (images !== undefined) {
       if (!Array.isArray(images) || images.length > MAX_CHAT_IMAGES) {
@@ -670,7 +698,7 @@ export class PanelChatAdapter implements ChannelAdapter {
         // OK came after. Emit now, without re-recording.
         if (this.syncIngestedIds.has(validated.id) && !this.hasOutDescendant(validated.id)) {
           this.syncIngestedIds.delete(validated.id);
-          this.emitSubmit(validated, photos);
+          this.emitSubmit(validated, photos, persona);
           return {
             ok: true,
             detail: "Sent — it goes through the same scan, caps and receipts as any channel message.",
@@ -701,14 +729,18 @@ export class PanelChatAdapter implements ChannelAdapter {
       seq: record.seq,
       prevId: record.prevId,
     });
-    this.emitSubmit(record, photos);
+    this.emitSubmit(record, photos, persona);
     return { ok: true, detail: "Sent — it goes through the same scan, caps and receipts as any channel message." };
   }
 
   /** Emit a recorded submission as the ordinary channel event.
    *  The caller has already established the channel is running
-   *  (submit's onEvent check) and the record is in the store. */
-  private emitSubmit(record: SyncedChatMessage, photos?: MessageImage[]): void {
+   *  (submit's onEvent check) and the record is in the store.
+   *  v0.40.0: `personaContext` rides the EVENT only — the
+   *  record in the store (already written by the caller) is
+   *  the operator's words alone, so the context is never
+   *  persisted with the transcript. */
+  private emitSubmit(record: SyncedChatMessage, photos?: MessageImage[], personaContext?: string): void {
     this.onEvent?.({
       type: "message",
       message: {
@@ -718,6 +750,7 @@ export class PanelChatAdapter implements ChannelAdapter {
         text: record.text,
         receivedAt: record.ts,
         ...(photos ? { images: photos } : {}),
+        ...(personaContext ? { personaContext } : {}),
       },
     });
   }

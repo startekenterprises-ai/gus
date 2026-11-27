@@ -209,8 +209,21 @@ export class VoiceAdapter implements ChannelAdapter {
    * turn. It rides the message as the liveView flag, and the
    * host frames the images as a live view instead of an
    * attachment. Only meaningful alongside images.
+   *
+   * v0.40.0: `personaContext` is the session's held persona
+   * context (the phone's composed persona prompt for the
+   * call), attached by the session service to every ordinary
+   * turn. It rides the message as the personaContext field,
+   * and the host frames it as the job's persona layer. The
+   * command submits (/stop, /approve, /deny) never pass it —
+   * they are control paths, not conversation.
    */
-  submit(text: string, images?: MessageImage[], liveView = false): { ok: boolean; detail: string } {
+  submit(
+    text: string,
+    images?: MessageImage[],
+    liveView = false,
+    personaContext?: string,
+  ): { ok: boolean; detail: string } {
     const trimmed = text.trim();
     const photos = images?.length ? images : undefined;
     if (!trimmed && !photos) return { ok: false, detail: "Nothing was heard — nothing was sent." };
@@ -226,6 +239,7 @@ export class VoiceAdapter implements ChannelAdapter {
         text: trimmed,
         ...(photos ? { images: photos } : {}),
         ...(photos && liveView ? { liveView: true } : {}),
+        ...(personaContext ? { personaContext } : {}),
         receivedAt: Date.now(),
         // v0.9.8: every submit from this adapter is a voice
         // turn's words. The host turns the flag into the job's
@@ -380,7 +394,7 @@ export class VoiceCallService {
   async processTranscript(
     transcript: string,
     images?: MessageImage[],
-    opts?: { liveView?: boolean },
+    opts?: { liveView?: boolean; personaContext?: string },
   ): Promise<VoiceCallResult> {
     this.adapter.drainStale();
     const phrase = classifyTranscript(transcript);
@@ -443,7 +457,10 @@ export class VoiceCallService {
     // v0.37.0: Watch mode's eyes ride the same submit, marked
     // liveView so the host frames them as the camera's current
     // view rather than an attachment the operator sent.
-    const sent = this.adapter.submit(transcript, images, opts?.liveView === true);
+    // v0.40.0: the session's persona context rides it too —
+    // the same ordinary-job door, so a spoken turn is answered
+    // by the same persona a typed one is.
+    const sent = this.adapter.submit(transcript, images, opts?.liveView === true, opts?.personaContext);
     if (!sent.ok) return { ok: false, kind: "unavailable", transcript, detail: sent.detail };
     const reply = await this.adapter.waitForReply(this.replyTimeoutMs);
     if (reply === undefined) {

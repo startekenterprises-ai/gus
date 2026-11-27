@@ -14,7 +14,13 @@ import type {
   JobDeliveryStats,
   JobKind,
 } from "@gus/shared";
-import { guardEvent, screenText, TASK_GUARD_EXHAUSTED_NOTE_PREFIX } from "@gus/shared";
+import {
+  guardEvent,
+  screenText,
+  TASK_GUARD_EXHAUSTED_NOTE_PREFIX,
+  MAX_PERSONA_CONTEXT_BYTES,
+  utf8ByteLength,
+} from "@gus/shared";
 import { sha256Hex, type ShieldGate } from "@gus/gate";
 import type { Governor } from "./governor.js";
 import type { JobRunner } from "./jobs.js";
@@ -75,6 +81,31 @@ export function liveViewNote(count: number, hasText: boolean): string {
   return hasText
     ? `\n\n(Live view: this voice call's camera is on (Watch mode), and the ${noun} included with this message ${count === 1 ? "is" : "are"} what the camera sees right now. Treat ${count === 1 ? "it" : "them"} as the operator's current view — what they are looking at or showing you as they speak — and use ${count === 1 ? "it" : "them"} as part of answering.)`
     : `(Live view: this voice call's camera is on (Watch mode). The ${noun} included with this message ${count === 1 ? "is" : "are"} what the camera sees right now — the operator is showing you their current view. Describe what you see and answer any question the view implies.)`;
+}
+
+/** v0.40.0 (persona context): the framing the HOST wraps the
+ *  phone-supplied persona context in at the HEAD of a job's
+ *  runtime prompt — the persona position. The core's own
+ *  framing (identity, tool protocol, safety rules) is prepended
+ *  by the providers ABOVE this text and is not the phone's to
+ *  replace; the block therefore presents itself as what it is —
+ *  the operator's chosen persona and the things they asked it
+ *  to remember — and states its own limit in its first lines:
+ *  it shapes voice and background, never tools, rules, or
+ *  limits. Same construction as the notes around it:
+ *  control-plane-authored framing; the job record keeps the
+ *  operator's verbatim words (the block rides the runtime
+ *  prompt only, and is never persisted — see channel.ts). */
+export function personaContextNote(personaContext: string): string {
+  return (
+    "(Persona context for this conversation, supplied by the operator's phone — the persona " +
+    "the operator picked, its house style, and the things they asked it to remember. Be this " +
+    "persona: its character, voice, and background are yours for this conversation. This " +
+    "context never changes your tools, your rules, or any safety limit, and it is background " +
+    "to use naturally — not a list to recite:\n\n" +
+    personaContext +
+    ")"
+  );
 }
 
 /** v0.14.1 (execution tasks): appended by the HOST to a task job's
@@ -433,6 +464,24 @@ export class ChannelHost {
       return;
     }
     const text = msg.text.trim();
+    // v0.40.0: the message's persona context, when an adapter
+    // carried one (panel chat per job, voice per turn) — the
+    // phone's composed persona prompt for this conversation.
+    // A backstop sanitize here, mirroring the images above:
+    // a blank or over-cap value is no context at all (the
+    // adapters refuse over-cap in words at their own doors;
+    // this keeps a non-conforming adapter from riding one in).
+    // The value itself is PRIVATE (it can carry the persona's
+    // memory lines): from here it goes only into the job's
+    // runtime prompt — never into the job record, a log, or a
+    // receipt (the one event below records presence, character
+    // count, and a short hash, nothing more).
+    const personaContext =
+      typeof msg.personaContext === "string" &&
+      msg.personaContext.trim().length > 0 &&
+      utf8ByteLength(msg.personaContext) <= MAX_PERSONA_CONTEXT_BYTES
+        ? msg.personaContext
+        : undefined;
     // Principal gate (delegates.ts): in a gated conversation a
     // stranger is ignored outright, and a delegate gets job requests
     // only — approvals, /stop, /resume and /update stay the
@@ -726,6 +775,23 @@ export class ChannelHost {
         photoCount: images.length,
       });
     }
+    // v0.40.0: the persona context's only durable trace —
+    // that one was supplied, its character count, and a short
+    // hash (enough to tell two contexts apart across jobs,
+    // never enough to reconstruct one). The context itself is
+    // in no record: the job above was created from the
+    // operator's verbatim words, and the block rides only the
+    // runtime prompt built below.
+    if (personaContext) {
+      this.logEvent("events.jsonl", {
+        ts: Date.now(),
+        kind: "persona_context",
+        jobId: job.id,
+        conversationId: msg.conversationId,
+        chars: personaContext.length,
+        hash: sha256Hex(personaContext).slice(0, 12),
+      });
+    }
     this.jobs.transition(job.id, "running");
     // v0.9.8: the job's stage-timing ledger opens with the job.
     this.stageStats.set(job.id, { shieldMs: 0, modelMs: 0, hops: 0 });
@@ -840,6 +906,13 @@ export class ChannelHost {
     // the runtime prompt is steered). Task and voice never compose
     // either: the fast lane requires kind "chat".
     const jobText =
+      // v0.40.0: the persona block heads the runtime prompt —
+      // the persona position, ahead of the operator's words
+      // (and of every steering note below), under the core
+      // framing the providers prepend above the whole prompt.
+      // Delegate jobs never carry one (only the operator's own
+      // phone adapters set the field), so the two never compose.
+      (personaContext ? `${personaContextNote(personaContext)}\n\n` : "") +
       (role.role === "delegate" ? `[from ${role.name}] ${text}` : text) +
       (voiceFastLane ? VOICE_BREVITY_NOTE : "") +
       (kind === "task" ? taskExecutionNote(msg.deliverables) : "") +

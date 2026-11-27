@@ -29,6 +29,24 @@ export interface MessageImage {
   data: string;
 }
 
+/** v0.40.0: the transport cap for a message's persona context
+ *  (see InboundMessage.personaContext) — 16 KiB of UTF-8. The
+ *  composed prompt is bounded by construction (a persona prompt
+ *  + the house style + a ≤1,500-character memory block), so the
+ *  cap has headroom; it exists so a broken or hostile client
+ *  cannot ride an unbounded private blob into every job. Both
+ *  ends enforce it — the phone refuses in words before sending,
+ *  the core refuses in words at the door — and nothing is ever
+ *  silently truncated to fit. */
+export const MAX_PERSONA_CONTEXT_BYTES = 16_384;
+
+/** UTF-8 byte length — the measure MAX_PERSONA_CONTEXT_BYTES is
+ *  stated in, identical on both ends of the transport (Swift
+ *  measures `string.utf8.count`). */
+export function utf8ByteLength(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
 export interface InboundMessage {
   /** Adapter-native conversation id (Telegram chat id, Teams chat id, …). */
   conversationId: string;
@@ -85,6 +103,24 @@ export interface InboundMessage {
    *  eyes. The frames themselves are never recorded — the
    *  durable transcript keeps the count, as for photos. */
   liveView?: boolean;
+  /** v0.40.0: the persona context the operator's phone composed
+   *  for this conversation — the picked persona's prompt, the
+   *  house style, and that persona's remembered lines, exactly
+   *  as the phone's own brain would load them (LocalBrain's
+   *  composed prompt). Only the panel chat adapter (per job) and
+   *  the voice adapter (per turn, from the session's held copy)
+   *  set it; the ChannelHost frames it into the job's runtime
+   *  prompt as the persona layer, under the core's own framing
+   *  (the providers prepend that themselves). It is the
+   *  operator's PRIVATE data — it can carry memory lines — so it
+   *  is transport and in-memory prompt state ONLY: never
+   *  persisted, never written to a log, receipt, or sync record
+   *  (logs may record its presence, character count, and a short
+   *  hash). Capped at MAX_PERSONA_CONTEXT_BYTES; the adapters
+   *  refuse an over-cap context in words rather than truncating
+   *  it. Absent (every other adapter, older phones) the pipeline
+   *  behaves exactly as it did before the field existed. */
+  personaContext?: string;
 }
 
 /** v0.9.8: a job's measured pipeline stages, attached by the

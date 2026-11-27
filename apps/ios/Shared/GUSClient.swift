@@ -469,7 +469,13 @@ actor GUSClient {
     /// core presents them to its brain as image input; the
     /// core's transcript records only the count. A photo-only
     /// message (empty text) is a valid submission.
-    func chat(text: String, images: [Data] = [], sync: ChatSubmitSync? = nil) async throws -> ActionResult {
+    /// v0.40.0: `personaContext` is the phone's composed
+    /// persona prompt for this job (LocalBrain.activePrompt,
+    /// via PersonaContextTransport — already cap-checked by
+    /// the caller, refused there in words when over). The
+    /// core frames it as the job's persona layer; it is never
+    /// recorded with the transcript there.
+    func chat(text: String, images: [Data] = [], sync: ChatSubmitSync? = nil, personaContext: String? = nil) async throws -> ActionResult {
         var body: [String: Any] = ["text": text]
         if !images.isEmpty {
             body["images"] = images.map {
@@ -478,6 +484,9 @@ actor GUSClient {
         }
         if let sync {
             body["sync"] = sync.wireDictionary
+        }
+        if let personaContext {
+            body["personaContext"] = personaContext
         }
         let (data, status) = try await requestRaw(
             "/api/chat", method: "POST", jsonBody: body)
@@ -517,8 +526,40 @@ actor GUSClient {
 
     // MARK: The live call (voice session protocol, v0.9.1)
 
-    func voiceSessionStart() async throws -> VoiceSessionState {
-        try decode(VoiceSessionState.self, await request("/api/voice/session/start", method: "POST"))
+    /// v0.40.0: the call's opening persona context rides the
+    /// start body (the phone's composed persona prompt, via
+    /// PersonaContextTransport). The session holds it in
+    /// memory only and carries it on every turn. Absent
+    /// (nil) the post is body-less, exactly as before.
+    func voiceSessionStart(personaContext: String? = nil) async throws -> VoiceSessionState {
+        if let personaContext {
+            return try decode(VoiceSessionState.self, await request(
+                "/api/voice/session/start", method: "POST",
+                jsonBody: ["personaContext": personaContext]))
+        }
+        return try decode(VoiceSessionState.self, await request("/api/voice/session/start", method: "POST"))
+    }
+
+    /// A persona-context update for a live call (v0.40.0):
+    /// the phone posts its newly composed prompt when it
+    /// changes mid-session (a persona switch, a memory
+    /// write); the session applies it to subsequent turns
+    /// only. A nil context clears the session's held one.
+    /// The route answers 409 with the refusal's own words
+    /// (an over-cap update keeps the context the call already
+    /// had) — decoded either way, like chat().
+    @discardableResult
+    func voiceSessionContext(sessionId: String, personaContext: String?) async throws -> ActionResult {
+        var body: [String: Any] = ["sessionId": sessionId]
+        if let personaContext {
+            body["personaContext"] = personaContext
+        }
+        let (data, status) = try await requestRaw(
+            "/api/voice/session/context", method: "POST", jsonBody: body)
+        guard status == 200 || status == 409 else {
+            throw ClientError.http(status, String(data: data, encoding: .utf8) ?? "")
+        }
+        return try decode(ActionResult.self, data)
     }
 
     func voiceSessionState(sessionId: String) async throws -> VoiceSessionState {

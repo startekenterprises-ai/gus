@@ -1020,7 +1020,8 @@ const panelBackend: PanelBackend = {
   // the ordinary channel event; history is the adapter's durable
   // transcript plus this conversation's jobs from the same store
   // /api/jobs reads.
-  submitChat: async (text, images, identity) => panelChat.submit(text, images, identity),
+  submitChat: async (text, images, identity, personaContext) =>
+    panelChat.submit(text, images, identity, personaContext),
   // v0.26.0: chat-history sync — the adapter's exchange,
   // verbatim. Ingested records are history only; the adapter
   // never emits them as channel events.
@@ -1248,7 +1249,10 @@ const panelBackend: PanelBackend = {
   // package's state shape IS the panel contract, mapped here so
   // the packages stay decoupled); audio in/out and the
   // interrupt are the service's own results, passed through.
-  voiceSessionStart: async () => toPanelVoiceSession(await voiceSessions.start()),
+  voiceSessionStart: async (personaContext) =>
+    toPanelVoiceSession(await voiceSessions.start(personaContext)),
+  voiceSessionContext: (sessionId, personaContext) =>
+    voiceSessions.setPersonaContext(sessionId, personaContext),
   voiceSessionAudio: (sessionId, audio) => voiceSessions.pushAudio(sessionId, audio),
   voiceSessionTranscript: (sessionId, text, images) =>
     voiceSessions.submitTranscript(sessionId, text, images),

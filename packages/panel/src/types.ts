@@ -896,6 +896,13 @@ export interface PanelBackend {
     text: string,
     images?: PanelChatImageData[],
     identity?: PanelChatSubmitIdentityData,
+    /** v0.40.0: the phone's composed persona prompt for this
+     *  job (persona + style + that persona's memories), carried
+     *  to the job's runtime prompt as its persona layer. Sent
+     *  per job so it is always the phone's current composition.
+     *  Private data: transport + in-memory prompt state only,
+     *  never persisted or logged (see channel.ts). */
+    personaContext?: string,
   ): Promise<PanelActionResult>;
   /** v0.6: the Chat view's read model, from durable state. */
   chatHistory(): PanelChatData;
@@ -951,7 +958,20 @@ export interface PanelBackend {
    *  barge-in (speech only — never a job, never an approval);
    *  end hangs up. All delegate to the voice session service —
    *  the backend adds no path of its own. */
-  voiceSessionStart(): PanelVoiceSessionData | Promise<PanelVoiceSessionData>;
+  /** v0.40.0: `personaContext` is the phone's composed persona
+   *  prompt for the call, held by the session (memory only) and
+   *  carried on every turn — see voiceSessionContext. Absent
+   *  (older phone) the call runs exactly as before. */
+  voiceSessionStart(personaContext?: string): PanelVoiceSessionData | Promise<PanelVoiceSessionData>;
+  /** v0.40.0: a persona-context update for a live call — the
+   *  phone posts its newly composed prompt when it changes
+   *  mid-session (a persona switch, a memory write); the
+   *  session applies it to subsequent turns only. Optional on
+   *  the backend (the voiceSessionWatch pattern): a backend
+   *  that doesn't wire it gets the server's plain "not wired"
+   *  answer, never a fake success. An absent/blank context
+   *  clears the session's held one. */
+  voiceSessionContext?(sessionId: string, personaContext?: string): PanelActionResult;
   voiceSessionAudio(sessionId: string, audio: Uint8Array): PanelActionResult;
   /** v0.9.6: a final transcript from the app's built-in
    *  recognizer, for a call whose resolved STT mode is local.

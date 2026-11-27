@@ -130,6 +130,35 @@ struct PersonaFace: Equatable {
     }
 }
 
+/// The persona context's ride to the Core (v0.40.0). The
+/// phone composes the full persona prompt for its own brain
+/// (LocalBrain.activePrompt — persona, house style, session
+/// style, and that persona's remembered lines); Core mode
+/// historically carried only the operator's words, so the
+/// Mac's brain answered as nobody in particular. Since
+/// v0.40.0 the composition travels: with every Core chat job,
+/// at a Core call's start, and as an update when it changes
+/// mid-call. This is the phone side of the transport
+/// discipline — one cap, measured the same way both ends
+/// measure it (UTF-8 bytes, mirroring MAX_PERSONA_CONTEXT_BYTES
+/// in @gus/shared), and an over-cap composition is REFUSED
+/// here in words rather than truncated: a cut persona prompt
+/// is a wrong persona, and a silent one is a lying one. The
+/// callers word the refusal for their surface (a chat job
+/// sends nothing; a call starts without the context), in the
+/// same words the core uses at its own doors.
+enum PersonaContextTransport {
+    static let maxBytes = 16_384
+
+    /// The current composition and whether it fits the cap.
+    /// `context` is nil exactly when `overCap` is true.
+    static func current() -> (context: String?, overCap: Bool) {
+        let prompt = LocalBrain.activePrompt
+        guard prompt.utf8.count <= maxBytes else { return (nil, true) }
+        return (prompt, false)
+    }
+}
+
 /// The persona pick, observable (v0.32.0). LocalBrain
 /// .customPrompt is a defaults value — plain storage, and
 /// SwiftUI cannot watch storage. Through v0.31.0 the views
