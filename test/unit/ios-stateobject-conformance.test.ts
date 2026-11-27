@@ -88,3 +88,18 @@ test("CallSession.isAnyCallLive is readable off-actor (the v0.38.1 archive fix)"
     /nonisolated\(unsafe\) static private\(set\) var isAnyCallLive = false/
   );
 });
+
+// GUS v0.41.1 — the missing-argument pin. CallControlButton
+// declared `let fillColor: Color` with no default, and the
+// Camera call site (v0.36.0) — a button that is never
+// filled, so the value is inert there — omitted it; the
+// v0.40.1 archive failed on that one line, the only error
+// in the log (CallView itself type-checked by then). The
+// fix is the default on the declaration, so no call site
+// can repeat the defect. Pin the exact declaration.
+test("CallControlButton.fillColor carries a default (the v0.41.1 archive fix)", () => {
+  assert.match(
+    allSource,
+    /let fillColor: Color = \.accentColor/
+  );
+});

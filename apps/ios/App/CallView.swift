@@ -742,7 +742,10 @@ private struct CallControlButton: View {
     let title: String
     let systemImage: String
     let filled: Bool
-    let fillColor: Color
+    // Defaulted (v0.41.1): a button that is never filled
+    // (Camera) has no use for a fill color, and requiring
+    // one let a call site omit it and break the archive.
+    let fillColor: Color = .accentColor
     let action: () -> Void
 
     var body: some View {
