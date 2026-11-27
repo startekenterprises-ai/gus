@@ -381,7 +381,7 @@ struct ChatView: View {
 
 struct ChatMessage: Identifiable {
     enum Role { case user, assistant, notice }
-    let id = UUID()
+    let id: UUID
     let exchangeID: UUID
     let role: Role
     var text: String
@@ -392,6 +392,20 @@ struct ChatMessage: Identifiable {
     var held = false
     var dropped = false
     var blocked = false
+
+    init(id: UUID = UUID(), exchangeID: UUID, role: Role, text: String,
+         photoData: Data? = nil, photoNote: String? = nil,
+         held: Bool = false, dropped: Bool = false, blocked: Bool = false) {
+        self.id = id
+        self.exchangeID = exchangeID
+        self.role = role
+        self.text = text
+        self.photoData = photoData
+        self.photoNote = photoNote
+        self.held = held
+        self.dropped = dropped
+        self.blocked = blocked
+    }
 }
 
 @MainActor
