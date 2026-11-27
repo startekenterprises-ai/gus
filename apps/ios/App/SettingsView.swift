@@ -27,6 +27,11 @@ struct SettingsView: View {
     /// CallSession reads it once per call, in startCall;
     /// written here.
     @State private var callInputMode: CallInputMode = CallInputMode.preferred
+    /// v0.42.0: the playback speed (KokoroSpeed) —
+    /// read by KokoroRuntime at every synthesis, so
+    /// this picker writes the preference and nothing
+    /// else holds a copy.
+    @State private var kokoroSpeed: Double = KokoroSpeed.selected
     @State private var personaText: String = LocalBrain.customPrompt ?? ""
     @State private var stockAvatar: String = UserDefaults.standard.string(forKey: "gus.avatar.stock") ?? "boy"
     @State private var shieldEnabled: Bool = ShieldSettings.enabled
@@ -216,10 +221,22 @@ struct SettingsView: View {
                             .font(.caption)
                             .foregroundColor(.orange)
                     }
+                    // v0.42.0: the speed pick (KokoroSpeed),
+                    // beside the voice it modifies — one
+                    // global listener preference, applying
+                    // to calls and previews alike.
+                    Picker("Speed", selection: $kokoroSpeed) {
+                        ForEach(KokoroSpeed.steps, id: \.self) { step in
+                            Text(KokoroSpeed.displayName(for: step)).tag(step)
+                        }
+                    }
+                    .onChange(of: kokoroSpeed) { newValue in
+                        KokoroSpeed.selected = newValue
+                    }
                 } header: {
                     Text("Call voice")
                 } footer: {
-                    Text("Kokoro is GUS's voice — it runs on this iPhone and prepares itself automatically when the app opens. There is no setup tap and no fallback voice behind it. Three voices sit up front; the full set is under All voices. The play button beside a voice speaks a few words in it, so you can choose by ear — a first listen may take a moment while that voice is fetched. Each persona can also carry its own voice (Personas tab). Studio Voice is a future cloud opt-in — off until you configure it.")
+                    Text("Kokoro is GUS's voice — it runs on this iPhone and prepares itself automatically when the app opens. There is no setup tap and no fallback voice behind it. Three voices sit up front; the full set is under All voices. The play button beside a voice speaks a few words in it, so you can choose by ear — a first listen may take a moment while that voice is fetched. Each persona can also carry its own voice (Personas tab). Speed sets how fast GUS talks — on calls and in these previews alike — and a change lands on the next sentence, even mid-call. Studio Voice is a future cloud opt-in — off until you configure it.")
                 }
 
                 // v0.20.0: the stock avatar pair — the face

@@ -154,6 +154,53 @@ enum PersonaVoiceAssignment {
     }
 }
 
+/// How fast Kokoro speaks (v0.42.0) — one global pick,
+/// not per-persona: speed is the LISTENER's preference,
+/// not a persona trait (Claude's Voice settings sheet,
+/// from Glenn's screenshots, keeps its Speed beside the
+/// voice and model the same way). The pick rides the
+/// SDK's own speed parameter —
+/// `KokoroAneManager.synthesizeDetailed(text:voice:speed:)`,
+/// whose default is `KokoroAneConstants.defaultSpeed`
+/// (1.0) — so the model itself predicts shorter or
+/// longer phoneme durations: the voice's pitch is its
+/// own at every speed, never resampled audio. The SDK
+/// declares no clamp for the parameter; the steps below
+/// sit well inside Kokoro's sane band, and any stored
+/// value is snapped to the nearest step on read, so the
+/// engine only ever hears one of these five.
+enum KokoroSpeed {
+    static let steps: [Double] = [0.8, 0.9, 1.0, 1.1, 1.25]
+    static let defaultStep: Double = 1.0
+
+    /// The operator's pick, persisted at gus.voice.speed.
+    /// An unwritten key reads as 1.0 — Normal, the speed
+    /// every build through v0.41.1 spoke at.
+    static var selected: Double {
+        get {
+            let raw = UserDefaults.standard.object(forKey: "gus.voice.speed") as? Double
+            return snapped(raw ?? defaultStep)
+        }
+        set { UserDefaults.standard.set(snapped(newValue), forKey: "gus.voice.speed") }
+    }
+
+    /// The nearest offered step — the read and write
+    /// both pass through here, so a value no picker
+    /// offers can neither be stored nor reach the SDK.
+    static func snapped(_ value: Double) -> Double {
+        steps.min(by: { abs($0 - value) < abs($1 - value) }) ?? defaultStep
+    }
+
+    /// The picker's label for a step: 1.0× is "Normal"
+    /// (Claude's word for its own default); the rest
+    /// carry their number.
+    static func displayName(for step: Double) -> String {
+        step == defaultStep
+            ? "Normal (1.0×)"
+            : String(format: "%g×", step)
+    }
+}
+
 final class KokoroRuntime: ObservableObject {
     static let shared = KokoroRuntime()
 
@@ -223,7 +270,16 @@ final class KokoroRuntime: ObservableObject {
         }
         await gate.acquire()
         do {
-            let result = try await manager.synthesizeDetailed(text: text, voice: voiceID)
+            // v0.42.0: the speed pick is read HERE, at
+            // each synthesis — this one call is the
+            // funnel every spoken sentence passes
+            // through (call sentences on both playback
+            // engines, and the Settings/Personas voice
+            // previews alike), so a change in Settings
+            // lands on the NEXT sentence, even mid-call,
+            // and a preview always sounds at call speed.
+            let result = try await manager.synthesizeDetailed(
+                text: text, voice: voiceID, speed: Float(KokoroSpeed.selected))
             await gate.release()
             return (result.samples, Double(result.sampleRate))
         } catch {
