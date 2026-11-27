@@ -131,6 +131,14 @@ if [ -f "$AVATAR_B64" ]; then
   base64 -d < "$AVATAR_B64" > "$PROJECT_DIR/App/Assets.xcassets/Avatar.imageset/Avatar.png" \
     || fail "decoding the call-screen avatar from $AVATAR_B64 failed."
 fi
+# v0.20.0: the second stock avatar (the girl) rides the same
+# way, in her own imageset — Settings picks between the pair
+# (gus.avatar.stock); the boy above is the default.
+AVATAR_GIRL_B64="$PROJECT_DIR/App/Assets.xcassets/AvatarGirl.imageset/AvatarGirl.png.b64"
+if [ -f "$AVATAR_GIRL_B64" ]; then
+  base64 -d < "$AVATAR_GIRL_B64" > "$PROJECT_DIR/App/Assets.xcassets/AvatarGirl.imageset/AvatarGirl.png" \
+    || fail "decoding the second call-screen avatar from $AVATAR_GIRL_B64 failed."
+fi
 
 # --- 2. archive -----------------------------------------------------
 echo "build-ipa: archiving $SCHEME ($CONFIGURATION)…"

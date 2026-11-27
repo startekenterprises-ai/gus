@@ -378,7 +378,34 @@ struct IdentityTabView: View {
             .sheet(isPresented: $makeAvatarPresented) {
                 MakeAvatarView(model: model)
             }
+            // v0.20.0: the stock pair's picker — the boy
+            // (default) or the girl, the same choice the
+            // iPhone's Settings offers over the same key.
+            HStack(spacing: 8) {
+                Text("Stock avatar")
+                    .font(.callout)
+                Picker("", selection: stockAvatarSelection) {
+                    Text("Boy").tag("boy")
+                    Text("Girl").tag("girl")
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 220)
+                .help("The bundled pair that stands in when no custom photo is set — the same pair, and the same choice, as the iPhone's Settings.")
+            }
+            Text("The bundled pair that stands in when no custom photo is set — a custom photo overrides the pick until you reset it.")
+                .font(.caption)
+                .foregroundColor(.secondary)
         }
+    }
+
+    /// The stock avatar picker's binding (v0.20.0): the
+    /// model's app-side choice, written through its setter
+    /// (which persists it) the moment it changes.
+    private var stockAvatarSelection: Binding<String> {
+        Binding(
+            get: { model.stockAvatarChoice },
+            set: { model.setStockAvatar($0) }
+        )
     }
 
     private var nameEditor: some View {

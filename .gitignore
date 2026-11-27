@@ -32,6 +32,7 @@ drill/
 apps/companion/iOS/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png
 apps/ios/App/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png
 apps/ios/App/Assets.xcassets/Avatar.imageset/Avatar.png
+apps/ios/App/Assets.xcassets/AvatarGirl.imageset/AvatarGirl.png
 apps/ios/App/AppIcon60x60@2x.png
 apps/ios/App/AppIcon60x60@3x.png
 apps/ios/App/AppIcon76x76@2x.png

@@ -345,6 +345,15 @@ final class DesktopModel: ObservableObject {
     /// nil means no custom photo — the bundled default avatar
     /// (v0.11.1, see defaultAvatarImage) stands in.
     @Published var avatarImage: NSImage?
+    /// v0.20.0 (Identity): which of the bundled stock
+    /// avatars stands in when no custom photo is set — the
+    /// hyper-realistic pair Glenn approved: "boy" (the
+    /// default) or "girl". App-side only, a UserDefaults
+    /// string (gus.avatar.stock — the iPhone keeps the same
+    /// key for the same pair), never sent to the control
+    /// plane. The Identity tab's picker writes it through
+    /// setStockAvatar below.
+    @Published var stockAvatarChoice = "boy"
     /// v0.11.0: the operator's chosen BUILT-IN speech voice —
     /// an AVSpeechSynthesisVoice identifier from the voices
     /// installed on this Mac, or "" for the Mac's default
@@ -2021,20 +2030,34 @@ final class DesktopModel: ObservableObject {
 
     var hasCustomAvatar: Bool { avatarImage != nil }
 
-    /// The bundled default avatar (v0.14.0): the lifelike GUS
-    /// portrait — the R2 realism track's candidate, replacing
-    /// the v0.11.1 cartoon character the operator called
-    /// generic. Shipped in the app bundle's Resources by
-    /// build-dmg.sh (Resources/DefaultAvatar.png.b64 in the
-    /// repo — the push path is text-only, so it rides as base64
-    /// like the icon master). Loaded once; nil only if the
-    /// bundle is missing the file, in which case the fallback
-    /// character below stands in.
-    static let defaultAvatarImage: NSImage? = {
-        guard let url = Bundle.main.url(forResource: "DefaultAvatar", withExtension: "png"),
+    /// The bundled stock avatars (v0.20.0): the hyper-realistic
+    /// pair Glenn approved — the boy (DefaultAvatar.png, the
+    /// default; this slot held the earlier stock portraits,
+    /// most recently the R2 realism track's candidate) and
+    /// the girl (DefaultAvatarGirl.png). Shipped in the app
+    /// bundle's Resources by build-dmg.sh (the .b64 files in
+    /// Resources/ — the push path is text-only, so they ride
+    /// as base64 like the icon master). Loaded once; nil only
+    /// if the bundle is missing the file, in which case the
+    /// fallback character below stands in.
+    static let defaultAvatarImage: NSImage? = bundledAvatar(named: "DefaultAvatar")
+    static let girlAvatarImage: NSImage? = bundledAvatar(named: "DefaultAvatarGirl")
+
+    private static func bundledAvatar(named name: String) -> NSImage? {
+        guard let url = Bundle.main.url(forResource: name, withExtension: "png"),
               let image = NSImage(contentsOf: url) else { return nil }
         return image
-    }()
+    }
+
+    /// The stock avatar the operator picked (stockAvatarChoice):
+    /// the girl when she is chosen and bundled, the boy
+    /// otherwise — a missing girl file degrades to the boy,
+    /// never to a blank.
+    var stockAvatarImage: NSImage? {
+        stockAvatarChoice == "girl"
+            ? (Self.girlAvatarImage ?? Self.defaultAvatarImage)
+            : Self.defaultAvatarImage
+    }
 
     /// The fallback avatar (v0.14.0): Avatar A, the v0.11.1
     /// character (the Commons resident poll's pick, 4–0,
@@ -2047,11 +2070,11 @@ final class DesktopModel: ObservableObject {
     }()
 
     /// The avatar the header actually shows: the operator's
-    /// custom photo when one is set, else the bundled default
-    /// portrait, else the fallback character, else — a bundle
+    /// custom photo when one is set, else the picked stock
+    /// avatar, else the fallback character, else — a bundle
     /// missing both resources — the app icon.
     var displayAvatarImage: NSImage {
-        avatarImage ?? Self.defaultAvatarImage ?? Self.fallbackAvatarImage ?? NSApplication.shared.applicationIconImage
+        avatarImage ?? stockAvatarImage ?? Self.fallbackAvatarImage ?? NSApplication.shared.applicationIconImage
     }
 
     private func loadIdentity() {
@@ -2061,6 +2084,9 @@ final class DesktopModel: ObservableObject {
         }
         if let savedVoice = UserDefaults.standard.string(forKey: Self.localTtsVoiceDefaultsKey) {
             localTtsVoiceId = savedVoice
+        }
+        if let savedStock = UserDefaults.standard.string(forKey: Self.stockAvatarDefaultsKey) {
+            stockAvatarChoice = savedStock == "girl" ? "girl" : "boy"
         }
         if let data = try? Data(contentsOf: URL(fileURLWithPath: avatarFilePath)),
            let image = NSImage(data: data) {
@@ -2126,6 +2152,25 @@ final class DesktopModel: ObservableObject {
         displayName = trimmed.isEmpty ? "GUS" : trimmed
         UserDefaults.standard.set(displayName, forKey: "gus.displayName")
         notice = "Name saved — \(displayName) it is."
+    }
+
+    /// The UserDefaults key for the stock avatar pick
+    /// (v0.20.0) — the iPhone keeps the same key for the
+    /// same pair, so the choice reads the same on both.
+    static let stockAvatarDefaultsKey = "gus.avatar.stock"
+
+    /// Pick a stock avatar (Identity tab). Only "girl"
+    /// names the girl; anything else is the boy, the
+    /// default. Stored in this app's preferences only —
+    /// see stockAvatarChoice. A custom photo, when one is
+    /// set, still stands in front of either stock face
+    /// until it is reset.
+    func setStockAvatar(_ choice: String) {
+        stockAvatarChoice = choice == "girl" ? "girl" : "boy"
+        UserDefaults.standard.set(stockAvatarChoice, forKey: Self.stockAvatarDefaultsKey)
+        notice = stockAvatarChoice == "girl"
+            ? "Stock avatar: the girl — she stands in wherever no custom photo is set."
+            : "Stock avatar: the boy — he stands in wherever no custom photo is set."
     }
 
     /// Pick a new avatar photo (Identity tab): the system

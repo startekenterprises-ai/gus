@@ -138,6 +138,11 @@ iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns" || fail "i
 # (DesktopModel.defaultAvatarImage / fallbackAvatarImage).
 base64 -d < "$SCRIPT_DIR/Resources/DefaultAvatar.png.b64" > "$APP/Contents/Resources/DefaultAvatar.png" || fail "decoding the bundled default avatar failed"
 base64 -d < "$SCRIPT_DIR/Resources/DefaultAvatarA.png.b64" > "$APP/Contents/Resources/DefaultAvatarA.png" || fail "decoding the bundled fallback avatar failed"
+# v0.20.0: the second stock avatar (the girl of the new pair;
+# DefaultAvatar.png above is the boy, the default) rides the
+# same way — the Identity tab picks between them
+# (DesktopModel.stockAvatarChoice, gus.avatar.stock).
+base64 -d < "$SCRIPT_DIR/Resources/DefaultAvatarGirl.png.b64" > "$APP/Contents/Resources/DefaultAvatarGirl.png" || fail "decoding the bundled second stock avatar failed"
 
 PAYLOAD="$APP/Contents/Resources/gus"
 cp "$REPO_DIR/package.json" "$PAYLOAD/package.json"

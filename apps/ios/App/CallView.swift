@@ -218,10 +218,18 @@ struct CallView: View {
 
 /// The face on the call screen (v0.15.5, "the face" —
 /// Glenn approved the direction 2026-11-19 and pulled it
-/// forward 2026-11-20): his Nova avatar — the same settled
-/// art as the app icon, decoded from its own .b64 master by
-/// build-ipa.sh into Avatar.imageset — cropped to the head,
-/// with a mouth that moves with Kokoro's voice.
+/// forward 2026-11-20): the stock avatar, decoded from its
+/// own .b64 master by build-ipa.sh into Avatar.imageset —
+/// cropped to the head, with a mouth that moves with
+/// Kokoro's voice. v0.20.0: the art is the hyper-realistic
+/// pair Glenn approved — the boy in Avatar (the default),
+/// the girl in AvatarGirl — picked in Settings over
+/// gus.avatar.stock, the same key the Mac keeps; the plush
+/// portrait that filled this spot through v0.19.0 stays in
+/// git history. Each face carries its own crop and mouth
+/// calibration below, measured from its pixels the way the
+/// plush's was — and, like the plush's, eyeballed until
+/// Glenn sees it on his phone and says it is right.
 ///
 /// The mouth is an amplitude lip-flap, deliberately NOT
 /// lip-sync: KokoroPlayer publishes the RMS of the samples
@@ -244,31 +252,35 @@ private struct AvatarFaceView: View {
     @State private var breathe = false
     @State private var pulse = false
 
+    /// v0.20.0: the stock avatar pick (Settings → Avatar),
+    /// the same key the Mac keeps — "girl" shows AvatarGirl,
+    /// anything else is the boy in Avatar, the default.
+    @AppStorage("gus.avatar.stock") private var stockAvatar = "boy"
+    private var isGirl: Bool { stockAvatar == "girl" }
+    private var imageName: String { isGirl ? "AvatarGirl" : "Avatar" }
+
     private let side: CGFloat = 120
-    // The square window on the face inside the full-body
-    // art, as fractions of the image. Re-measured from the
-    // pixels 2026-11-20 (v0.17.0): the head actually spans
-    // x 0.339–0.637 (center 0.489), top y 0.056, chin
-    // ~0.35 — the first calibration overstated the width
-    // (0.33–0.69), so the old, wider window left the face
-    // floating on a white disc inside the circle. This
-    // window is TIGHTER than the head on every side, so
-    // the plush fills the circle edge to edge (full-bleed)
-    // and no white shows. Verified against a rendered
-    // simulation of this exact crop + circular clip.
-    private let cropOriginX: CGFloat = 0.344
-    private let cropOriginY: CGFloat = 0.055
-    private let cropSide: CGFloat = 0.29
-    // The mouth's center and width inside that window:
-    // the smile's dark opening sits at (0.49, 0.277) of
-    // the full image and spans ~0.067 of it — mapped into
-    // window fractions below, and the simulation confirms
-    // the ellipse sits ON the opening, so closed reads as
-    // the smile and open reads as the mouth opening
-    // inside it.
-    private let mouthCenterX: CGFloat = 0.503
-    private let mouthCenterY: CGFloat = 0.766
-    private let mouthWidth: CGFloat = 0.23
+    // The square window on the face inside the shipped
+    // square art, as fractions of the image, per face
+    // (v0.20.0, measured from the new portraits' pixels):
+    // the boy's face spans x ~0.115–0.885, hairline y
+    // ~0.153, chin ~0.953, mouth center ~(0.50, 0.773)
+    // spanning ~0.20; the girl's face spans x ~0.315–0.685
+    // inside her hair, hairline y ~0.27, chin ~0.715,
+    // mouth center ~(0.505, 0.60) spanning ~0.13. Each
+    // window frames its face a touch tighter than the
+    // head, so the face fills the circle edge to edge
+    // (full-bleed), as the plush's window did.
+    private var cropOriginX: CGFloat { isGirl ? 0.225 : 0.14 }
+    private var cropOriginY: CGFloat { isGirl ? 0.215 : 0.193 }
+    private var cropSide: CGFloat { isGirl ? 0.55 : 0.72 }
+    // The mouth's center and width inside that window,
+    // mapped from the full-image measurements above, so
+    // the ellipse sits on the mouth: closed reads as the
+    // smile, open reads as the mouth opening inside it.
+    private var mouthCenterX: CGFloat { isGirl ? 0.509 : 0.50 }
+    private var mouthCenterY: CGFloat { isGirl ? 0.70 : 0.806 }
+    private var mouthWidth: CGFloat { isGirl ? 0.236 : 0.278 }
 
     var body: some View {
         ZStack {
@@ -301,7 +313,7 @@ private struct AvatarFaceView: View {
             let s = geo.size.width
             let rendered = s / cropSide
             ZStack(alignment: .topLeading) {
-                Image("Avatar")
+                Image(imageName)
                     .resizable()
                     .frame(width: rendered, height: rendered)
                     .offset(x: -cropOriginX * rendered, y: -cropOriginY * rendered)

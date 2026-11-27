@@ -15,6 +15,7 @@ struct SettingsView: View {
     @State private var kokoroVoice: KokoroVoice = KokoroVoice.selected
     @State private var callMode: CallMode = CallMode.preferred
     @State private var demoPitch: Bool = LocalBrain.demoPitchEnabled
+    @State private var stockAvatar: String = UserDefaults.standard.string(forKey: "gus.avatar.stock") ?? "boy"
     @State private var shieldEnabled: Bool = ShieldSettings.enabled
     @State private var shieldPosture: ShieldPosture = ShieldSettings.posture
     @State private var savedNote = false
@@ -96,6 +97,26 @@ struct SettingsView: View {
                     Text("Call voice")
                 } footer: {
                     Text("Kokoro is GUS's voice — it runs on this iPhone and prepares itself automatically when the app opens. There is no setup tap and no fallback voice behind it. Studio Voice is a future cloud opt-in — off until you configure it.")
+                }
+
+                // v0.20.0: the stock avatar pair — the face
+                // on the call screen. The pick is the same
+                // UserDefaults key the Mac's Identity tab
+                // writes (gus.avatar.stock), so the pair reads
+                // the same on both; the boy is the default.
+                Section {
+                    Picker("Stock avatar", selection: $stockAvatar) {
+                        Text("Boy").tag("boy")
+                        Text("Girl").tag("girl")
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: stockAvatar) { newValue in
+                        UserDefaults.standard.set(newValue, forKey: "gus.avatar.stock")
+                    }
+                } header: {
+                    Text("Avatar")
+                } footer: {
+                    Text("The face on the call screen — the bundled pair. The Mac keeps the same choice over the same key.")
                 }
 
                 Section {
