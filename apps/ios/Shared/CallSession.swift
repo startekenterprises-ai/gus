@@ -340,8 +340,50 @@ final class CallSession: NSObject, ObservableObject {
         return true
     }
 
+    /// Voice processing on the call engine's input (v0.18.0;
+    /// factored out in v0.29.1 so call setup and hearing
+    /// starts make the one same attempt): it can only be set
+    /// while the engine is stopped — a call's first attempt
+    /// always runs stopped, and the setting then persists
+    /// for the engine's life, so restarts during playback
+    /// simply find it already on. A failure here is not
+    /// fatal: unprocessed input still works, defended by the
+    /// echo guard and the barge-in debounce exactly as
+    /// before v0.18.0 — but it is SAID (v0.22.0): through
+    /// v0.21.0 the equivalent catch was empty, so no field
+    /// report could ever tell whether voice processing had
+    /// engaged, which playback path that left the call on,
+    /// or why the echo canceller was absent.
+    private func enableVoiceProcessingIfNeeded() {
+        guard !voiceProcessingEnabled, !audioEngine.isRunning else { return }
+        do {
+            try audioEngine.inputNode.setVoiceProcessingEnabled(true)
+            voiceProcessingEnabled = true
+        } catch {
+            VoiceFailureLog.shared.recordInfo("Voice processing couldn't be enabled (\(error.localizedDescription)) — echo cancellation off for this call.")
+        }
+    }
+
+    /// The call-start audio proof (v0.29.1): with the audio
+    /// session configured (prepareCallAudio) and voice
+    /// processing enabled, the speech engine primes its
+    /// playback graph BEFORE the first sentence can be
+    /// spoken — the shared engine is cycled once and a
+    /// breath of silence is played through the player — and
+    /// settles whether this call speaks through the shared
+    /// engine or the player's private fallback engine (see
+    /// KokoroPlayer.primeCallAudio for the two builds of
+    /// field evidence). Hearing starts after this
+    /// (startHearing), so the recognizer is never running
+    /// across the engine cycle.
+    private func primeCallAudioPath() {
+        enableVoiceProcessingIfNeeded()
+        speaker.primeCallAudio()
+    }
+
     private func connect() async {
         guard await prepareCallAudio() else { return }
+        primeCallAudioPath()
         transport = .core
         do {
             let state = try await client.voiceSessionStart()
@@ -370,6 +412,7 @@ final class CallSession: NSObject, ObservableObject {
     /// the way out named.
     private func connectLocal() async {
         guard await prepareCallAudio() else { return }
+        primeCallAudioPath()
         transport = .local
         if localBrain == nil {
             // The ACTIVE brain (v0.21.0): the person's library
@@ -445,27 +488,11 @@ final class CallSession: NSObject, ObservableObject {
         // Voice processing BEFORE the format is read (v0.18.0):
         // enabling it swaps the input to the Voice Processing
         // I/O unit, whose output format is the one the tap must
-        // use. It can only be set while the engine is stopped —
-        // a call's first startHearing always runs stopped, and
-        // the setting then persists for the engine's life, so
-        // restarts during playback simply find it already on.
-        // A failure here is not fatal: unprocessed input still
-        // works, defended by the echo guard and the barge-in
-        // debounce exactly as before v0.18.0.
-        if !voiceProcessingEnabled, !audioEngine.isRunning {
-            do {
-                try input.setVoiceProcessingEnabled(true)
-                voiceProcessingEnabled = true
-            } catch {
-                // Fall through with unprocessed input — but
-                // SAY so (v0.22.0): through v0.21.0 this catch
-                // was empty, so no field report could ever tell
-                // whether voice processing had engaged, which
-                // playback path that left the call on, or why
-                // the echo canceller was absent.
-                VoiceFailureLog.shared.recordInfo("Voice processing couldn't be enabled (\(error.localizedDescription)) — echo cancellation off for this call.")
-            }
-        }
+        // use. Call setup (primeCallAudioPath) normally made
+        // this attempt already, before the prime; this is the
+        // same one attempt for any hearing start that gets
+        // here first.
+        enableVoiceProcessingIfNeeded()
         let format = input.outputFormat(forBus: 0)
 
         if sttMode == "local" {

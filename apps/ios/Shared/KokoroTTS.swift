@@ -315,10 +315,53 @@ final class VoiceFailureLog {
 /// handler has varied across iOS versions; this class does
 /// not depend on the answer.)
 final class KokoroPlayer {
-    private let engine: AVAudioEngine
-    private let player = AVAudioPlayerNode()
-    private var attached = false
-    private var connectedFormat: AVAudioFormat?
+    // Two playback graphs (v0.29.1 — the prime that chooses
+    // between them is primeCallAudio, below). The SHARED
+    // graph is the call's engine, handed in at init:
+    // microphone and playback on one engine, so the system's
+    // voice processing can cancel GUS's own voice (v0.18.0).
+    // The FALLBACK graph is a private engine this player
+    // owns outright — the pre-0.18.0 topology, the last one
+    // heard on Glenn's phone — created only when a call's
+    // prime proves the shared graph cannot cycle its player
+    // (the field failure two builds documented: "player did
+    // not see an IO cycle" on every play(), every structural
+    // check green). Which graph is active is decided once
+    // per call, at prime time, and never changes mid-call;
+    // `engine` / `player` / `attached` / `connectedFormat`
+    // always name the ACTIVE graph's state, so the whole
+    // playback path — ensurePlayable, startPlayback, stop —
+    // runs unchanged on whichever graph the call landed on.
+    private let sharedEngine: AVAudioEngine
+    private let sharedPlayer = AVAudioPlayerNode()
+    private var fallbackEngine: AVAudioEngine?
+    private let fallbackPlayer = AVAudioPlayerNode()
+    private var fallbackActive = false
+    private var sharedAttached = false
+    private var fallbackAttached = false
+    private var sharedConnectedFormat: AVAudioFormat?
+    private var fallbackConnectedFormat: AVAudioFormat?
+
+    private var engine: AVAudioEngine {
+        fallbackActive ? (fallbackEngine ?? sharedEngine) : sharedEngine
+    }
+    private var player: AVAudioPlayerNode {
+        fallbackActive ? fallbackPlayer : sharedPlayer
+    }
+    private var attached: Bool {
+        get { fallbackActive ? fallbackAttached : sharedAttached }
+        set {
+            if fallbackActive { fallbackAttached = newValue }
+            else { sharedAttached = newValue }
+        }
+    }
+    private var connectedFormat: AVAudioFormat? {
+        get { fallbackActive ? fallbackConnectedFormat : sharedConnectedFormat }
+        set {
+            if fallbackActive { fallbackConnectedFormat = newValue }
+            else { sharedConnectedFormat = newValue }
+        }
+    }
     private let lock = NSLock()
     private var finish: (() -> Void)?
     private var playing = false
@@ -340,8 +383,21 @@ final class KokoroPlayer {
     /// engine, so sound played through a private engine is
     /// uncancellable by construction. Constructions with no
     /// call behind them keep a private engine, as before.
+    /// (v0.29.1: the private FALLBACK engine above is the
+    /// one deliberate exception — a call lands on it only
+    /// when the shared graph's prime fails, accepting
+    /// uncancellable playback over no playback; see
+    /// primeCallAudio.)
     init(engine: AVAudioEngine = AVAudioEngine()) {
-        self.engine = engine
+        self.sharedEngine = engine
+    }
+
+    deinit {
+        // The fallback engine is this player's own property:
+        // stop it with the player. The shared engine belongs
+        // to the call session, which stops it at endCall —
+        // never here.
+        if let fallbackEngine, fallbackEngine.isRunning { fallbackEngine.stop() }
     }
 
     /// Playback amplitude for the call screen's avatar
@@ -384,6 +440,163 @@ final class KokoroPlayer {
         lock.lock()
         defer { lock.unlock() }
         return playing
+    }
+
+    /// The call-start proof (v0.29.1) — the restructure two
+    /// builds of field evidence forced. On v0.27.3 and again
+    /// on v0.28.1, Glenn's Settings → About log showed EVERY
+    /// play() on the shared voice-processing engine raising
+    /// "player did not see an IO cycle" — persistently,
+    /// across v0.28.1's settling retries (120/300/600 ms), a
+    /// full reconnect, and live-format re-derivation, spread
+    /// over ~16 s of attempts, with every structural check
+    /// green (attached, connected per the engine's own
+    /// connection points, mixer → output connected, engine
+    /// running, formats converted 24 kHz mono → 44.1 kHz
+    /// stereo). Timing theories are falsified: on that
+    /// graph the render cycle simply never reaches this
+    /// player, and patching the leg a third time is not the
+    /// move. So a call no longer discovers the failure
+    /// sentence by sentence — it proves the graph once, up
+    /// front, and falls back to a topology that has already
+    /// made sound on this phone.
+    ///
+    /// The sequence, at call setup (audio session
+    /// configured, voice processing enabled, nothing playing
+    /// yet, recognizer not yet (re)started):
+    ///   (a) cycle the shared engine once — stop → prepare
+    ///       → start. This is call setup, not the mid-call
+    ///       engine stop v0.22.0 banned: no sentence exists
+    ///       yet, and hearing starts after the prime.
+    ///   (b) connect the player through the ordinary
+    ///       ensurePlayable proof and play a quarter second
+    ///       of SILENCE through the containment shim.
+    ///       Silence is the payload: the prime is not a
+    ///       sentence, so it deliberately bypasses
+    ///       playSamples' all-zero-samples failure (code 8)
+    ///       by never going through playSamples.
+    ///
+    /// The outcome decides the call's playback graph, once,
+    /// for the whole call — no mid-call flapping:
+    ///   prime plays → the call rides the shared graph with
+    ///     exactly the v0.28.1 behavior, and the log says
+    ///     "Call audio primed on the shared engine".
+    ///   prime raises — or the graph cannot even be proven —
+    ///     → the call's playback moves to the private
+    ///     fallback engine, and the log says so with the
+    ///     prime's error verbatim. The shared engine keeps
+    ///     the microphone and the recognizer untouched;
+    ///     only playback moves, and the shared audio
+    ///     session's speaker routing covers both engines.
+    ///     Echo on this path rests on the call's existing
+    ///     guards (CallSession's echo word-overlap check and
+    ///     barge-in sustained-partial debounce): the system
+    ///     canceller has no reference for a private engine's
+    ///     output, by construction.
+    ///
+    /// Called once per call, before the first sentence, and
+    /// serialized under playLock like every graph sequence
+    /// here. A player normally lives for exactly one call
+    /// (the session resolves a fresh speech engine per
+    /// call); a stale fallback from an earlier prime on the
+    /// same player is torn down first regardless, so the
+    /// decision is always this call's own.
+    func primeCallAudio() {
+        playLock.lock()
+        defer { playLock.unlock() }
+        // A previous prime's fallback (defensive — see the
+        // note above): stop and drop its engine, reset its
+        // graph state, and decide fresh on the shared graph.
+        if let stale = fallbackEngine, stale.isRunning { stale.stop() }
+        fallbackEngine = nil
+        fallbackActive = false
+        fallbackAttached = false
+        fallbackConnectedFormat = nil
+
+        let voiceProcessing = sharedEngine.inputNode.isVoiceProcessingEnabled
+        // The live play format, derived exactly as
+        // playSamples derives it for a sentence: the graph's
+        // own output format on a voice-processing engine,
+        // Kokoro's native 24 kHz mono otherwise.
+        guard let nativeFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: 24000, channels: 1, interleaved: false)
+        else {
+            // Cannot even name the format a sentence would
+            // play in (a platform constant — not expected to
+            // be reachable): the shared graph is unprovable,
+            // so the call falls back rather than discovering
+            // it sentence by sentence.
+            activateFallback()
+            onDiagnostic?("Call audio: private playback engine (shared-graph prime failed: the native play format couldn't be built)")
+            return
+        }
+        var playFormat = nativeFormat
+        if voiceProcessing {
+            let graphFormat = sharedEngine.mainMixerNode.outputFormat(forBus: 0)
+            if graphFormat.sampleRate > 0 { playFormat = graphFormat }
+        }
+
+        // (a) Cycle the shared engine once: stop → prepare
+        // → start (the start itself happens inside
+        // ensurePlayable's proof, in its v0.28.1
+        // start-before-connect order — a start failure
+        // surfaces there as the prime's failure).
+        if sharedEngine.isRunning { sharedEngine.stop() }
+        sharedEngine.prepare()
+
+        // (b) Prove the graph, connect the player, and play
+        // the silence through the shim. The accessors name
+        // the SHARED graph throughout: the fallback is not
+        // active unless and until this prime fails.
+        var primeError: String?
+        do {
+            try ensurePlayable(playFormat: playFormat, voiceProcessing: voiceProcessing, sourceFormat: playFormat)
+            if let silence = Self.silentBuffer(format: playFormat) {
+                sharedPlayer.scheduleBuffer(silence, completionHandler: nil)
+                primeError = GUSAudioPlayerPlayCatching(sharedPlayer)
+                if primeError != nil { sharedPlayer.reset() }
+            } else {
+                primeError = "the prime's silent buffer couldn't be built"
+            }
+        } catch {
+            primeError = error.localizedDescription
+        }
+
+        if let primeError {
+            activateFallback()
+            onDiagnostic?("Call audio: private playback engine (shared-graph prime failed: \(primeError))")
+        } else {
+            onDiagnostic?("Call audio primed on the shared engine")
+        }
+    }
+
+    /// Engage the private playback graph for this call
+    /// (v0.29.1): create its engine on first use and flip the
+    /// active-graph accessors to it. Called under playLock
+    /// from primeCallAudio only — the decision is made once,
+    /// at call setup, and never revisited mid-call. The
+    /// fallback graph's own proof happens lazily, inside the
+    /// first sentence's ensurePlayable, exactly as the
+    /// pre-0.18.0 private-engine path always ran; its play()
+    /// calls go through the same containment shim, and the
+    /// same in-call failure contract applies there.
+    private func activateFallback() {
+        if fallbackEngine == nil { fallbackEngine = AVAudioEngine() }
+        fallbackActive = true
+    }
+
+    /// A quarter second of digital silence at a format
+    /// (v0.29.1): the prime's payload. An AVAudioPCMBuffer's
+    /// memory is zero-initialized, so a buffer with its
+    /// frame length set and nothing written IS silence in
+    /// any PCM format — which is the entire point here (see
+    /// primeCallAudio on why this never goes through
+    /// playSamples' all-zero-samples check).
+    private static func silentBuffer(format: AVAudioFormat, seconds: Double = 0.25) -> AVAudioPCMBuffer? {
+        let frames = AVAudioFrameCount(max(1.0, (format.sampleRate * seconds).rounded()))
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else { return nil }
+        buffer.frameLength = frames
+        return buffer
     }
 
     func playSamples(_ samples: [Float], sampleRate: Double, onFinished: @escaping () -> Void) throws {

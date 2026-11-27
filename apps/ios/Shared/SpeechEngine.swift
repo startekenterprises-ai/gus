@@ -91,6 +91,15 @@ protocol SpeechEngine: AnyObject {
     /// never prepared — the session scans first, exactly as
     /// it always has.
     func prepare(_ text: String)
+    /// Prove the call's playback graph before the first
+    /// sentence, and settle which graph this call speaks
+    /// through (v0.29.1 — see KokoroPlayer.primeCallAudio
+    /// for the field evidence): the session calls this once
+    /// at call setup, after the audio session is configured
+    /// and voice processing is enabled, before hearing
+    /// starts. An engine with no playback graph of its own
+    /// to prove (Studio) does nothing.
+    func primeCallAudio()
     /// Speak one sentence; onFinished fires exactly once —
     /// when the sentence ends OR is cut by stopSpeaking().
     func speak(_ text: String, onFinished: @escaping () -> Void)
@@ -165,6 +174,16 @@ final class KokoroSpeechEngine: SpeechEngine {
     /// is no other voice to hand it to.
     var isAvailable: Bool { KokoroRuntime.shared.isReady }
     var isSpeaking: Bool { player.isPlaying || synthTask != nil }
+
+    /// The call-start audio proof (v0.29.1): the player's
+    /// prime settles — once, for the whole call — whether
+    /// speech rides the call's shared voice-processing
+    /// engine or the player's private fallback engine. The
+    /// outcome lands in the voice log either way (the
+    /// player's onDiagnostic wiring above).
+    func primeCallAudio() {
+        player.primeCallAudio()
+    }
 
     /// Start synthesizing `text` into the ahead lineup (see
     /// the protocol note). Each call adds one entry — the
@@ -315,6 +334,9 @@ final class StudioVoiceEngine: SpeechEngine {
     /// starts and there is nothing to prepare ahead.
     var onPlaybackStarted: (() -> Void)?
     func prepare(_ text: String) {}
+    /// Nothing plays in this build, so there is no playback
+    /// graph to prime.
+    func primeCallAudio() {}
     func speak(_ text: String, onFinished: @escaping () -> Void) { onFinished() }
     func stopSpeaking() {}
 }
