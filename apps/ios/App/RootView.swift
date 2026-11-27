@@ -10,6 +10,7 @@ import SwiftUI
 /// install still meets the gate.
 struct RootView: View {
     @StateObject private var session = SessionModel()
+    @State private var showBrainSetup = false
 
     var body: some View {
         Group {
@@ -34,7 +35,21 @@ struct RootView: View {
                 // moment the signed-in shell opens, on the
                 // offline gate too, so the voice is ready
                 // before the first call. warmUp() is idempotent.
-                .onAppear { KokoroRuntime.shared.warmUp() }
+                .onAppear {
+                    KokoroRuntime.shared.warmUp()
+                    // First-launch brain setup (v0.21.0): a
+                    // phone with NO brain on it gets the
+                    // friendly download prompt the moment the
+                    // shell opens — nobody should have to hunt
+                    // Settings for it (Glenn, 2026-11-27). A
+                    // phone with any brain never sees it.
+                    if !ActiveBrain.anyPresent {
+                        showBrainSetup = true
+                    }
+                }
+                .sheet(isPresented: $showBrainSetup) {
+                    BrainSetupSheet()
+                }
             }
         }
         .task {

@@ -120,12 +120,14 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    brainRow
+                    ForEach(GUSModelManifest.downloads, id: \.id) { entry in
+                        BrainRowView(entry: entry)
+                    }
                     kokoroRow
                 } header: {
                     Text("On-device models")
                 } footer: {
-                    Text("Downloaded once, verified against the model manifest before use, and stored on this iPhone. Nothing about a call leaves the phone in on-device mode. Deleting the brain turns on-device calls off (Core mode still works) until it is downloaded again.")
+                    Text("Brains are downloaded once, verified against the model manifest before use, and stored on this iPhone. You can keep more than one and switch freely — switching never deletes anything, and the switch takes effect the next time the app starts. Nothing about a call leaves the phone in on-device mode. Deleting every brain turns on-device calls off (Core mode still works) and brings the setup prompt back at the next launch.")
                 }
 
                 Section {
@@ -174,46 +176,6 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
         }
-    }
-
-    /// The brain row: Qwen3-4B-Instruct-2507 (Q4_K_M), the
-    /// manifest's one app-downloaded file — state, progress,
-    /// and the honest controls for each state.
-    private var brainRow: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Brain — Qwen3 4B (on-device)")
-                .font(.callout)
-            Text("The call's brain in on-device mode. \(ByteCountFormatter.string(fromByteCount: GUSModelManifest.brain.bytes, countStyle: .file)) download, integrity-checked before use.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            switch library.brainState {
-            case .notDownloaded:
-                Button("Download brain") { library.downloadBrain() }
-            case .downloading(let fraction):
-                ProgressView(value: fraction) {
-                    Text("Downloading… \(Int(fraction * 100))%")
-                        .font(.caption)
-                }
-                Button("Cancel download") { library.cancelDownload() }
-            case .verifying:
-                ProgressView() { Text("Verifying integrity…").font(.caption) }
-            case .ready:
-                Text("Ready — on this iPhone.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                HStack {
-                    Button("Verify again") { library.verifyBrain() }
-                    Button("Delete", role: .destructive) { library.deleteBrain() }
-                }
-                .font(.callout)
-            case .failed(let message):
-                Text(message)
-                    .font(.caption)
-                    .foregroundColor(.orange)
-                Button("Try again") { library.downloadBrain() }
-            }
-        }
-        .padding(.vertical, 2)
     }
 
     /// The voice row: Kokoro's assets are fetched and verified

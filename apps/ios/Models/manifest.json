@@ -1,6 +1,6 @@
 {
  "version": 1,
- "updated": "2026-11-20",
+ "updated": "2026-11-27",
  "notes": "Model delivery manifest for the GUS iOS app (v0.15.0 chunk 2, R4 M1). Weights are NEVER committed to git; the app downloads them on first launch into Application Support and verifies sha256 before use. Two delivery classes: 'downloads' are fetched and verified by the app's own ModelStore (Shared/ModelManifest.swift embeds the same entries; test/unit/ios-ondevice-models.test.ts keeps the two in sync). 'sdkManaged' assets are fetched and hash-verified by the pinned FluidAudio SDK against its own pinned manifest; they are inventoried here for the record.",
  "downloads": [
   {
@@ -16,12 +16,23 @@
   },
   {
    "id": "brain-qwen3-4b-instruct-2507-abliterated-q4km",
-   "role": "OPTIONAL alternative on-device LLM — abliterated (refusal-removed, uncensored-style) build of the same Qwen3-4B-Instruct-2507: the library's first advanced CHOICE of character (Glenn, 2026-11-20). Inert until model selection lands (next chunk): nothing downloads or loads it in v0.15.4. Pins verified against the Hugging Face API (siblings/lfs) on 2026-11-20.",
+   "role": "OPTIONAL alternative on-device LLM — abliterated (refusal-removed, uncensored-style) build of the same Qwen3-4B-Instruct-2507: the library's first advanced CHOICE of character (Glenn, 2026-11-20). Wired as a real library choice in v0.21.0 (downloadable, deletable, selectable; the library is ModelLibrary in Shared/ModelDownloader.swift). Pins verified against the Hugging Face API (siblings/lfs) on 2026-11-20.",
    "fileName": "Huihui-Qwen3-4B-Instruct-2507-abliterated.Q4_K_M.gguf",
    "url": "https://huggingface.co/mradermacher/Huihui-Qwen3-4B-Instruct-2507-abliterated-GGUF/resolve/main/Huihui-Qwen3-4B-Instruct-2507-abliterated.Q4_K_M.gguf",
    "bytes": 2497281312,
    "sha256": "b1324e2f1bd2e0610d591f54f93e38d90b187f69d1f215f4cace349eade678d7",
    "license": "Apache-2.0 (Qwen3; abliteration by huihui-ai, GGUF conversion by mradermacher)",
+   "runtime": "llama.cpp via LLM.swift 3.0.3",
+   "required": false
+  },
+  {
+   "id": "brain-qwen3-4b-instruct-2507-hauhaucs-aggressive-q4km",
+   "role": "OPTIONAL alternative on-device LLM — HauhauCS's 'Aggressive' uncensored build of the same Qwen3-4B-Instruct-2507, the least filtered of the library's three brains. Added in v0.21.0. Pins verified against the Hugging Face repo itself (tree API: the Q4_K_M file's LFS oid is its sha256, LFS size its byte count) on 2026-11-27.",
+   "fileName": "Qwen3-4B-2507-Instruct-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf",
+   "url": "https://huggingface.co/HauhauCS/Qwen3-4B-2507-Instruct-Uncensored-HauhauCS-Aggressive/resolve/main/Qwen3-4B-2507-Instruct-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf",
+   "bytes": 2497278912,
+   "sha256": "6615b7b5184931e4df9c6d0ae9cd29ca9319b73908d4423283d4cc401a12a1cd",
+   "license": "Apache-2.0 (Qwen3; uncensored build by HauhauCS)",
    "runtime": "llama.cpp via LLM.swift 3.0.3",
    "required": false
   }

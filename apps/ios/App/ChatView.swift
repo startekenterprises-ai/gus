@@ -574,8 +574,9 @@ final class ChatModel: ObservableObject {
     /// as the call's connect path.
     private func loadBrain(exchangeID: UUID) -> LocalBrain? {
         if let brain { return brain }
-        let entry = GUSModelManifest.brain
-        guard ModelStore.isPresent(entry) else {
+        // The ACTIVE brain, same resolution as the call's
+        // (v0.21.0 — ActiveBrain in ModelManifest.swift).
+        guard let entry = ActiveBrain.resolved() else {
             appendNotice(exchangeID: exchangeID,
                 text: "The on-device brain isn't downloaded yet — get it in Settings → On-device models, or switch the brain to Core in Settings.")
             return nil

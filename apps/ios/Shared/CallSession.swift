@@ -338,8 +338,12 @@ final class CallSession: NSObject, ObservableObject {
         guard await prepareCallAudio() else { return }
         transport = .local
         if localBrain == nil {
-            let entry = GUSModelManifest.brain
-            guard ModelStore.isPresent(entry) else {
+            // The ACTIVE brain (v0.21.0): the person's library
+            // pick when it's on the phone, else the standard
+            // brain, else any downloaded brain — resolution is
+            // presence-aware, so a deleted pick falls back
+            // instead of dead-ending the call.
+            guard let entry = ActiveBrain.resolved() else {
                 fail("The on-device brain isn't downloaded yet — get it in Settings → On-device models, or switch calls to Core mode in Settings.")
                 return
             }
