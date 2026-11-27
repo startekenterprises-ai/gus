@@ -6,8 +6,37 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		BB0000000000000000000013 /* GUSWatch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000009 /* GUSWatch.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		BB0000000000000000000011 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = BB0000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = BB0000000000000000000014;
+			remoteInfo = GUSWatch;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		BB0000000000000000000012 /* Embed Watch Content */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/Watch";
+			dstSubfolderSpec = 16;
+			files = (
+				BB0000000000000000000013 /* GUSWatch.app in Embed Watch Content */,
+			);
+			name = "Embed Watch Content";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		BB0000000000000000000008 /* GUS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = GUS.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		BB0000000000000000000009 /* GUSWatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = GUSWatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -21,10 +50,27 @@
 			path = Shared;
 			sourceTree = "<group>";
 		};
+		BB0000000000000000000004 /* Watch */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Watch;
+			sourceTree = "<group>";
+		};
+		BB0000000000000000000006 /* WatchShared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = WatchShared;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		BB0000000000000000000016 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BB0000000000000000000015 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -39,6 +85,8 @@
 			children = (
 				BB0000000000000000000002 /* App */,
 				BB0000000000000000000003 /* Shared */,
+				BB0000000000000000000004 /* Watch */,
+				BB0000000000000000000006 /* WatchShared */,
 				BB000000000000000000000B /* Products */,
 			);
 			sourceTree = "<group>";
@@ -47,6 +95,7 @@
 			isa = PBXGroup;
 			children = (
 				BB0000000000000000000008 /* GUS.app */,
+				BB0000000000000000000009 /* GUSWatch.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -61,14 +110,17 @@
 				BB0000000000000000000018 /* Sources */,
 				BB0000000000000000000016 /* Frameworks */,
 				BB0000000000000000000019 /* Resources */,
+				BB0000000000000000000012 /* Embed Watch Content */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				BB0000000000000000000010 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				BB0000000000000000000002 /* App */,
 				BB0000000000000000000003 /* Shared */,
+				BB0000000000000000000006 /* WatchShared */,
 			);
 			name = GUS;
 			packageProductDependencies = (
@@ -79,6 +131,27 @@
 			);
 			productName = GUS;
 			productReference = BB0000000000000000000008 /* GUS.app */;
+			productType = "com.apple.product-type.application";
+		};
+		BB0000000000000000000014 /* GUSWatch */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BB0000000000000000000022 /* Build configuration list for PBXNativeTarget "GUSWatch" */;
+			buildPhases = (
+				BB0000000000000000000017 /* Sources */,
+				BB0000000000000000000015 /* Frameworks */,
+				BB0000000000000000000020 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				BB0000000000000000000004 /* Watch */,
+				BB0000000000000000000006 /* WatchShared */,
+			);
+			name = GUSWatch;
+			productName = GUSWatch;
+			productReference = BB0000000000000000000009 /* GUSWatch.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -92,6 +165,9 @@
 				LastUpgradeCheck = 2600;
 				TargetAttributes = {
 					BB0000000000000000000005 = {
+						CreatedOnToolsVersion = 26.2;
+					};
+					BB0000000000000000000014 = {
 						CreatedOnToolsVersion = 26.2;
 					};
 				};
@@ -117,12 +193,20 @@
 			projectRoot = "";
 			targets = (
 				BB0000000000000000000005 /* GUS */,
+				BB0000000000000000000014 /* GUSWatch */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		BB0000000000000000000019 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BB0000000000000000000020 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -139,7 +223,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		BB0000000000000000000017 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		BB0000000000000000000010 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = BB0000000000000000000014 /* GUSWatch */;
+			targetProxy = BB0000000000000000000011 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		BB0000000000000000000031 /* Debug */ = {
@@ -172,7 +271,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.24.0;
+				MARKETING_VERSION = 0.25.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.startekenterprises.gus;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -193,12 +292,54 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.24.0;
+				MARKETING_VERSION = 0.25.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.startekenterprises.gus;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		BB0000000000000000000035 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = XCRAH44MU2;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = GUS;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.startekenterprises.gus;
+				MARKETING_VERSION = 0.25.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.startekenterprises.gus.watchapp;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Debug;
+		};
+		BB0000000000000000000036 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = XCRAH44MU2;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = GUS;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.startekenterprises.gus;
+				MARKETING_VERSION = 0.25.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.startekenterprises.gus.watchapp;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
 			};
 			name = Release;
 		};
@@ -263,6 +404,15 @@
 /* End XCSwiftPackageProductDependency section */
 
 /* Begin XCConfigurationList section */
+		BB0000000000000000000022 /* Build configuration list for PBXNativeTarget "GUSWatch" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BB0000000000000000000035 /* Debug */,
+				BB0000000000000000000036 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		BB0000000000000000000021 /* Build configuration list for PBXNativeTarget "GUS" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

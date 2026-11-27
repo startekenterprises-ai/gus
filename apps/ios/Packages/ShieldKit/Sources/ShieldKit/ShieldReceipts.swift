@@ -161,6 +161,20 @@ public final class ShieldReceiptLog: @unchecked Sendable {
         return receipts
     }
 
+    /// Receipts with a seq greater than `seq`, oldest first —
+    /// the incremental read (v0.25.0). Consumers that track a
+    /// watermark (the Watch highlights cache) fold only what
+    /// is new instead of re-reading the whole chain on every
+    /// refresh. In-memory only: the JSONL is parsed once per
+    /// process by loadIfNeeded, and this never touches the
+    /// file again.
+    public func receipts(afterSeq seq: Int) -> [ShieldReceipt] {
+        lock.lock()
+        defer { lock.unlock() }
+        loadIfNeeded()
+        return receipts.filter { $0.seq > seq }
+    }
+
     // MARK: - Storage (JSONL in the app sandbox)
 
     private var logFileURL: URL? {

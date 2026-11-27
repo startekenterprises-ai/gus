@@ -39,6 +39,16 @@ M3 see-what-he-did).
   M3 note on its face: the receipts view must ride the panel's
   **incremental log cache** (never re-parse; watching never
   slows the voice path).
+- **Watch view v1** (v0.25.0) — the `GUSWatch` target in
+  this same project: a read-only wrist glance (status,
+  connection, active brain, the newest caught Shield items,
+  and the snapshot's age on its face). The phone builds a
+  `WatchSnapshot` from an **incremental highlights cache**
+  (`App/ShieldHighlightsCache.swift` — a watermark fold over
+  the receipt chain, bounded, never a log re-read) and hands
+  it to the Watch via WatchConnectivity's application
+  context. The one source file both targets compile lives in
+  `WatchShared/`. Approving from the wrist is a later build.
 - **Settings tab** — core connection, voice engine choice,
   sign-out.
 

@@ -10,6 +10,8 @@ import SwiftUI
 /// install still meets the gate.
 struct RootView: View {
     @StateObject private var session = SessionModel()
+    @StateObject private var watchBuilder = WatchSnapshotBuilder()
+    @Environment(\.scenePhase) private var scenePhase
     @State private var showBrainSetup = false
 
     var body: some View {
@@ -55,6 +57,20 @@ struct RootView: View {
         .task {
             if session.state == .checking {
                 await session.refresh()
+            }
+            // Watch view v1 (v0.25.0): keep the wrist's
+            // snapshot fresh from the moment the app opens —
+            // the builder folds the Shield highlights cache
+            // incrementally and republishes on state changes,
+            // foregrounding, and a slow timer.
+            watchBuilder.start { session.state }
+        }
+        .onChange(of: session.state) { _, _ in
+            watchBuilder.refreshNow()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                watchBuilder.refreshNow()
             }
         }
     }
