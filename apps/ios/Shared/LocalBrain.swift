@@ -23,11 +23,53 @@ import LLM
 // Sustained generation warms the phone; long calls throttle.
 
 final class LocalBrain {
-    /// Voice-tuned system prompt: spoken answers, plain words,
-    /// and — because M2's self-pitch is this brain's demo job —
-    /// the adopted two-pains pitch in its pocket, in its own
-    /// words rather than recited.
-    static let systemPrompt = """
+    /// Which self-description the brain carries (v0.20.0).
+    /// The DEFAULT is the general-purpose prompt below. The
+    /// email pitch was this brain's only prompt through
+    /// v0.19.0 — M2's self-pitch was its demo job — and it
+    /// biased every ordinary conversation toward email
+    /// security. The pitch survives as the Gmail demo's
+    /// prompt: demo mode (the Settings toggle, persisted
+    /// here) selects it, and everything else gets the
+    /// general one. The choice is read when the brain loads;
+    /// the call and the chat each load the brain once and
+    /// keep it, so flipping the toggle takes effect the
+    /// next time the app starts.
+    static var demoPitchEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "gus.brain.demoPitch") }
+        set { UserDefaults.standard.set(newValue, forKey: "gus.brain.demoPitch") }
+    }
+
+    static var activePrompt: String {
+        demoPitchEnabled ? emailDemoPrompt : generalPrompt
+    }
+
+    /// The general-purpose default (v0.20.0): spoken answers,
+    /// plain words, GUS's character — a private agent on the
+    /// person's own devices, its work on a signed record —
+    /// and no product pitch in its pocket.
+    static let generalPrompt = """
+        You are GUS, a secure, open-source AI agent who lives on the \
+        person's own devices. You are speaking out loud in a live phone \
+        call, so every reply must sound like natural speech: one to three \
+        short sentences, plain everyday words, no lists, no markdown, no \
+        code. Be warm, direct, and helpful: answer what was asked, ask a \
+        short question back when something is unclear, and say plainly \
+        when you don't know something instead of inventing it. If asked \
+        what you are or what you do, say this in your own words: you are \
+        a private assistant that runs on the person's own hardware, so \
+        their words stay on their devices — and everything you do for \
+        them is written into a signed record they can check, so nothing \
+        happens behind their back, and anything that matters waits for \
+        their say-so. Keep answers short; the person can always ask \
+        for more.
+        """
+
+    /// The Gmail demo's prompt: the adopted two-pains pitch,
+    /// in its own words rather than recited. Selected only
+    /// in demo mode (see demoPitchEnabled above); through
+    /// v0.19.0 this was the brain's only prompt.
+    static let emailDemoPrompt = """
         You are GUS, a secure, open-source AI agent. You are speaking out loud \
         in a live phone call, so every reply must sound like natural speech: \
         one to three short sentences, plain everyday words, no lists, no \
@@ -48,7 +90,7 @@ final class LocalBrain {
     init?(modelURL: URL) {
         guard let bot = LLM(
             from: modelURL,
-            template: .chatML(LocalBrain.systemPrompt),
+            template: .chatML(LocalBrain.activePrompt),
             temp: 0.7,
             historyLimit: 40,
             maxTokenCount: 4096

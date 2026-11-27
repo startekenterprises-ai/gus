@@ -341,21 +341,29 @@ struct SettingsTelegramView: View {
 /// v0.9.6: each half also picks its engine — Built-in (speech in
 /// the app itself; the default, and the only choice that needs
 /// nothing running anywhere else) or Endpoint (the fields below).
+/// v0.20.0: reorganized into the iPhone's shape — one simple
+/// front door (the Enable switch, the two engine pickers, and
+/// the picked engine's voice picker, every one of them saving
+/// on the spot) with the plumbing (endpoint fields, tests,
+/// behavior switches, the form's Save button) under an
+/// Advanced disclosure. No capability moved out of reach, and
+/// the Identity tab's duplicate voice pickers came home to
+/// this pane in the same pass.
 struct SettingsVoiceView: View {
     @ObservedObject var model: SettingsModel
     /// v0.11.0: the built-in voice choice — the same
-    /// UserDefaults key DesktopModel speaks from and the
-    /// Identity tab's picker binds (gus.localTtsVoiceId), so
-    /// every door shows the one setting.
+    /// UserDefaults key DesktopModel speaks from
+    /// (gus.localTtsVoiceId). v0.20.0: this pane's picker is
+    /// the only door onto it (the Identity tab's duplicate
+    /// picker came home here).
     @AppStorage("gus.localTtsVoiceId") private var localTtsVoiceId = ""
-    /// v0.11.1: the voice list's language filter — the same
-    /// key the Identity tab binds (gus.localTtsVoiceLanguage),
-    /// so the two pickers filter identically.
+    /// v0.11.1: the voice list's language filter
+    /// (gus.localTtsVoiceLanguage), remembered across visits.
     @AppStorage("gus.localTtsVoiceLanguage") private var localVoiceLanguage = "en"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            SettingsPaneTitle(text: "Voice — Call GUS")
+            SettingsPaneTitle(text: "Voice")
             if let s = model.status {
                 SettingsRow(title: "Voice channel",
                             value: s.settings.voice.enabled
@@ -363,20 +371,24 @@ struct SettingsVoiceView: View {
                                 : "Off",
                             help: model.help("voice-call"))
             }
-            Text("Talk to GUS from the chat window's Call button — a live call, not a recording: the microphone is open only while the call is, a pause ends your turn, and the reply is spoken sentence by sentence as it's made. Your words are transcribed on your own machine — by the app's built-in speech, or by a speech service you run — then treated like a typed message — same secret-guard, caps, and receipts, and the Shield's fast scan (typed messages get the full review) unless you switch it off for voice below. If endpoint speech fails, you get the reply as text with the reason stated.")
+            Text("Talk to GUS from the chat window's Call button — a live call, not a recording. This pane is the one front door for voice, shaped like the iPhone's Settings: pick an engine and a voice and the pick saves itself. The endpoint fields, the tests, and the call-behavior switches live under Advanced at the bottom.")
                 .font(.callout)
                 .foregroundColor(.secondary)
-            Toggle("Enable voice calls", isOn: $model.voiceEnabled)
-            Toggle("Interrupt GUS when I talk over it (barge-in)", isOn: $model.voiceBargeIn)
-            Text("Barge-in cuts the spoken reply off when you start talking over it. It stops the talking only — never a running job, never an approval.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            Toggle("Shield-scan my spoken requests (Agent-Shield)", isOn: $model.voiceShieldScan)
-            Text(model.voiceShieldScan
-                 ? "On: what you say gets Agent-Shield's fast scan (deterministic patterns) before it becomes a job — safer, and quick. Typed messages always get the full review."
-                 : "Off: spoken turns become jobs WITHOUT the injection scan — faster, and meant for testing and troubleshooting. Nothing checks your spoken words before they reach the agent. Typed messages are still scanned, and caps, approvals, and receipts still apply. Every skipped turn is recorded as scan-skipped-by-operator.")
-                .font(.caption)
-                .foregroundColor(.secondary)
+            // v0.20.0: the switch saves on flip — the same
+            // write the Protection home's Voice calls toggle
+            // makes (SettingsModel.setVoiceEnabled), so the
+            // doors can never disagree about whether voice
+            // is on. Through v0.19.0 the pane's switch was a
+            // draft under the Save button while the home's
+            // flip saved at once — one setting, two save
+            // behaviors, part of the muddle Glenn named.
+            Toggle("Enable voice calls", isOn: Binding(
+                get: { model.voiceEnabled },
+                set: { model.setVoiceEnabled($0) }
+            ))
+            Divider()
+            Text("Transcription — the ears")
+                .font(.headline)
             Picker("Transcription (STT)", selection: $model.voiceSttEngine) {
                 Text("Built-in").tag("local")
                 Text("Endpoint").tag("endpoint")
@@ -388,6 +400,8 @@ struct SettingsVoiceView: View {
             // call the moment it's made; there is no unsaved
             // engine state to test against by mistake.
             .onChange(of: model.voiceSttEngine) { _ in model.saveVoiceOnEngineChange() }
+            Text("Speech — the voice GUS speaks with")
+                .font(.headline)
             Picker("Speech (TTS)", selection: $model.voiceTtsEngine) {
                 Text("Built-in").tag("local")
                 Text("Endpoint").tag("endpoint")
@@ -424,17 +438,17 @@ struct SettingsVoiceView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            Text("Built-in speech lives in the app on this Mac — nothing to install, run, or keep reachable. Endpoint speech uses the services below; if one doesn't answer when a call starts, that call uses built-in voice instead and says so — the setting itself is never changed for you.")
+            Text("Built-in speech lives in the app on this Mac — nothing to install, run, or keep reachable. Endpoint speech uses the services under Advanced below; if one doesn't answer when a call starts, that call uses built-in voice instead and says so — the setting itself is never changed for you.")
                 .font(.caption)
                 .foregroundColor(.secondary)
             if model.voiceTtsEngine == "local" {
                 // v0.11.0: the built-in voice picker — the
                 // voices installed on this Mac, enumerated
-                // live. App-side (the same UserDefaults key
-                // the Identity tab's picker binds), because
-                // voice.json's ttsVoice names an ENDPOINT
-                // voice; the built-in choice is spoken by the
-                // app itself, in calls and in the test below.
+                // live. App-side (the UserDefaults key above),
+                // because voice.json's ttsVoice names an
+                // ENDPOINT voice; the built-in choice is
+                // spoken by the app itself, in calls and in
+                // the tests.
                 // v0.11.1: a language filter above it (default
                 // English, remembered) — the unfiltered list
                 // was every language and country variant on
@@ -464,23 +478,71 @@ struct SettingsVoiceView: View {
                     .frame(maxWidth: 300)
                     Button("Test voice") { model.testLocalVoice() }
                 }
-                Text("The voices installed on this Mac for the chosen language (download more in System Settings → Accessibility → Spoken Content). Test voice speaks one sentence with the selected voice; Test mic and speaker below runs the full check — mic level, this voice, and the dictation trial.")
+                Text("The voices installed on this Mac for the chosen language (download more in System Settings → Accessibility → Spoken Content). Test voice speaks one sentence with the selected voice; Test mic and speaker under Advanced below runs the full check — mic level, this voice, and the dictation trial.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            // v0.17.5: the endpoint fields belong to the
-            // Endpoint engine only — each half's URL/model
-            // fields (and its Test connection) show only while
-            // that half's engine IS Endpoint, hidden otherwise,
-            // so the page shows only what the picked engines
-            // actually use. The Kokoro Voice picker is the one
-            // exception: voice.json's ttsVoice names the voice
-            // for BOTH Kokoro engines (endpoint and bundled —
-            // the bundled speaker test and the call itself
-            // speak with it), so it stays whenever either is
-            // picked; under Built-in speech the built-in voice
-            // picker above is the voice choice instead.
-            Group {
+            if model.voiceTtsEngine != "local" {
+                // v0.20.0: the Kokoro voice picker lives in
+                // the front door now, beside the engine pick
+                // it belongs to (through v0.19.0 it sat inside
+                // the endpoint-fields group below, which read
+                // as plumbing). v0.15.6: a picker, not the
+                // free-text field — the curated Kokoro
+                // catalog, the same eight voices the iPhone
+                // app offers (iOS 0.15.4). The selection is
+                // still voice.json's ttsVoice; a name on file
+                // outside the catalog rides along as a custom
+                // entry. It shows for BOTH Kokoro engines
+                // (endpoint and bundled — the bundled speaker
+                // test and the call itself speak with it);
+                // under Built-in speech the built-in voice
+                // picker above is the voice choice instead.
+                HStack {
+                    Text("Voice")
+                        .frame(width: 90, alignment: .leading)
+                    Picker("", selection: $model.voiceTtsVoice) {
+                        ForEach(SettingsModel.kokoroVoiceOptions(current: model.voiceTtsVoice)) { option in
+                            Text(option.label).tag(option.id)
+                        }
+                    }
+                    .frame(maxWidth: 300)
+                }
+                Text("The curated Kokoro voices — the same set the iPhone app offers. The pick takes effect on the next call; Save under Advanced writes it with the rest of the form.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Divider()
+            // v0.20.0: Advanced — the plumbing behind one
+            // clearly-marked door: the endpoint fields, the
+            // call-behavior switches, the mic and speaker
+            // test, and the Save button for the draft-edited
+            // values in this section. The Enable switch, the
+            // engine pickers, and the voice pickers above all
+            // save themselves.
+            DisclosureGroup {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("How a call runs: the microphone is open only while the call is, a pause ends your turn, and the reply is spoken sentence by sentence as it's made. Your words are transcribed on your own machine — by the app's built-in speech, or by a speech service you run — then treated like a typed message: same secret-guard, caps, and receipts, and the Shield's fast scan (typed messages get the full review) unless you switch it off below. If endpoint speech fails, you get the reply as text with the reason stated.")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                    Toggle("Interrupt GUS when I talk over it (barge-in)", isOn: $model.voiceBargeIn)
+                    Text("Barge-in cuts the spoken reply off when you start talking over it. It stops the talking only — never a running job, never an approval.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Toggle("Shield-scan my spoken requests (Agent-Shield)", isOn: $model.voiceShieldScan)
+                    Text(model.voiceShieldScan
+                         ? "On: what you say gets Agent-Shield's fast scan (deterministic patterns) before it becomes a job — safer, and quick. Typed messages always get the full review."
+                         : "Off: spoken turns become jobs WITHOUT the injection scan — faster, and meant for testing and troubleshooting. Nothing checks your spoken words before they reach the agent. Typed messages are still scanned, and caps, approvals, and receipts still apply. Every skipped turn is recorded as scan-skipped-by-operator.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    // v0.17.5: the endpoint fields belong to
+                    // the Endpoint engine only — each half's
+                    // URL/model fields (and its Test
+                    // connection) show only while that half's
+                    // engine IS Endpoint, hidden otherwise, so
+                    // the section shows only what the picked
+                    // engines actually use.
+                    Group {
                 if model.voiceSttEngine == "endpoint" {
                     Text("Hearing — transcription (STT)")
                         .font(.headline)
@@ -526,29 +588,6 @@ struct SettingsVoiceView: View {
                             .textFieldStyle(.roundedBorder)
                             .frame(maxWidth: 240)
                     }
-                }
-                if model.voiceTtsEngine != "local" {
-                    HStack {
-                        Text("Voice")
-                            .frame(width: 90, alignment: .leading)
-                        // v0.15.6: a picker, not the free-text
-                        // field — the curated Kokoro catalog, the
-                        // same eight voices the iPhone app offers
-                        // (iOS 0.15.4). The selection is still
-                        // voice.json's ttsVoice, saved by the same
-                        // saveVoice() as before; a name on file
-                        // outside the catalog rides along as a
-                        // custom entry.
-                        Picker("", selection: $model.voiceTtsVoice) {
-                            ForEach(SettingsModel.kokoroVoiceOptions(current: model.voiceTtsVoice)) { option in
-                                Text(option.label).tag(option.id)
-                            }
-                        }
-                        .frame(maxWidth: 300)
-                    }
-                    Text("The curated Kokoro voices — the same set the iPhone app offers. The pick takes effect on the next call.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
                 }
                 if model.voiceTtsEngine == "endpoint" {
                     HStack {
@@ -605,16 +644,24 @@ struct SettingsVoiceView: View {
                 model.saveVoice()
             }
             .buttonStyle(.borderedProminent)
+            Text("The Enable switch, the engine picks, and the voice picks above save themselves; this button saves the endpoint fields and the switches in this Advanced section.")
+                .font(.caption)
+                .foregroundColor(.secondary)
             Text("Approvals by voice are narrow on purpose: a parked job is read back to you, and only an exact \"confirm\" or \"yes, do it\" runs it — a plain \"yes\" runs nothing. \"Stop\" or \"GUS stop\" trips the same kill switch as typing /stop.")
                 .font(.caption)
                 .foregroundColor(.secondary)
+                }
+            } label: {
+                Text("Advanced — endpoints, tests & call behavior")
+                    .font(.headline)
+            }
         }
     }
 
     /// The language filter's binding (v0.11.1): the stored
     /// choice when voices exist for it, else English when
-    /// present, else the first language on offer — the same
-    /// resolution the Identity tab's filter applies.
+    /// present, else the first language on offer — the
+    /// selector never points at a language with no voices.
     private var voiceLanguageSelection: Binding<String> {
         Binding(
             get: {

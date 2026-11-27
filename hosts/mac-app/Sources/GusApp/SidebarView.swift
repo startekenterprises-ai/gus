@@ -14,12 +14,13 @@ import SwiftUI
 ///               settlement receipt in the Jobs view).
 ///   Identity  — who this GUS is: the customizable avatar and
 ///               name, live status, the Memory summary, and
-///               the voice picker.
+///               the voice summary.
 ///
 /// v0.11.0: the avatar + name live in a FIXED HEADER above the
 /// tabs (the Muse app's arrangement), so who this GUS is
 /// stays visible on every tab; the Identity tab keeps the
-/// editors (photo, name, voice) that change them.
+/// editors (photo, name) that change them — voice is edited
+/// in Settings → Voice (v0.20.0).
 ///
 /// Nothing here is a second source of truth: every tab renders
 /// the model's polled state, and the rail's Approvals section
@@ -312,30 +313,26 @@ struct ApprovalsTabView: View {
 /// to shape. The avatar and display name themselves live in
 /// the sidebar's fixed header now (v0.11.0 — visible on every
 /// tab); this tab carries the EDITORS: the photo buttons, the
-/// name field, live status, the voice pickers, and the Memory
+/// name field, live status, the voice summary, and the Memory
 /// summary (the v0.10 context pack's status, read from the
 /// panel — files present, pending candidates, quarantines).
 /// The customizations persist on this Mac (the name in the
 /// app's preferences, the photo as a PNG in the app's state
 /// dir — see DesktopModel's identity section).
 ///
-/// The voice pickers: the endpoint engine's picker writes
-/// through the panel's own voice settings — the same file
-/// Settings → Voice edits — and offers the Kokoro list. The
-/// built-in engine's picker (v0.11.0) lists the voices
-/// installed on this Mac and is app-side (see
-/// DesktopModel.localTtsVoiceId): the built-in synthesizer
-/// speaks with the chosen voice, in calls and tests alike.
+/// The voice block: through v0.19.0 this tab carried its own
+/// pickers for the spoken voice (the Kokoro list for the
+/// endpoint engine, the installed-voices list for built-in) —
+/// a second door onto the same settings Settings → Voice
+/// edits, and part of the scatter Glenn called messy.
+/// v0.20.0: the pickers came home to Settings → Voice, the
+/// one front door (as on the iPhone); this tab shows the
+/// current spoken voice in one line and links there.
 struct IdentityTabView: View {
     @ObservedObject var model: DesktopModel
     @State private var nameDraft = ""
     /// v0.14.0: the "Make me an avatar" sheet's visibility.
     @State private var makeAvatarPresented = false
-    /// v0.11.1: the built-in voice picker's language filter —
-    /// the same UserDefaults key Settings → Voice binds, so
-    /// the two pickers filter identically.
-    @AppStorage("gus.localTtsVoiceLanguage") private var localVoiceLanguage = "en"
-
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
@@ -417,68 +414,31 @@ struct IdentityTabView: View {
 
     // MARK: Voice
 
+    /// v0.20.0: a summary and a door, not a second set of
+    /// pickers — the engine and the voice are chosen in
+    /// Settings → Voice, the one front door, as on the
+    /// iPhone. What the tab shows is the state on file: the
+    /// spoken voice in one line.
     private var voiceBlock: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Voice")
                 .font(.headline)
             if let v = model.voiceSettings {
-                if (v.ttsEngine ?? "local") == "endpoint" {
-                    Picker("Spoken voice", selection: voiceSelection) {
-                        ForEach(voiceOptions(current: v.ttsVoice), id: \.self) { name in
-                            Text(name).tag(name)
-                        }
-                    }
-                    .help("The voice GUS speaks with on calls — a Kokoro voice on your speech endpoint. Saved to the same voice settings Settings → Voice edits, and takes effect on the next call.")
-                    Text("Kokoro voices on your speech endpoint (\(v.ttsModel.isEmpty ? "kokoro" : v.ttsModel)). The same setting Settings → Voice edits — one file, two doors.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                } else {
-                    // v0.11.0: the built-in engine HAS a picker
-                    // now — the voices installed on this Mac,
-                    // enumerated live, with the Mac's default as
-                    // the first entry. The choice is app-side
-                    // (DesktopModel.localTtsVoiceId) and the
-                    // built-in synthesizer actually speaks with
-                    // it; through v0.10.1 this spot honestly
-                    // offered nothing, because the setting
-                    // wasn't wired to anything audible.
-                    // v0.11.1: a language filter above the
-                    // picker (default English, remembered) —
-                    // the unfiltered list was every language and
-                    // country variant on the Mac, a junk drawer;
-                    // within a language the premium/enhanced
-                    // voices sort first and say so.
-                    Picker("Voice language", selection: voiceLanguageSelection) {
-                        ForEach(DesktopModel.speechVoiceLanguages, id: \.self) { code in
-                            Text(DesktopModel.languageDisplayName(code)).tag(code)
-                        }
-                    }
-                    .help("Filter the built-in voice list to one language — the Mac's voices for every other language stay installed, just out of this list. The same filter as Settings → Voice.")
-                    Picker("Built-in voice", selection: localVoiceSelection) {
-                        Text("Mac default voice").tag("")
-                        ForEach(DesktopModel.pickerVoices(forLanguage: voiceLanguageSelection.wrappedValue, selectedId: model.localTtsVoiceId), id: \.identifier) { voice in
-                            Text(localVoiceLabel(voice)).tag(voice.identifier)
-                        }
-                    }
-                    .help("The voice built-in speech uses — one of the voices installed on this Mac (download more in System Settings → Accessibility → Spoken Content). Premium and Enhanced voices sort first. Takes effect on the next spoken sentence.")
-                    HStack(spacing: 8) {
-                        Button("Test voice") { model.testLocalVoice() }
-                            .controlSize(.small)
-                            .help("Hear the selected built-in voice speak one test sentence — the same synthesizer a call uses.")
-                        Button("Open Settings → Voice") {
-                            // v0.14.0: deep-link — the section
-                            // userInfo preselects the Voice pane.
-                            NotificationCenter.default.post(
-                                name: .gusOpenSettings, object: nil,
-                                userInfo: ["section": SettingsSection.voice.rawValue])
-                        }
-                        .controlSize(.small)
-                        .help("Open Settings at the Voice pane — it chooses the speech engine (built-in, or your endpoint) and carries this same built-in voice picker.")
-                    }
-                    Text("The voices installed on this Mac. The same choice as Settings → Voice — one setting, two doors.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                Text(voiceSummary(v))
+                    .font(.callout)
+                    .foregroundColor(.secondary)
+                Button("Open Settings → Voice") {
+                    // The section userInfo preselects the
+                    // Voice pane (v0.14.0 deep link).
+                    NotificationCenter.default.post(
+                        name: .gusOpenSettings, object: nil,
+                        userInfo: ["section": SettingsSection.voice.rawValue])
                 }
+                .controlSize(.small)
+                .help("Open Settings at the Voice pane — the one place the speech engine and the spoken voice are chosen, the same as the iPhone's Settings.")
+                Text("Chosen in Settings → Voice — one front door, as on the iPhone. Through v0.19.0 this tab carried its own pickers for the same settings; they live there now.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             } else {
                 Text("Voice settings appear when the control plane responds.")
                     .font(.caption)
@@ -487,62 +447,29 @@ struct IdentityTabView: View {
         }
     }
 
-    private var voiceSelection: Binding<String> {
-        Binding(
-            get: {
-                let current = model.voiceSettings?.ttsVoice ?? ""
-                return current.isEmpty ? "af_heart" : current
-            },
-            set: { model.setTtsVoice($0) }
-        )
-    }
-
-    /// The built-in voice picker's binding: the model's
-    /// app-side choice ("" = the Mac's default voice).
-    private var localVoiceSelection: Binding<String> {
-        Binding(
-            get: { model.localTtsVoiceId },
-            set: { model.setLocalTtsVoice($0) }
-        )
-    }
-
-    /// The language filter's binding (v0.11.1): the stored
-    /// choice when voices exist for it, else English when
-    /// present, else the first language on offer — the
-    /// selector never points at a language with no voices.
-    private var voiceLanguageSelection: Binding<String> {
-        Binding(
-            get: {
-                let languages = DesktopModel.speechVoiceLanguages
-                if languages.contains(localVoiceLanguage) { return localVoiceLanguage }
-                return languages.contains("en") ? "en" : (languages.first ?? "en")
-            },
-            set: { localVoiceLanguage = $0 }
-        )
-    }
-
-    /// A voice row's label (v0.11.1): name + quality from the
-    /// shared helper; a voice riding in from outside the
-    /// filter (the saved pick, kept so the selection is never
-    /// stranded) also names its language, so its presence in
-    /// the list explains itself.
-    private func localVoiceLabel(_ voice: AVSpeechSynthesisVoice) -> String {
-        let label = DesktopModel.speechVoiceLabel(voice)
-        if DesktopModel.primaryLanguage(of: voice) != voiceLanguageSelection.wrappedValue {
-            return "\(label) (\(voice.language))"
+    /// The spoken voice in one line, from the voice settings
+    /// on file: for the Kokoro engines, voice.json's ttsVoice;
+    /// for Built-in, the app-side pick (DesktopModel's
+    /// localTtsVoiceId — the Mac's default when it's empty,
+    /// and the Mac's default again, honestly stated, when the
+    /// saved voice is no longer installed).
+    private func voiceSummary(_ v: PanelVoiceSettings) -> String {
+        switch v.ttsEngine ?? "local" {
+        case "endpoint":
+            let voice = v.ttsVoice.isEmpty ? "af_heart" : v.ttsVoice
+            return "Spoken voice: \(voice) — Kokoro on your speech endpoint."
+        case "bundled":
+            let voice = v.ttsVoice.isEmpty ? "af_heart" : v.ttsVoice
+            return "Spoken voice: \(voice) — built-in Kokoro on this Mac."
+        default:
+            if model.localTtsVoiceId.isEmpty {
+                return "Spoken voice: the Mac's default built-in voice."
+            }
+            if let voice = AVSpeechSynthesisVoice(identifier: model.localTtsVoiceId) {
+                return "Spoken voice: \(DesktopModel.speechVoiceLabel(voice)) — built-in."
+            }
+            return "Spoken voice: built-in — the saved voice isn't installed, so the Mac's default speaks."
         }
-        return label
-    }
-
-    /// The Kokoro list, with the voice on file kept at the
-    /// top when it isn't a standard name (a hand-set voice in
-    /// Settings must not vanish from its own picker).
-    private func voiceOptions(current: String) -> [String] {
-        var options = DesktopModel.kokoroVoices
-        if !current.isEmpty, !options.contains(current) {
-            options.insert(current, at: 0)
-        }
-        return options
     }
 
     // MARK: Memory

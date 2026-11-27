@@ -14,6 +14,7 @@ struct SettingsView: View {
     @State private var engineKind: SpeechEngineKind = .preferred
     @State private var kokoroVoice: KokoroVoice = KokoroVoice.selected
     @State private var callMode: CallMode = CallMode.preferred
+    @State private var demoPitch: Bool = LocalBrain.demoPitchEnabled
     @State private var shieldEnabled: Bool = ShieldSettings.enabled
     @State private var shieldPosture: ShieldPosture = ShieldSettings.posture
     @State private var savedNote = false
@@ -54,6 +55,20 @@ struct SettingsView: View {
                     .onChange(of: callMode) { newValue in
                         CallMode.preferred = newValue
                     }
+                    // v0.20.0: the Gmail demo's pitch is a
+                    // mode now, not the brain's only prompt —
+                    // the general-purpose prompt is the default
+                    // (LocalBrain.activePrompt). The brain
+                    // reads the choice when it loads, and the
+                    // call and chat each load it once per app
+                    // run, so the footer says when it lands.
+                    Toggle("Gmail demo pitch", isOn: $demoPitch)
+                        .onChange(of: demoPitch) { newValue in
+                            LocalBrain.demoPitchEnabled = newValue
+                        }
+                    Text("On, the on-device brain introduces itself with the email pitch — the Gmail demo. Off, it's a general-purpose assistant. Takes effect the next time the app starts.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 } header: {
                     Text("Call mode")
                 } footer: {
