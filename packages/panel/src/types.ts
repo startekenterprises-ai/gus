@@ -325,6 +325,11 @@ export interface PanelVoiceSessionTurnData {
   /** v0.36.0: photo count for an in-call camera turn — the
    *  count crosses, never the image data. */
   photos?: number;
+  /** v0.37.0: this turn is an ambient Watch observation —
+   *  no transcript (nobody spoke); its replyText, when
+   *  present, is the comment GUS spoke about the camera's
+   *  view. Absent on every operator turn. */
+  watch?: boolean;
   kind: string;
   detail: string;
   replyText?: string;
@@ -344,6 +349,18 @@ export interface PanelVoiceSessionHearingData {
   maxRms: number;
   inUtteranceMs: number;
   utterancesCompleted: number;
+}
+
+/** v0.37.0: a live call's Watch state — whether the call's
+ *  camera view is streaming to the session, and which
+ *  cameras the app says are live ("front" | "back"). The
+ *  frames themselves never cross this contract: they are
+ *  held in the core's memory, attached to turns as image
+ *  input, and dropped when Watch turns off or the call ends.
+ *  This summary is all the state poll carries. */
+export interface PanelVoiceWatchData {
+  on: boolean;
+  cameras: string[];
 }
 
 /** v0.9.1: the live call's state — what the app polls while a
@@ -369,6 +386,9 @@ export interface PanelVoiceSessionData {
   sttMode?: string;
   ttsMode?: string;
   speechNotice?: string;
+  /** v0.37.0: the call's Watch summary (see
+   *  PanelVoiceWatchData) — never the frames. */
+  watch?: PanelVoiceWatchData;
   turns: PanelVoiceSessionTurnData[];
   lastLatency?: PanelVoiceTurnLatencyData;
   hearing?: PanelVoiceSessionHearingData;
@@ -944,6 +964,30 @@ export interface PanelBackend {
     sessionId: string,
     text: string,
     images?: PanelChatImageData[],
+  ): PanelActionResult;
+  /** v0.37.0: Watch mode — the app's per-call camera toggle
+   *  and its frames. Optional on the backend (the
+   *  voiceTestConnection pattern): a backend that doesn't
+   *  wire them gets the server's plain "not wired" answer,
+   *  never a fake success. Turning Watch off drops the
+   *  session's held frames; a frame post carries one
+   *  camera's latest frame ({mediaType, data} like a chat
+   *  photo), its perceptual hash when the app computed one,
+   *  and whether it is a turn refresh (the fresh frame
+   *  grabbed as the operator finished speaking — it updates
+   *  the session's eyes but never starts an ambient
+   *  observation of its own). */
+  voiceSessionWatch?(
+    sessionId: string,
+    on: boolean,
+    cameras?: string[],
+  ): PanelActionResult;
+  voiceSessionWatchFrame?(
+    sessionId: string,
+    camera: string,
+    image?: PanelChatImageData,
+    hash?: string,
+    turnRefresh?: boolean,
   ): PanelActionResult;
   voiceSessionState(sessionId: string): PanelVoiceSessionData;
   voiceSessionNextAudio(sessionId: string, afterSeq: number): PanelVoiceAudioSegmentData;

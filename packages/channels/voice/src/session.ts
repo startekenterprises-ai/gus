@@ -124,6 +124,27 @@
  * this service only ever sees audio the app chose to stream, and
  * only while a session the operator started is active. There is
  * no listen-outside-a-call path in this package.
+ *
+ * Watch mode (v0.37.0): the call gains eyes. While the operator
+ * has Watch on (an explicit per-call tap in the app — it never
+ * auto-starts), the app streams small still frames from the
+ * call's camera(s); this service holds the LATEST frame per
+ * camera in memory as the session's eyes and attaches them to
+ * the next turn — spoken, typed, or photo — as image input,
+ * framed by the host as a live view rather than an attachment.
+ * On the baseline cadence a frame whose perceptual hash says
+ * the view MATERIALLY changed (and only then) may queue one
+ * ambient observation turn: the fixed observation instruction
+ * through the identical pipeline, its reply spoken like any
+ * turn — unless the model answers with the nothing-to-report
+ * sentinel, which is recorded and never spoken. Frames are
+ * stream-and-discard: held in memory only, never written to
+ * disk, never in the turn records (an observation turn records
+ * that it looked, never what it saw), and dropped the moment
+ * Watch turns off or the call ends. The camera's liveness is
+ * the app's side of the contract exactly as the microphone's
+ * is: this service only ever holds frames the app chose to
+ * send, only while Watch is on in a live call.
  */
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
@@ -144,6 +165,8 @@ import {
 import {
   VoiceCallService,
   sanitizeVoiceImages,
+  MAX_VOICE_IMAGES,
+  VOICE_CONVERSATION,
   type PendingApprovalLookup,
   type VoiceAdapter,
   type VoiceCallResult,
@@ -216,8 +239,20 @@ export interface VoiceSessionTurn {
   /** v0.36.0: how many photos the operator sent with this
    *  turn (the in-call camera). The image data itself is
    *  never recorded — the count is the record, exactly as
-   *  on the chat transcript (PanelChatEntry.photos). */
+   *  on the chat transcript (PanelChatEntry.photos). Watch
+   *  mode's frames (v0.37.0) are NOT counted here: the
+   *  operator didn't send them, the call's camera is simply
+   *  on, and a turn that carried the live view says so in
+   *  its detail instead. */
   photos?: number;
+  /** v0.37.0: this turn is an ambient Watch observation —
+   *  the camera's view changed materially and GUS looked on
+   *  its own initiative. It has no transcript (nobody spoke);
+   *  its replyText, when present, is the spoken comment, and
+   *  when the model had nothing worth saying the turn
+   *  records exactly that and nothing was spoken. Absent on
+   *  every operator turn. */
+  watch?: boolean;
   /** The VoiceCallResult kind, verbatim (reply | pending |
    *  stopped | approval-resolved | awaiting-confirmation |
    *  unavailable). */
@@ -300,6 +335,13 @@ export interface VoiceSessionStateData {
    *  the operator kept having to dig through Settings to
    *  check, visible mid-call instead. */
   shieldMode?: VoiceShieldMode;
+  /** v0.37.0: the call's Watch state — whether the camera
+   *  view is streaming to this session, and which cameras
+   *  the app says are live. The frames themselves NEVER ride
+   *  the state: they are held in memory, attached to turns
+   *  as image input, and dropped when Watch turns off or the
+   *  call ends. This summary is all a poller ever sees. */
+  watch?: { on: boolean; cameras: WatchCamera[] };
   turns: VoiceSessionTurn[];
   lastLatency?: VoiceTurnLatency;
   hearing?: VoiceSessionHearingData;
@@ -386,6 +428,30 @@ interface ActiveSession {
     openMs: number;
     utterancesCompleted: number;
   };
+  /** v0.37.0: the session's eyes (Watch mode). frames holds
+   *  the LATEST frame per camera — memory only, never written
+   *  anywhere, replaced by the next frame and dropped whole
+   *  when Watch turns off or the call ends. `consumed` is the
+   *  fingerprint of the frame set the last turn (operator or
+   *  ambient) actually carried — the change baseline: a new
+   *  set is only worth an ambient look when it materially
+   *  differs from what a turn already saw. */
+  watch: {
+    on: boolean;
+    /** The camera slots the app says are live (its mode). */
+    cameras: WatchCamera[];
+    frames: Partial<Record<WatchCamera, MessageImage>>;
+    hashes: Partial<Record<WatchCamera, string>>;
+    sizes: Partial<Record<WatchCamera, number>>;
+    consumed?: WatchFrameSet;
+    /** When the last ambient observation was QUEUED — the
+     *  rate limit's clock (queueing, not completion, is what
+     *  the ceiling governs). 0 = never. */
+    lastAmbientAt: number;
+    /** When the last frame arrived — while frames keep
+     *  arriving, a watched call is not idle (see tick). */
+    lastFrameAt: number;
+  };
 }
 
 const DEFAULT_IDLE_TIMEOUT_MS = 180_000;
@@ -423,6 +489,114 @@ const DEFAULT_FILLER_DELAY_MS = 2_500;
  *  the answer. */
 const FILLER_SENTENCE_INDEX = -1;
 
+// ------------------------------------------------------------ Watch mode (v0.37.0)
+
+/** One of the call's cameras. The app runs the front camera,
+ *  the back camera, or — on devices that support multi-cam —
+ *  both at once; each live camera has its own frame slot here. */
+export type WatchCamera = "front" | "back";
+
+/** The fixed ambient-observation instruction (v0.37.0): when
+ *  the camera's view changes materially, THIS text takes the
+ *  turn — through the identical pipeline as a spoken turn
+ *  (Shield scan, caps, receipts), with the current frames
+ *  attached as the live view. Fixed text on purpose, like the
+ *  greeting and the filler: it is the product looking, not the
+ *  operator speaking, so it never lands in a turn's transcript
+ *  field — the turn is marked `watch` instead. */
+export const WATCH_OBSERVATION_TEXT =
+  "Look at the camera's current view (included with this message as image input) and comment briefly — one or two sentences — only on anything new, notable, or relevant to the conversation so far. " +
+  "If there is nothing worth remarking on, reply with exactly: Nothing new to report.";
+
+/** The nothing-worth-saying sentinel (v0.37.0): when an ambient
+ *  observation's reply IS this line (after trimming), the turn
+ *  records the look and nothing is spoken — a watching GUS that
+ *  narrates "nothing new" every few seconds is the chattiness
+ *  failure mode this feature exists to avoid. The comparison
+ *  is exact on purpose: a near-miss is a real reply and is
+ *  spoken, which fails toward conversation, never toward
+ *  silence the operator didn't ask for. */
+export const WATCH_NOTHING_TO_REPORT = "Nothing new to report.";
+
+/** Ambient observations are rate-limited (v0.37.0): at most one
+ *  is QUEUED per this interval, however fast the view changes.
+ *  The app samples on a ~12 s baseline, so in practice this
+ *  allows roughly every other frame to speak when the scene
+ *  keeps changing — SerenAI's proven 15 s comment cadence, and
+ *  a hard ceiling on a watching call's chattiness. */
+export const WATCH_AMBIENT_MIN_INTERVAL_MS = 15_000;
+
+/** Material change, perceptual (v0.37.0): the app sends a
+ *  64-bit average hash (aHash) with each frame — 8×8 luminance
+ *  cells, bit set when the cell is brighter than the frame's
+ *  average. Two hashes of the same view differ in a handful of
+ *  bits (lighting shimmer, sensor noise); a person entering,
+ *  a door opening, the camera turning to a new subject flips
+ *  far more. More than this many differing bits is a material
+ *  change. */
+export const WATCH_HASH_DISTANCE_THRESHOLD = 10;
+
+/** Material change, fallback (v0.37.0): when either frame of a
+ *  pair carries no hash, the JPEG byte-size delta stands in —
+ *  a static scene re-encodes to within a few percent of the
+ *  same size, a material change moves it well past this. */
+export const WATCH_SIZE_DELTA_THRESHOLD = 0.1;
+
+/** One frame set's change-detection fingerprint: per camera,
+ *  the frame's aHash (when the app sent one) and its base64
+ *  length. The frames themselves are never part of it — this
+ *  is the only trace of a frame that outlives the frame, and
+ *  it outlives it only until the session ends. */
+export interface WatchFrameSet {
+  hashes: Partial<Record<WatchCamera, string>>;
+  sizes: Partial<Record<WatchCamera, number>>;
+}
+
+/** Hamming distance between two 64-bit aHashes (16 hex chars).
+ *  A malformed hash compares as maximally different — a hash
+ *  this service can't read must never read as "same view". */
+export function watchHashDistance(a: string, b: string): number {
+  if (!/^[0-9a-f]{16}$/i.test(a) || !/^[0-9a-f]{16}$/i.test(b)) return 64;
+  let x = BigInt(`0x${a}`) ^ BigInt(`0x${b}`);
+  let n = 0;
+  while (x > 0n) {
+    n += Number(x & 1n);
+    x >>= 1n;
+  }
+  return n;
+}
+
+/** Did the view materially change between two frame sets?
+ *  A camera appearing or disappearing is a change by itself;
+ *  per camera, the perceptual hash decides when both frames
+ *  carry one, the size delta otherwise. An absent previous
+ *  set (nothing consumed yet) makes any non-empty set a
+ *  change — the first frame after Watch turns on is looked
+ *  at, as SerenAI looked at its first frame. */
+export function watchSetChanged(
+  prev: WatchFrameSet | undefined,
+  next: WatchFrameSet,
+): boolean {
+  const cameras = new Set<WatchCamera>([
+    ...(Object.keys(prev?.sizes ?? {}) as WatchCamera[]),
+    ...(Object.keys(next.sizes) as WatchCamera[]),
+  ]);
+  if (!prev) return cameras.size > 0;
+  for (const cam of cameras) {
+    const p = prev.sizes[cam];
+    const n = next.sizes[cam];
+    if (p === undefined || n === undefined) return true;
+    const ph = prev.hashes[cam];
+    const nh = next.hashes[cam];
+    if (ph && nh) {
+      if (watchHashDistance(ph, nh) > WATCH_HASH_DISTANCE_THRESHOLD) return true;
+    } else if (Math.abs(n - p) / Math.max(p, 1) > WATCH_SIZE_DELTA_THRESHOLD) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** v0.17.2: the bundled-Kokoro resolver the control plane
  *  injects — this package's only window onto the bundled
  *  engine, declared here so the voice package never imports
@@ -455,6 +629,12 @@ export class VoiceSessionService {
   private fillerDelayMs: number;
   private bundledTts?: BundledTtsResolver;
   private calls: VoiceCallService;
+  /** v0.37.0: kept from the constructor (it used to be passed
+   *  straight through to VoiceCallService) — ambient Watch
+   *  observations check it before queueing: while an approval
+   *  is parked for the voice conversation, the park owns the
+   *  floor and the camera does not start a turn of its own. */
+  private approvals: PendingApprovalLookup;
   private session?: ActiveSession;
   /** The last ended session's state, kept so the app's poll can
    *  learn WHY the call ended (timeout, kill phrase) instead of
@@ -492,6 +672,7 @@ export class VoiceSessionService {
     this.probeTimeoutMs = opts?.probeTimeoutMs ?? 2_500;
     this.fillerDelayMs = opts?.fillerDelayMs ?? DEFAULT_FILLER_DELAY_MS;
     this.bundledTts = opts?.bundledTts;
+    this.approvals = approvals;
     this.calls = new VoiceCallService(stateDir, adapter, approvals, {
       fetchFn: this.fetchFn,
       replyTimeoutMs: opts?.replyTimeoutMs,
@@ -570,6 +751,15 @@ export class VoiceSessionService {
         maxRms: 0,
         openMs: 0,
         utterancesCompleted: 0,
+      },
+      watch: {
+        on: false,
+        cameras: [],
+        frames: {},
+        hashes: {},
+        sizes: {},
+        lastAmbientAt: 0,
+        lastFrameAt: 0,
       },
     };
     this.session = session;
@@ -890,6 +1080,272 @@ export class VoiceSessionService {
     return { ok: true, detail: "Heard." };
   }
 
+  // ------------------------------------------------------------ Watch mode (v0.37.0)
+
+  /**
+   * Watch on/off, from the app's per-call toggle. Turning it
+   * on names the cameras the app is about to stream (its
+   * mode: front, back, or both); a re-post while already on
+   * just updates that list (a flip mid-watch). Turning it off
+   * DROPS the held frames whole — the eyes close and nothing
+   * of what they saw remains anywhere. Both events land in
+   * the durable call record (voice-turns.jsonl, as watch
+   * events — the transcript's own trace that the camera was
+   * on, and when). Watch never turns itself on here: the only
+   * way in is this call, from the operator's tap.
+   */
+  submitWatch(
+    sessionId: string,
+    on: boolean,
+    cameras?: unknown,
+  ): { ok: boolean; detail: string } {
+    const session = this.session;
+    if (!session || session.id !== sessionId) {
+      return { ok: false, detail: "No live call by that id — nothing was changed." };
+    }
+    this.tick();
+    if (this.session !== session) {
+      return { ok: false, detail: "The call ended (timeout) as that arrived — nothing was changed." };
+    }
+    const cams: WatchCamera[] = [];
+    if (Array.isArray(cameras)) {
+      for (const c of cameras) {
+        if ((c === "front" || c === "back") && !cams.includes(c)) cams.push(c);
+      }
+    }
+    if (on) {
+      const wasOn = session.watch.on;
+      session.watch.on = true;
+      session.watch.cameras = cams;
+      if (!wasOn) {
+        this.appendWatchEvent(
+          session,
+          `Watch turned on (${cams.length ? cams.join(" + ") : "camera"}). Frames are held in memory only and dropped when Watch turns off or the call ends.`,
+        );
+      }
+      return {
+        ok: true,
+        detail: "Watching — the camera's frames now ride this call's turns, held in memory only.",
+      };
+    }
+    if (session.watch.on) {
+      session.watch.on = false;
+      session.watch.cameras = [];
+      session.watch.frames = {};
+      session.watch.hashes = {};
+      session.watch.sizes = {};
+      session.watch.consumed = undefined;
+      this.appendWatchEvent(session, "Watch turned off — the held frames were dropped.");
+    }
+    return { ok: true, detail: "Watch off — the held frames were dropped." };
+  }
+
+  /**
+   * One Watch frame from the app: the session's new eyes for
+   * one camera. The frame is shape-checked HERE, synchronously,
+   * like a photo turn's — an unusable frame refuses the post
+   * with words, never a silent drop. A frame that arrives
+   * while Watch is off is refused and kept nowhere: the
+   * camera being on is the operator's explicit act, and a
+   * frame outside it is not this service's to hold.
+   *
+   * A stored frame does three things: it becomes the eyes the
+   * NEXT turn (spoken, typed, or photo) is answered with; it
+   * refreshes the call's watch activity (a watched call is
+   * not idle — see tick); and, unless the app marked it a
+   * turn refresh (the fresh frame grabbed the moment the
+   * operator finished speaking, whose turn is already coming),
+   * it may queue ONE ambient observation when the view has
+   * materially changed since the last turn consumed it
+   * (maybeQueueAmbient).
+   */
+  submitWatchFrame(
+    sessionId: string,
+    camera: string,
+    image: unknown,
+    hash?: unknown,
+    turnRefresh?: boolean,
+  ): { ok: boolean; detail: string } {
+    const session = this.session;
+    if (!session || session.id !== sessionId) {
+      return { ok: false, detail: "No live call by that id — the frame was dropped, nothing was kept." };
+    }
+    this.tick();
+    if (this.session !== session) {
+      return { ok: false, detail: "The call ended (timeout) as that frame arrived — it was dropped." };
+    }
+    if (camera !== "front" && camera !== "back") {
+      return { ok: false, detail: "That frame names a camera this call doesn't have — it was dropped." };
+    }
+    const clean = sanitizeVoiceImages([image]);
+    if (!clean || clean.length === 0) {
+      return { ok: false, detail: "That frame isn't a usable image — it was dropped, nothing was kept." };
+    }
+    if (!session.watch.on) {
+      return { ok: false, detail: "Watch is off for this call — the frame was dropped, nothing was kept." };
+    }
+    const cam = camera as WatchCamera;
+    session.watch.frames[cam] = clean[0];
+    if (typeof hash === "string" && hash.length > 0) {
+      session.watch.hashes[cam] = hash.toLowerCase();
+    } else {
+      delete session.watch.hashes[cam];
+    }
+    session.watch.sizes[cam] = clean[0].data.length;
+    session.watch.lastFrameAt = this.now();
+    if (!session.watch.cameras.includes(cam)) session.watch.cameras.push(cam);
+    if (!turnRefresh) this.maybeQueueAmbient(session);
+    return { ok: true, detail: "Frame received — it is the call's current view, held in memory only." };
+  }
+
+  /** The session's current eyes, in a fixed order (front,
+   *  then back) — the frames the next turn is answered with.
+   *  Empty unless Watch is on and at least one frame has
+   *  arrived. */
+  private watchEyes(session: ActiveSession): MessageImage[] {
+    if (!session.watch.on) return [];
+    const out: MessageImage[] = [];
+    if (session.watch.frames.front) out.push(session.watch.frames.front);
+    if (session.watch.frames.back) out.push(session.watch.frames.back);
+    return out;
+  }
+
+  /** The current frame set's change fingerprint (hashes +
+   *  sizes, never the frames). */
+  private watchSnapshot(session: ActiveSession): WatchFrameSet {
+    return {
+      hashes: { ...session.watch.hashes },
+      sizes: { ...session.watch.sizes },
+    };
+  }
+
+  /**
+   * Attach the session's eyes to a turn about to run: the
+   * operator's own submitted images first (a deliberate send
+   * outranks the ambient view), then the eyes, capped at one
+   * turn's image limit. When at least one eye rides, the set
+   * becomes the change baseline — a turn that saw the view
+   * consumes it, so no ambient observation fires later for a
+   * view a turn already answered with — and the turn is
+   * marked liveView for the host's framing.
+   */
+  private attachWatchEyes(
+    session: ActiveSession,
+    submitted?: MessageImage[],
+  ): { images?: MessageImage[]; liveView: boolean } {
+    const eyes = this.watchEyes(session);
+    if (!eyes.length) return { images: submitted, liveView: false };
+    const base = submitted ?? [];
+    const merged = [...base, ...eyes].slice(0, MAX_VOICE_IMAGES);
+    const eyesRode = merged.length > base.length;
+    if (eyesRode) session.watch.consumed = this.watchSnapshot(session);
+    return { images: merged, liveView: eyesRode };
+  }
+
+  /**
+   * The ambient gate (v0.37.0): queue an observation turn for
+   * the frame that just arrived ONLY when all of these hold —
+   * Watch is on; no approval is parked for the voice
+   * conversation (the park owns the floor; the camera does
+   * not start a turn over it); the rate limit's interval has
+   * passed since the last QUEUED observation; and the view
+   * materially changed since the last turn consumed it. Any
+   * failure is a silent refresh — the frame still became the
+   * session's eyes; it just isn't worth interrupting for.
+   */
+  private maybeQueueAmbient(session: ActiveSession): void {
+    if (!session.watch.on) return;
+    if (this.approvals.pendingFor(VOICE_CONVERSATION)) return;
+    if (this.now() - session.watch.lastAmbientAt < WATCH_AMBIENT_MIN_INTERVAL_MS) return;
+    if (!watchSetChanged(session.watch.consumed, this.watchSnapshot(session))) return;
+    session.watch.lastAmbientAt = this.now();
+    const postedAt = this.now();
+    session.chain = session.chain.then(() => this.runWatchObservation(session, postedAt));
+  }
+
+  /**
+   * One ambient Watch observation (v0.37.0): the fixed
+   * observation instruction takes a turn on the serial chain,
+   * with the session's CURRENT eyes attached (by the time the
+   * chain reaches it, a newer frame may have arrived — the
+   * look is at the view as it is, not as it was when queued).
+   * Everything after that is completeTurn, verbatim: the same
+   * job pipeline, the same spoken reply — with two deliberate
+   * differences, both passed as options: no spoken filler (a
+   * look that takes a while must not announce "Just a
+   * second." to a quiet room), and the nothing-to-report
+   * sentinel withholds the reply from the mouth entirely.
+   * The turn carries no transcript — nobody spoke — and is
+   * marked `watch` on the record. A park that appeared since
+   * queueing, or Watch turned off in the meantime, settles
+   * the look without a turn: the moment passed.
+   */
+  private async runWatchObservation(
+    session: ActiveSession,
+    postedAt: number,
+  ): Promise<void> {
+    if (this.session !== session) return;
+    if (!session.watch.on) return;
+    if (this.approvals.pendingFor(VOICE_CONVERSATION)) return;
+    const eyes = this.watchEyes(session);
+    if (!eyes.length) return;
+    session.processing = true;
+    const turn: VoiceSessionTurn = {
+      index: session.turns.length,
+      startedAt: this.now(),
+      kind: "unavailable",
+      detail: "",
+      interrupted: false,
+      watch: true,
+    };
+    session.turns.push(turn);
+    try {
+      const config = loadVoiceConfig(this.stateDir);
+      if (!config.enabled || !voiceConfigured(config)) {
+        turn.detail =
+          "Voice was turned off or unconfigured in Settings mid-call — the call ended and that look went nowhere.";
+        this.finish(session, "disabled");
+        return;
+      }
+      session.watch.consumed = this.watchSnapshot(session);
+      await this.completeTurn(session, turn, config, WATCH_OBSERVATION_TEXT, postedAt, 0, eyes, {
+        liveView: true,
+        silentReply: WATCH_NOTHING_TO_REPORT,
+      });
+      // Which ears the call had is a fact about the session,
+      // recorded like any turn's — set after completeTurn so
+      // its "(Built-in transcription…)" suffix, which is
+      // about transcripts, never claims this look was one.
+      // (The look itself is named on the detail by
+      // completeTurn's live-view note, and by the `watch`
+      // flag on this record.)
+      turn.via = session.sttMode;
+    } finally {
+      this.appendTurnRecord(turn);
+      session.processing = false;
+    }
+  }
+
+  /**
+   * A Watch event's line in the durable call record
+   * (v0.37.0): voice-turns.jsonl gains {kind: "watch"} lines
+   * beside the turn records — the transcript's own trace
+   * that the camera was on and when it went off, in the same
+   * best-effort discipline as appendTurnRecord (evidence,
+   * never machinery). No frame data, no hashes: that the
+   * camera was on is the record; what it saw is not.
+   */
+  private appendWatchEvent(session: ActiveSession, detail: string): void {
+    try {
+      appendFileSync(
+        join(this.stateDir, "voice-turns.jsonl"),
+        JSON.stringify({ ts: this.now(), session: session.id, kind: "watch", detail }) + "\n",
+      );
+    } catch {
+      /* a lost line loses a clue, never a call */
+    }
+  }
+
   // ------------------------------------------------------------ speech out
 
   /** The next spoken segment after `afterSeq`, in order — the
@@ -962,6 +1418,7 @@ export class VoiceSessionService {
         ttsMode: session.ttsMode,
         speechNotice: session.speechNotice,
         shieldMode: session.shieldMode,
+        watch: { on: session.watch.on, cameras: session.watch.cameras },
         turns: session.turns,
         lastLatency: session.lastLatency,
         hearing: this.hearingData(session),
@@ -1005,7 +1462,17 @@ export class VoiceSessionService {
       session.processing ||
       session.streaming ||
       session.segments.some((s) => !s.fetched);
-    if (!busy && now - session.lastSpeechAt >= this.idleTimeoutMs) {
+    // v0.37.0: a watched call whose frames keep arriving is
+    // not idle — the operator turned the camera on and the
+    // watching IS the activity (the 60-minute cap still ends
+    // it). When frames stop (the app backgrounded, Watch
+    // turned off), the ordinary silence rule resumes from
+    // the last frame.
+    const watchActive =
+      session.watch.on &&
+      session.watch.lastFrameAt > 0 &&
+      now - session.watch.lastFrameAt < this.idleTimeoutMs;
+    if (!busy && !watchActive && now - session.lastSpeechAt >= this.idleTimeoutMs) {
       this.finish(session, "idle-timeout");
     }
   }
@@ -1054,7 +1521,13 @@ export class VoiceSessionService {
       turn.transcript = transcript;
       turn.via = "endpoint";
 
-      await this.completeTurn(session, turn, config, transcript, utteranceEndAt, sttMs);
+      // v0.37.0: the session's eyes ride the turn — the
+      // answer is grounded in what the camera sees as the
+      // operator finishes speaking.
+      const eyesTurn = this.attachWatchEyes(session, undefined);
+      await this.completeTurn(session, turn, config, transcript, utteranceEndAt, sttMs, eyesTurn.images, {
+        liveView: eyesTurn.liveView,
+      });
     } finally {
       // Every path that created the turn settles here exactly
       // once — transcription failure, mid-call disable, normal
@@ -1114,7 +1587,16 @@ export class VoiceSessionService {
       // not words, and the record says exactly that.
       if (images?.length) turn.photos = images.length;
       if (transcript) turn.transcript = transcript;
-      await this.completeTurn(session, turn, config, transcript, postedAt, 0, images);
+      // v0.37.0: the session's eyes ride the turn beside any
+      // photos the operator sent — the answer is grounded in
+      // what the camera sees right now. The record's photo
+      // count above stays the OPERATOR's photos only: the
+      // eyes are not something they sent, and the turn's
+      // detail (completeTurn) names the live view instead.
+      const eyesTurn = this.attachWatchEyes(session, images);
+      await this.completeTurn(session, turn, config, transcript, postedAt, 0, eyesTurn.images, {
+        liveView: eyesTurn.liveView,
+      });
     } finally {
       this.appendTurnRecord(turn);
       session.processing = false;
@@ -1137,6 +1619,7 @@ export class VoiceSessionService {
     utteranceEndAt: number,
     sttMs: number,
     images?: MessageImage[],
+    opts?: { liveView?: boolean; silentReply?: string },
   ): Promise<void> {
     const jobStart = this.now();
     // v0.9.8: arm the spoken filler — if the job is still
@@ -1144,13 +1627,29 @@ export class VoiceSessionService {
     // queued through the segment path (queueFiller). Disarming
     // the moment the reply lands is what keeps a fast turn
     // filler-free.
-    const filler = this.armFiller(session, turn, config);
+    // v0.37.0: a turn that may be silenced (an ambient Watch
+    // observation) arms NO filler — a look that takes a while
+    // must not announce itself to a quiet room it may end up
+    // saying nothing to.
+    const filler = opts?.silentReply
+      ? { disarm: () => {} }
+      : this.armFiller(session, turn, config);
     let result: VoiceCallResult;
     try {
-      result = await this.calls.processTranscript(transcript, images);
+      result = await this.calls.processTranscript(transcript, images, {
+        liveView: opts?.liveView === true,
+      });
     } finally {
       filler.disarm();
     }
+    // v0.37.0: the silent reply — an ambient observation whose
+    // answer is the nothing-to-report sentinel is recorded
+    // (the look happened; the record says so) but never
+    // spoken: the reply text is withheld here, before the
+    // mouth below can queue a single segment of it.
+    const silenced =
+      opts?.silentReply !== undefined && result.replyText?.trim() === opts.silentReply;
+    if (silenced) result = { ...result, replyText: undefined };
     const jobMs = this.now() - jobStart;
     turn.kind = result.kind;
     // v0.9.9: a scan the operator switched off is stated on the
@@ -1170,6 +1669,17 @@ export class VoiceSessionService {
           ? `${result.detail} Shield scan ran in fast mode for this turn (deterministic patterns only; typed messages still get the full semantic review).`
           : result.detail) +
       (turn.via === "local" ? " (Built-in transcription on this Mac.)" : "");
+    // v0.37.0: a turn that carried the camera's live view
+    // says so on its record — the view itself is never
+    // recorded, but that the answer was grounded in it is a
+    // fact about the turn. A silenced observation says what
+    // happened to its reply, in words.
+    if (opts?.liveView && images?.length) {
+      turn.detail += " (Watch: the call camera's live view rode this turn.)";
+    }
+    if (silenced) {
+      turn.detail += " (Watch: the model looked and had nothing worth saying — nothing was spoken.)";
+    }
     turn.replyText = result.replyText;
     const latency: VoiceTurnLatency = {
       utteranceEndAt,
@@ -1308,6 +1818,10 @@ export class VoiceSessionService {
         /** v0.36.0: photo count for a camera turn — the
          *  count is the record, never the image data. */
         photos?: number;
+        /** v0.37.0: present (and true) only on an ambient
+         *  Watch observation turn — the look is the record;
+         *  what the camera saw is never written here. */
+        watch?: boolean;
         stt?: VoiceEngine;
         kind: string;
         detail: string;
@@ -1323,6 +1837,7 @@ export class VoiceSessionService {
         index: turn.index,
         ...(turn.transcript !== undefined ? { transcript: turn.transcript } : {}),
         ...(turn.photos !== undefined ? { photos: turn.photos } : {}),
+        ...(turn.watch ? { watch: true } : {}),
         ...(turn.via !== undefined ? { stt: turn.via } : {}),
         kind: turn.kind,
         detail: turn.detail,
@@ -1470,6 +1985,16 @@ export class VoiceSessionService {
     session.speechGen++;
     session.speechAbort?.abort();
     if (this.session === session) this.session = undefined;
+    // v0.37.0: the eyes close with the call — the held frames
+    // are dropped here, explicitly, so no path out of a call
+    // (operator, timeout, kill phrase, disable) leaves a
+    // frame held. The snapshot below carries turns and the
+    // watch summary only; frames were never part of it.
+    session.watch.on = false;
+    session.watch.cameras = [];
+    session.watch.frames = {};
+    session.watch.hashes = {};
+    session.watch.sizes = {};
     const detail =
       reason === "operator"
         ? "Call ended by the operator."
@@ -1493,6 +2018,7 @@ export class VoiceSessionService {
       ttsMode: session.ttsMode,
       speechNotice: session.speechNotice,
       shieldMode: session.shieldMode,
+      watch: { on: false, cameras: [] },
       turns: session.turns,
       lastLatency: session.lastLatency,
       hearing: this.hearingData(session),

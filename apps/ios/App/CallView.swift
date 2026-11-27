@@ -89,16 +89,33 @@ struct CallView: View {
                 // tap it to switch personas mid-visit — the
                 // pick writes the same key Settings writes
                 // and lands when the brain next loads.
-                Button {
-                    showPersonaPicker = true
-                } label: {
-                    AvatarFaceView(level: call.voiceLevel,
-                                   speaking: call.gusSpeaking,
-                                   listening: inCall && call.corePhase == "listening")
+                // Watch mode (v0.37.0): while the camera is
+                // on, the layout goes FaceTime-shaped — the
+                // persona shrinks to a participant TILE and
+                // the camera's tiles sit beside it, all on
+                // screen at once; the persona is never
+                // replaced by the camera. Off, the face is
+                // the screen again.
+                if call.watchOn {
+                    HStack(alignment: .top, spacing: 12) {
+                        personaFaceButton(side: 104)
+                        VStack(alignment: .leading, spacing: 8) {
+                            onAirPill
+                            WatchPreviewHost(view: call.watchPreviewView)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 118)
+                                .background(Color.black)
+                                .cornerRadius(10)
+                                .clipped()
+                            watchControlsRow
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .padding(.top, 12)
+                } else {
+                    personaFaceButton(side: 232)
+                        .padding(.top, 12)
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Choose persona")
-                .padding(.top, 12)
 
                 // Who you're talking to (v0.32.0): the
                 // active persona's name under the face,
@@ -154,6 +171,16 @@ struct CallView: View {
                         .frame(maxWidth: .infinity)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                if let notice = call.watchNotice {
+                    Text(notice)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(3)
+                        .minimumScaleFactor(0.8)
+                        .frame(maxWidth: .infinity)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if let error = call.errorText {
                     Text(error)
                         .font(.caption)
@@ -193,7 +220,14 @@ struct CallView: View {
                     // turn of the call (see openCamera and
                     // CallSession.sendPhotoTurn). Never
                     // automatic, never a stream.
-                    HStack(spacing: 12) {
+                    // v0.37.0: a sixth joins: Watch — the
+                    // call's camera as the persona's eyes, an
+                    // explicit per-call toggle that never
+                    // starts itself (see CallSession.setWatch).
+                    // Six controls is why the circles are
+                    // 50 pt now: at 60 the row outgrew the
+                    // screen it lives on.
+                    HStack(spacing: 8) {
                         CallControlButton(
                             title: "Speaker",
                             systemImage: call.outputRouteIsSpeaker ? "speaker.wave.2.fill" : "speaker.slash.fill",
@@ -208,6 +242,13 @@ struct CallView: View {
                             systemImage: "camera.fill",
                             filled: false
                         ) { openCamera() }
+
+                        CallControlButton(
+                            title: call.watchOn ? "Watching" : "Watch",
+                            systemImage: "video.fill",
+                            filled: call.watchOn,
+                            fillColor: .accentColor
+                        ) { call.setWatch(on: !call.watchOn) }
 
                         CallControlButton(
                             title: call.isMuted ? "Muted" : "Mute",
@@ -297,6 +338,102 @@ struct CallView: View {
                 Text("What you said matched \(held.ruleID) — Shield quarantined it before GUS heard it. The scan is recorded in Settings → Security → Shield log.")
             }
         }
+    }
+
+    // MARK: - Face + Watch (v0.37.0)
+
+    /// The persona face as its picker button (v0.30.0's
+    /// door, factored out in v0.37.0): one face, two sizes —
+    /// the screen's dominant visual normally, a participant
+    /// tile while watching.
+    private func personaFaceButton(side: CGFloat) -> some View {
+        Button {
+            showPersonaPicker = true
+        } label: {
+            AvatarFaceView(level: call.voiceLevel,
+                           speaking: call.gusSpeaking,
+                           listening: inCall && call.corePhase == "listening",
+                           side: side)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Choose persona")
+    }
+
+    /// The on-air indicator: while Watch is on, this pill is
+    /// on screen — a red dot, the word, and the promise.
+    /// There is no state in which the camera runs without it.
+    private var onAirPill: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(Color.red)
+                .frame(width: 8, height: 8)
+            Text("Watching")
+                .font(.caption)
+                .fontWeight(.semibold)
+            Text("— frames aren't saved")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    /// The watch controls (v0.37.0), Grok-shaped: Flip
+    /// swaps front/back (meaningless in Both, so disabled
+    /// there), Both runs both cameras at once (offered
+    /// only where the phone can), and Torch lights the
+    /// back camera's world (disabled whenever the back
+    /// camera isn't live or has no torch).
+    private var watchControlsRow: some View {
+        HStack(spacing: 18) {
+            watchMiniButton(
+                title: "Flip",
+                systemImage: "arrow.triangle.2.circlepath.camera",
+                filled: false
+            ) {
+                call.setWatchMode(call.watchMode == .front ? .back : .front)
+            }
+            .disabled(call.watchMode == .both)
+            .opacity(call.watchMode == .both ? 0.4 : 1)
+
+            if call.watchBothSupported {
+                watchMiniButton(
+                    title: "Both",
+                    systemImage: "rectangle.split.2x1",
+                    filled: call.watchMode == .both
+                ) {
+                    call.setWatchMode(call.watchMode == .both ? .back : .both)
+                }
+            }
+
+            watchMiniButton(
+                title: "Torch",
+                systemImage: "flashlight.on.fill",
+                filled: call.watchTorchOn
+            ) {
+                call.setWatchTorch(!call.watchTorchOn)
+            }
+            .disabled(!call.watchTorchUsable)
+            .opacity(call.watchTorchUsable ? 1 : 0.4)
+        }
+    }
+
+    private func watchMiniButton(
+        title: String,
+        systemImage: String,
+        filled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            VStack(spacing: 2) {
+                Image(systemName: systemImage)
+                    .font(.body)
+                    .foregroundColor(filled ? .accentColor : .secondary)
+                Text(title)
+                    .font(.caption2)
+                    .foregroundColor(.primary)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
     }
 
     // MARK: - Transcript (v0.23.0)
@@ -389,6 +526,16 @@ struct CallView: View {
     @ViewBuilder
     private func transcriptTurn(_ turn: VoiceSessionState.Turn) -> some View {
         VStack(alignment: .leading, spacing: 6) {
+            if turn.watch == true {
+                // An ambient Watch observation (v0.37.0):
+                // nobody spoke — GUS looked. The caption
+                // says so; the reply row below is the
+                // comment, in GUS's name as always.
+                Text("GUS LOOKED — WATCH")
+                    .font(.caption2)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.secondary)
+            }
             if let transcript = turn.transcript, !transcript.isEmpty {
                 transcriptRow(speaker: "You", text: transcript, tint: .primary)
             }
@@ -501,13 +648,15 @@ struct CallView: View {
     }
 }
 
-/// One call control (v0.23.0): a 60 pt circle with its label
+/// One call control (v0.23.0): a circle with its label
 /// underneath. Filled means the state is ON — accent for
 /// Speaker, orange for Muted (the state that needs noticing),
 /// red always for End. Unfilled is a plain ring with a
-/// secondary icon. Same size and spacing for all three, so
-/// the row reads as one instrument, not three buttons that
-/// happen to share a line.
+/// secondary icon. Same size and spacing for all, so
+/// the row reads as one instrument, not buttons that
+/// happen to share a line. v0.37.0: 50 pt, down from 60 —
+/// the row holds six controls now (Watch joined), and six
+/// 60 pt circles are wider than the phone.
 private struct CallControlButton: View {
     let title: String
     let systemImage: String
@@ -521,7 +670,7 @@ private struct CallControlButton: View {
                 ZStack {
                     Circle()
                         .fill(filled ? fillColor : Color.secondary.opacity(0.12))
-                        .frame(width: 60, height: 60)
+                        .frame(width: 50, height: 50)
                     Image(systemName: systemImage)
                         .font(.title3)
                         .foregroundColor(filled ? .white : .secondary)
@@ -640,7 +789,11 @@ private struct AvatarFaceView: View {
     /// v0.31.0: properly large (see the type comment) —
     /// the old 120 pt face read as a thumbnail next to the
     /// transcript; this one IS the call screen.
-    private let side: CGFloat = 232
+    /// v0.37.0: the size is the caller's choice now — the
+    /// full 232 pt when the face owns the screen, a 104 pt
+    /// participant tile while Watch mode's camera tiles
+    /// share it.
+    var side: CGFloat = 232
 
     var body: some View {
         ZStack {
@@ -744,9 +897,9 @@ private struct CallRouteButton: View {
             ZStack {
                 Circle()
                     .fill(Color.secondary.opacity(0.12))
-                    .frame(width: 60, height: 60)
+                    .frame(width: 50, height: 50)
                 RoutePickerView()
-                    .frame(width: 60, height: 60)
+                    .frame(width: 50, height: 50)
             }
             Text("Devices")
                 .font(.caption)
@@ -806,4 +959,18 @@ private struct CallCameraPicker: UIViewControllerRepresentable {
             onCapture(nil)
         }
     }
+}
+
+/// The Watch preview's SwiftUI host (v0.37.0): the capture
+/// controller's container view, embedded as-is — the
+/// controller owns the preview layers and their layout;
+/// this host only gives the view a place on the call
+/// screen. The view is the session's one preview surface,
+/// created with the CallSession and reused across calls.
+private struct WatchPreviewHost: UIViewRepresentable {
+    let view: UIView
+
+    func makeUIView(context: Context) -> UIView { view }
+
+    func updateUIView(_ uiView: UIView, context: Context) {}
 }

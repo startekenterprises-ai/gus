@@ -74,6 +74,17 @@ export interface InboundMessage {
    *  control-plane/runtime). Command submits (/stop, /approve)
    *  never become jobs, so the flag on them is inert. */
   voiceTurn?: boolean;
+  /** v0.37.0: this message's images are (or include) the live
+   *  view from a voice call's camera — Watch mode's current
+   *  frame(s), attached by the voice session to the operator's
+   *  turn so the answer is grounded in what the camera sees.
+   *  Only the voice adapter's session submits set it, and only
+   *  alongside images. The ChannelHost frames them with the
+   *  live-view note instead of the photo note: the operator
+   *  didn't SEND a picture, the call is showing the model its
+   *  eyes. The frames themselves are never recorded — the
+   *  durable transcript keeps the count, as for photos. */
+  liveView?: boolean;
 }
 
 /** v0.9.8: a job's measured pipeline stages, attached by the

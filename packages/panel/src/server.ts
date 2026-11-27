@@ -430,6 +430,55 @@ export class PanelServer {
       );
       return json(result.ok ? 200 : 409, result);
     }
+    // v0.37.0: Watch mode — the app's per-call camera toggle.
+    // Turning it off drops the session's held frames in the
+    // core; the toggle itself carries no image data, just the
+    // fact and the camera names. Same token gate as every
+    // voice route.
+    if (method === "POST" && path === "/api/voice/session/watch") {
+      const body = await this.readJson(req);
+      if (!this.backend.voiceSessionWatch) {
+        return json(501, {
+          ok: false,
+          detail: "Watch mode isn't wired in this deployment. Nothing was changed.",
+        });
+      }
+      const result = this.backend.voiceSessionWatch(
+        typeof body.sessionId === "string" ? body.sessionId : "",
+        body.on === true,
+        Array.isArray(body.cameras)
+          ? body.cameras.filter((c): c is string => typeof c === "string")
+          : undefined,
+      );
+      return json(result.ok ? 200 : 409, result);
+    }
+    // v0.37.0: one Watch frame — one camera's latest view, as
+    // {mediaType, data} (the chat photo's wire shape), its
+    // perceptual hash when the app computed one, and the
+    // turn-refresh mark. The session service shape-checks the
+    // frame and refuses an unusable one outright; the body
+    // cap matches the chat route's (a frame body is a photo
+    // body, whichever door it knocks on). Frames are held in
+    // the core's memory only — this route writes nothing.
+    if (method === "POST" && path === "/api/voice/session/watch-frame") {
+      const body = await this.readJson(req, MAX_CHAT_BODY_BYTES);
+      if (!this.backend.voiceSessionWatchFrame) {
+        return json(501, {
+          ok: false,
+          detail: "Watch mode isn't wired in this deployment. The frame was dropped.",
+        });
+      }
+      const result = this.backend.voiceSessionWatchFrame(
+        typeof body.sessionId === "string" ? body.sessionId : "",
+        typeof body.camera === "string" ? body.camera : "",
+        body.image && typeof body.image === "object"
+          ? (body.image as PanelChatImageData)
+          : undefined,
+        typeof body.hash === "string" ? body.hash : undefined,
+        body.turnRefresh === true,
+      );
+      return json(result.ok ? 200 : 409, result);
+    }
     if (method === "POST" && path === "/api/voice/session/audio") {
       const audio = await this.readRaw(req, MAX_SESSION_CHUNK_BYTES);
       const result = this.backend.voiceSessionAudio(

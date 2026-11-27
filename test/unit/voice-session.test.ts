@@ -43,11 +43,16 @@ import {
   VOICE_CONVERSATION,
   VOICE_FILLER_TEXT,
   VOICE_GREETING_TEXT,
+  WATCH_NOTHING_TO_REPORT,
+  WATCH_OBSERVATION_TEXT,
   chunkRms,
   loadVoiceConfig,
   normalizePcm16Gain,
   splitSentences,
+  watchHashDistance,
+  watchSetChanged,
   writeVoiceConfig,
+  type WatchFrameSet,
 } from "../../packages/channels/voice/src/index.js";
 
 // ---------------------------------------------------------------- audio helpers
@@ -664,6 +669,384 @@ test("session: the Shield gate blocks a spoken injection at session level, recei
   r.sessions.end(id);
 });
 
+// ---------------------------------------------------------------- v0.37.0: Watch mode
+
+/** One Watch frame as the app posts it: a small JPEG (long
+ *  edge ~768, q~0.4), base64 — the same {mediaType, data}
+ *  shape a chat photo rides, at a fraction of the size. */
+const FRAME_BACK_A = {
+  mediaType: "image/jpeg",
+  data: "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgFBgcGBQgHBgcJCAgJDBMMDAsLDBgREg4THBgSFhUmJJUmJSgjGhgaHBwJCAsJCg8PDw4NDg0PDw/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMv/AAB",
+};
+/** Two 64-bit aHashes: A and its bitwise complement (distance
+ *  64 — a wholly different view), and a one-bit neighbour of
+ *  A (distance 1 — the same view, shimmering). */
+const HASH_A = "0123456789abcdef";
+const HASH_B = "fedcba9876543210";
+const HASH_A_NEIGHBOUR = "0123456789abcdee";
+
+test("watch change detection (v0.37.0): aHash distance and the material-change rule", () => {
+  assert.equal(watchHashDistance(HASH_A, HASH_A), 0);
+  assert.equal(watchHashDistance(HASH_A, HASH_A_NEIGHBOUR), 1, "one flipped cell");
+  assert.equal(watchHashDistance(HASH_A, HASH_B), 64, "a wholly different view");
+  assert.equal(watchHashDistance("not-a-hash", HASH_A), 64, "an unreadable hash reads as different, never as same");
+
+  const a: WatchFrameSet = { hashes: { back: HASH_A }, sizes: { back: 1000 } };
+  assert.equal(watchSetChanged(undefined, a), true, "nothing consumed yet — the first view is a change");
+  assert.equal(watchSetChanged(a, a), false, "the same set is no change");
+  assert.equal(
+    watchSetChanged(a, { hashes: { back: HASH_A_NEIGHBOUR }, sizes: { back: 1000 } }),
+    false,
+    "a shimmering hash is no change",
+  );
+  assert.equal(
+    watchSetChanged(a, { hashes: { back: HASH_B }, sizes: { back: 1000 } }),
+    true,
+    "a flipped view is a change",
+  );
+  assert.equal(
+    watchSetChanged(a, { hashes: {}, sizes: { back: 1050 } }),
+    false,
+    "no hashes: a 5% size delta is the same scene re-encoded",
+  );
+  assert.equal(
+    watchSetChanged(a, { hashes: {}, sizes: { back: 1300 } }),
+    true,
+    "no hashes: a 30% size delta is a material change",
+  );
+  assert.equal(
+    watchSetChanged(a, {
+      hashes: { back: HASH_A, front: HASH_A },
+      sizes: { back: 1000, front: 900 },
+    }),
+    true,
+    "a camera joining the set is a change by itself",
+  );
+});
+
+test("watch (v0.37.0): a spoken turn carries the session's eyes as image input, framed as a live view", async () => {
+  const r = await sessionRig({ sttEngine: "local", ttsEngine: "local" });
+  const id = await startCall(r);
+
+  const on = r.sessions.submitWatch(id, true, ["back"]);
+  assert.equal(on.ok, true, on.detail);
+  assert.deepEqual(r.sessions.state(id).watch, { on: true, cameras: ["back"] },
+    "the state poll carries the watch summary — never the frames");
+
+  // A turn-refresh frame: the fresh grab as the operator
+  // finished speaking. It becomes the eyes; it queues no
+  // ambient look of its own.
+  const framed = r.sessions.submitWatchFrame(id, "back", FRAME_BACK_A, HASH_A, true);
+  assert.equal(framed.ok, true, framed.detail);
+
+  const posted = r.sessions.submitTranscript(id, "what do you see?");
+  assert.equal(posted.ok, true, posted.detail);
+  await driveJob(r, "A workbench, with a bicycle wheel leaning on it.");
+  await r.sessions.drain();
+
+  const pushed = r.pushed[0] as unknown as { text: string; images?: unknown };
+  assert.deepEqual(pushed.images, [FRAME_BACK_A], "the frame rode the turn as image input");
+  assert.match(pushed.text, /^what do you see\?/);
+  assert.match(pushed.text, /Live view/, "the framing says the camera is on");
+  assert.match(pushed.text, /what the camera sees right now/);
+  assert.doesNotMatch(pushed.text, /attached 1 photo/, "the eyes are not framed as an attachment");
+
+  const turn = r.sessions.state(id).turns[0];
+  assert.equal(turn.transcript, "what do you see?");
+  assert.equal(turn.photos, undefined, "the record's photo count is the operator's sends only — the eyes are not counted");
+  assert.match(turn.detail, /live view rode this turn/, "the turn's record names the live view");
+  r.sessions.end(id);
+});
+
+test("watch (v0.37.0): a materially changed view queues ONE ambient observation, spoken like a turn", async () => {
+  const r = await sessionRig({ sttEngine: "local", ttsEngine: "local" });
+  const id = await startCall(r);
+  const greeting = r.sessions.nextAudio(id, 0);
+  assert.equal(greeting.text, VOICE_GREETING_TEXT);
+
+  r.sessions.submitWatch(id, true, ["back"]);
+  // A baseline frame (not a turn refresh): the first view is
+  // a change by definition, so the look queues at once.
+  const framed = r.sessions.submitWatchFrame(id, "back", FRAME_BACK_A, HASH_A);
+  assert.equal(framed.ok, true, framed.detail);
+  await driveJob(r, "A red bicycle just rolled into view.", 0);
+  await r.sessions.drain();
+
+  const pushed = r.pushed[0] as unknown as { text: string; images?: unknown };
+  assert.deepEqual(pushed.images, [FRAME_BACK_A], "the observation carried the frame");
+  assert.match(pushed.text, new RegExp(WATCH_OBSERVATION_TEXT.slice(0, 40).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    "the fixed observation instruction took the turn");
+  assert.match(pushed.text, /Live view/, "framed as a live view, not an attachment");
+
+  const state = r.sessions.state(id);
+  assert.equal(state.turns.length, 1);
+  const turn = state.turns[0];
+  assert.equal(turn.watch, true, "the turn is marked as a Watch observation");
+  assert.equal(turn.transcript, undefined, "nobody spoke — no transcript is claimed");
+  assert.equal(turn.replyText, "A red bicycle just rolled into view.");
+
+  // The reply is spoken through the normal segment path.
+  const seg = r.sessions.nextAudio(id, greeting.seq!);
+  assert.equal(seg.text, "A red bicycle just rolled into view.", "the comment was spoken like any turn");
+
+  // The durable record: the watch event first, then the
+  // observation turn — and no frame data anywhere in it.
+  const lines = readFileSync(join(r.dir, "voice-turns.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l) as Record<string, unknown>);
+  assert.equal(lines[0].kind, "watch", "the record opens with the watch-on event");
+  assert.match(String(lines[0].detail), /Watch turned on/);
+  assert.equal(lines[1].watch, true, "the observation turn is marked in the durable record");
+  assert.ok(!JSON.stringify(lines).includes(FRAME_BACK_A.data), "no frame data in the record, ever");
+  r.sessions.end(id);
+});
+
+test("watch (v0.37.0): an unchanged view stays silent, and the rate limit holds a changed one", async () => {
+  const r = await sessionRig({ sttEngine: "local", ttsEngine: "local" });
+  const id = await startCall(r);
+  r.sessions.submitWatch(id, true, ["back"]);
+
+  // t=0: the first frame queues the first observation.
+  r.sessions.submitWatchFrame(id, "back", FRAME_BACK_A, HASH_A);
+  await driveJob(r, "A cat walked in.", 0);
+  await r.sessions.drain();
+  assert.equal(r.pushed.length, 1);
+
+  // t=+5s: the view flipped — but the last observation was
+  // queued 5 s ago, inside the 15 s ceiling. No new look.
+  r.clock.now += 5_000;
+  r.sessions.submitWatchFrame(id, "back", { ...FRAME_BACK_A, data: `${FRAME_BACK_A.data}QUJD` }, HASH_B);
+  await r.sessions.drain();
+  assert.equal(r.pushed.length, 1, "the rate limit held the changed view");
+  assert.equal(r.sessions.state(id).turns.length, 1);
+
+  // t=+20s: back to the consumed view (the B frame above was
+  // never consumed) — past the ceiling now, but nothing
+  // materially changed since the last turn saw it. Silence.
+  r.clock.now += 15_000;
+  r.sessions.submitWatchFrame(id, "back", FRAME_BACK_A, HASH_A);
+  await r.sessions.drain();
+  assert.equal(r.pushed.length, 1, "an unchanged view earns no observation");
+  assert.equal(r.sessions.state(id).turns.length, 1);
+
+  // t=+21s: a genuinely new view, past the ceiling — the
+  // second observation queues.
+  r.clock.now += 1_000;
+  r.sessions.submitWatchFrame(id, "back", { ...FRAME_BACK_A, data: `${FRAME_BACK_A.data}QUJD` }, HASH_B);
+  await driveJob(r, "The cat left; the room is empty now.", 1);
+  await r.sessions.drain();
+  assert.equal(r.pushed.length, 2);
+  assert.equal(r.sessions.state(id).turns.length, 2);
+  assert.equal(r.sessions.state(id).turns[1].watch, true);
+  r.sessions.end(id);
+});
+
+test("watch (v0.37.0): the nothing-to-report sentinel is recorded, never spoken", async () => {
+  const r = await sessionRig({ sttEngine: "local", ttsEngine: "local" });
+  const id = await startCall(r);
+  const greeting = r.sessions.nextAudio(id, 0);
+  assert.equal(greeting.text, VOICE_GREETING_TEXT);
+
+  r.sessions.submitWatch(id, true, ["back"]);
+  r.sessions.submitWatchFrame(id, "back", FRAME_BACK_A, HASH_A);
+  await driveJob(r, WATCH_NOTHING_TO_REPORT, 0);
+  await r.sessions.drain();
+
+  const turn = r.sessions.state(id).turns[0];
+  assert.equal(turn.watch, true);
+  assert.equal(turn.replyText, undefined, "the sentinel never becomes the turn's spoken reply");
+  assert.match(turn.detail, /nothing worth saying/, "the record says the look happened and found nothing");
+  const seg = r.sessions.nextAudio(id, greeting.seq!);
+  assert.equal(seg.seq, undefined, "nothing was queued for the mouth");
+  r.sessions.end(id);
+});
+
+test("watch (v0.37.0): Watch off drops the eyes — later turns carry nothing, and a frame posted while off is refused", async () => {
+  const r = await sessionRig({ sttEngine: "local", ttsEngine: "local" });
+  const id = await startCall(r);
+  r.sessions.submitWatch(id, true, ["back"]);
+  r.sessions.submitWatchFrame(id, "back", FRAME_BACK_A, HASH_A, true);
+
+  r.sessions.submitTranscript(id, "what is that?");
+  await driveJob(r, "A bicycle wheel.", 0);
+  await r.sessions.drain();
+  assert.deepEqual(
+    (r.pushed[0] as unknown as { images?: unknown }).images,
+    [FRAME_BACK_A],
+    "the watched turn carried the eyes",
+  );
+
+  const off = r.sessions.submitWatch(id, false);
+  assert.equal(off.ok, true, off.detail);
+  assert.deepEqual(r.sessions.state(id).watch, { on: false, cameras: [] });
+
+  const refused = r.sessions.submitWatchFrame(id, "back", FRAME_BACK_A, HASH_A, true);
+  assert.equal(refused.ok, false, "a frame outside Watch is refused, never held");
+  assert.match(refused.detail, /Watch is off/);
+
+  r.sessions.submitTranscript(id, "and now?");
+  await driveJob(r, "Just the room.", 1);
+  await r.sessions.drain();
+  assert.equal(
+    (r.pushed[1] as unknown as { images?: unknown }).images,
+    undefined,
+    "with the eyes dropped, the next turn carries no images",
+  );
+
+  const events = readFileSync(join(r.dir, "voice-turns.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l) as Record<string, unknown>)
+    .filter((l) => l.kind === "watch");
+  assert.equal(events.length, 2, "both watch events are on the durable record");
+  assert.match(String(events[0].detail), /turned on/);
+  assert.match(String(events[1].detail), /turned off/);
+  r.sessions.end(id);
+});
+
+test("watch (v0.37.0): an unusable frame refuses the post and changes nothing", async () => {
+  const r = await sessionRig({ sttEngine: "local", ttsEngine: "local" });
+  const id = await startCall(r);
+  r.sessions.submitWatch(id, true, ["back"]);
+
+  const refused = r.sessions.submitWatchFrame(id, "back", {
+    mediaType: "text/plain",
+    data: "aGVsbG8=",
+  });
+  assert.equal(refused.ok, false);
+  assert.match(refused.detail, /isn't a usable image/);
+  const badCamera = r.sessions.submitWatchFrame(id, "side", FRAME_BACK_A, HASH_A);
+  assert.equal(badCamera.ok, false);
+  assert.match(badCamera.detail, /camera this call doesn't have/);
+
+  r.sessions.submitTranscript(id, "hello gus");
+  await driveJob(r, "Hello.", 0);
+  await r.sessions.drain();
+  assert.equal(
+    (r.pushed[0] as unknown as { images?: unknown }).images,
+    undefined,
+    "no frame was ever held, so the turn carries none",
+  );
+  r.sessions.end(id);
+});
+
+test("watch (v0.37.0): the eyes ride an endpoint utterance too", async () => {
+  const r = await sessionRig({
+    transcripts: ["what is this"],
+    sttEngine: "endpoint",
+    ttsEngine: "local",
+  });
+  const id = await startCall(r);
+  r.sessions.submitWatch(id, true, ["back"]);
+  r.sessions.submitWatchFrame(id, "back", FRAME_BACK_A, HASH_A, true);
+
+  say(r, id);
+  await driveJob(r, "That is a kettle.", 0);
+  await r.sessions.drain();
+
+  const pushed = r.pushed[0] as unknown as { text: string; images?: unknown };
+  assert.deepEqual(pushed.images, [FRAME_BACK_A], "the transcribed turn carried the eyes");
+  assert.match(pushed.text, /Live view/);
+  const turn = r.sessions.state(id).turns[0];
+  assert.equal(turn.via, "endpoint");
+  assert.equal(turn.photos, undefined);
+  r.sessions.end(id);
+});
+
+test("watch (v0.37.0): a photo turn and the eyes merge — the operator's photo first, the view behind it", async () => {
+  const r = await sessionRig({ sttEngine: "local", ttsEngine: "local" });
+  const id = await startCall(r);
+  r.sessions.submitWatch(id, true, ["back"]);
+  r.sessions.submitWatchFrame(id, "back", FRAME_BACK_A, HASH_A, true);
+
+  const posted = r.sessions.submitTranscript(id, "", [PHOTO_JPEG]);
+  assert.equal(posted.ok, true, posted.detail);
+  await driveJob(r, "Your photo shows a wheel; behind it, the workbench.", 0);
+  await r.sessions.drain();
+
+  const pushed = r.pushed[0] as unknown as { text: string; images?: unknown };
+  assert.deepEqual(pushed.images, [PHOTO_JPEG, FRAME_BACK_A],
+    "the deliberate photo rides first, the live view behind it");
+  assert.match(pushed.text, /Live view/, "with the eyes aboard, the live-view framing names the message");
+  const turn = r.sessions.state(id).turns[0];
+  assert.equal(turn.photos, 1, "the record counts the operator's photo — not the eyes");
+  r.sessions.end(id);
+});
+
+test("watch (v0.37.0): frames keep a watched call alive past the idle timeout; silence after Watch off ends it", async () => {
+  const r = await sessionRig({
+    sttEngine: "local",
+    ttsEngine: "local",
+    idleTimeoutMs: 30_000,
+  });
+  const id = await startCall(r);
+  // Fetch the greeting, as the app does at call start — an
+  // unfetched segment would keep the call "busy" forever and
+  // the idle rule would never get its turn.
+  const greeting = r.sessions.nextAudio(id, 0);
+  assert.equal(greeting.text, VOICE_GREETING_TEXT);
+  r.sessions.submitWatch(id, true, ["back"]);
+
+  // Frames at +0s, +20s, +40s: each lands inside the idle
+  // window of the last, so at +40s — past the 30 s timeout —
+  // the call is still live. Without Watch, the same silence
+  // would have ended it.
+  r.sessions.submitWatchFrame(id, "back", FRAME_BACK_A, HASH_A, true);
+  r.clock.now += 20_000;
+  r.sessions.submitWatchFrame(id, "back", FRAME_BACK_A, HASH_A, true);
+  r.clock.now += 20_000;
+  r.sessions.submitWatchFrame(id, "back", FRAME_BACK_A, HASH_A, true);
+  assert.equal(r.sessions.state(id).active, true, "a watched call is not idle while frames arrive");
+
+  // Watch off, then silence: the ordinary rule resumes.
+  r.sessions.submitWatch(id, false);
+  r.clock.now += 31_000;
+  r.sessions.tick();
+  const ended = r.sessions.state(id);
+  assert.equal(ended.active, false);
+  assert.equal(ended.endedReason, "idle-timeout");
+});
+
+test("watch (v0.37.0): a parked approval owns the floor — no ambient observation is queued", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "gus-voice-watch-park-"));
+  writeVoiceConfig(
+    dir,
+    {
+      enabled: true,
+      enginesChosen: true,
+      sttEngine: "local",
+      sttBaseUrl: "http://stt.test/v1",
+      sttModel: "whisper-1",
+      ttsEngine: "local",
+      ttsBaseUrl: "http://tts.test/v1",
+      ttsModel: "kokoro",
+      ttsVoice: "af_heart",
+      bargeIn: true,
+      shieldScan: true,
+    },
+    "test",
+  );
+  const voice = new VoiceAdapter();
+  const sessions = new VoiceSessionService(dir, voice, {
+    pendingFor: () => ({ id: "appr-1", summary: "Do the thing." }),
+  }, { now: () => 5_000_000, replyTimeoutMs: 50 });
+  const started = await sessions.start();
+  assert.equal(started.ok, true, started.detail);
+  const id = started.sessionId!;
+
+  assert.equal(sessions.submitWatch(id, true, ["back"]).ok, true);
+  const framed = sessions.submitWatchFrame(id, "back", FRAME_BACK_A, HASH_A);
+  assert.equal(framed.ok, true, framed.detail);
+  await sessions.drain();
+
+  const state = sessions.state(id);
+  assert.equal(state.turns.length, 0, "no ambient turn was minted while a park waited");
+  assert.equal(state.watch?.on, true, "the eyes still refreshed — only the turn was held");
+  sessions.end(id);
+});
+
+
 test("session approvals: read-back in the call, ambiguous = nothing, exact confirm executes", async () => {
   const r = await sessionRig({ transcripts: ["write the file", "yes", "yes, do it"] });
   const id = await startCall(r);
@@ -1263,6 +1646,20 @@ test("session panel routes: start/audio/state/next-audio/interrupt/end, token-ga
       rec.transcript = { sessionId, text };
       return { ok: true, detail: "heard" };
     },
+    voiceSessionWatch: (sessionId: string, on: boolean, cameras?: string[]) => {
+      rec.watch = { sessionId, on, cameras };
+      return { ok: true, detail: "watch" };
+    },
+    voiceSessionWatchFrame: (
+      sessionId: string,
+      camera: string,
+      image?: { mediaType: string; data: string },
+      hash?: string,
+      turnRefresh?: boolean,
+    ) => {
+      rec.watchFrame = { sessionId, camera, mediaType: image?.mediaType, hash, turnRefresh };
+      return { ok: true, detail: "frame" };
+    },
     voiceSessionState: (sessionId: string) => {
       rec.stateId = sessionId;
       return sessionState("in progress");
@@ -1328,6 +1725,38 @@ test("session panel routes: start/audio/state/next-audio/interrupt/end, token-ga
     assert.equal(posted.status, 200);
     assert.deepEqual(rec.transcript, { sessionId: "call-test", text: "hello gus" },
       "the transcript crossed as JSON, session id + words intact");
+
+    // v0.37.0: Watch mode's toggle and frame routes — the
+    // toggle carries the fact and the camera names; a frame
+    // carries one camera's image, its hash, and its mark.
+    const watchOn = await fetch(`${base}/api/voice/session/watch`, {
+      method: "POST",
+      headers: { ...AUTH, "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: "call-test", on: true, cameras: ["back"] }),
+    });
+    assert.equal(watchOn.status, 200);
+    assert.deepEqual(rec.watch, { sessionId: "call-test", on: true, cameras: ["back"] },
+      "the watch toggle crossed as JSON, session id + cameras intact");
+
+    const frame = await fetch(`${base}/api/voice/session/watch-frame`, {
+      method: "POST",
+      headers: { ...AUTH, "content-type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "call-test",
+        camera: "back",
+        image: { mediaType: "image/jpeg", data: "QUJD" },
+        hash: "0123456789abcdef",
+        turnRefresh: true,
+      }),
+    });
+    assert.equal(frame.status, 200);
+    assert.deepEqual(rec.watchFrame, {
+      sessionId: "call-test",
+      camera: "back",
+      mediaType: "image/jpeg",
+      hash: "0123456789abcdef",
+      turnRefresh: true,
+    }, "the frame crossed as JSON, image + hash + mark intact");
 
     const seg = await (await fetch(`${base}/api/voice/session/next-audio?session=call-test&after=3`, {
       headers: AUTH,

@@ -202,8 +202,15 @@ export class VoiceAdapter implements ChannelAdapter {
    * submit (no words) is a real message, as on the chat door;
    * words with no photo and a photo with no words are both
    * submittable, neither alone is not.
+   *
+   * v0.37.0: `liveView` marks a submit whose images are (or
+   * include) the call camera's current view — Watch mode's
+   * eyes, attached by the session service to the operator's
+   * turn. It rides the message as the liveView flag, and the
+   * host frames the images as a live view instead of an
+   * attachment. Only meaningful alongside images.
    */
-  submit(text: string, images?: MessageImage[]): { ok: boolean; detail: string } {
+  submit(text: string, images?: MessageImage[], liveView = false): { ok: boolean; detail: string } {
     const trimmed = text.trim();
     const photos = images?.length ? images : undefined;
     if (!trimmed && !photos) return { ok: false, detail: "Nothing was heard — nothing was sent." };
@@ -218,6 +225,7 @@ export class VoiceAdapter implements ChannelAdapter {
         senderId: VOICE_SENDER,
         text: trimmed,
         ...(photos ? { images: photos } : {}),
+        ...(photos && liveView ? { liveView: true } : {}),
         receivedAt: Date.now(),
         // v0.9.8: every submit from this adapter is a voice
         // turn's words. The host turns the flag into the job's
@@ -369,7 +377,11 @@ export class VoiceCallService {
    * it sentence by sentence). Public within the package: the
    * session service is the second caller, not a second pipeline.
    */
-  async processTranscript(transcript: string, images?: MessageImage[]): Promise<VoiceCallResult> {
+  async processTranscript(
+    transcript: string,
+    images?: MessageImage[],
+    opts?: { liveView?: boolean },
+  ): Promise<VoiceCallResult> {
     this.adapter.drainStale();
     const phrase = classifyTranscript(transcript);
     const pending = this.approvals.pendingFor(VOICE_CONVERSATION);
@@ -428,7 +440,10 @@ export class VoiceCallService {
     // control paths and never carry pictures: a photo turn
     // whose words happen to be a speech act is answered as
     // the speech act, like any spoken turn.
-    const sent = this.adapter.submit(transcript, images);
+    // v0.37.0: Watch mode's eyes ride the same submit, marked
+    // liveView so the host frames them as the camera's current
+    // view rather than an attachment the operator sent.
+    const sent = this.adapter.submit(transcript, images, opts?.liveView === true);
     if (!sent.ok) return { ok: false, kind: "unavailable", transcript, detail: sent.detail };
     const reply = await this.adapter.waitForReply(this.replyTimeoutMs);
     if (reply === undefined) {

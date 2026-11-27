@@ -62,6 +62,21 @@ export function photoNote(count: number, hasText: boolean): string {
     : `(The operator sent ${count} ${noun} with no caption — ${count === 1 ? "it is" : "they are"} included with this message as image input. Describe what you see and answer any question the ${noun} imply.)`;
 }
 
+/** v0.37.0 (Watch mode): the live-view sibling of photoNote —
+ *  appended by the HOST when a voice turn's images are the
+ *  call camera's current view (the session's "eyes"), attached
+ *  by the voice session service, not sent by the operator as a
+ *  message attachment. The framing says so plainly: this is
+ *  what the camera sees RIGHT NOW, while the operator talks.
+ *  Same construction as photoNote — control-plane-authored;
+ *  the job record keeps the operator's verbatim words. */
+export function liveViewNote(count: number, hasText: boolean): string {
+  const noun = count === 1 ? "image" : "images";
+  return hasText
+    ? `\n\n(Live view: this voice call's camera is on (Watch mode), and the ${noun} included with this message ${count === 1 ? "is" : "are"} what the camera sees right now. Treat ${count === 1 ? "it" : "them"} as the operator's current view — what they are looking at or showing you as they speak — and use ${count === 1 ? "it" : "them"} as part of answering.)`
+    : `(Live view: this voice call's camera is on (Watch mode). The ${noun} included with this message ${count === 1 ? "is" : "are"} what the camera sees right now — the operator is showing you their current view. Describe what you see and answer any question the view implies.)`;
+}
+
 /** v0.14.1 (execution tasks): appended by the HOST to a task job's
  *  runtime prompt, the same construction as the voice note above —
  *  control-plane-authored steering; the job record's inputHash
@@ -831,7 +846,15 @@ export class ChannelHost {
       // v0.24.0: the photo framing rides the runtime prompt (the
       // record keeps the operator's words; the images themselves
       // ride the delivery below as image input).
-      (images ? photoNote(images.length, text.length > 0) : "");
+      // v0.37.0: a voice turn whose images are the call camera's
+      // live view gets the live-view framing instead — the
+      // operator didn't attach a photo; the call is showing the
+      // model its eyes.
+      (images
+        ? msg.liveView
+          ? liveViewNote(images.length, text.length > 0)
+          : photoNote(images.length, text.length > 0)
+        : "");
     this.pendingDeliveries.set(job.id, jobText);
     this.comm.pushUserMessage({
       jobId: job.id,

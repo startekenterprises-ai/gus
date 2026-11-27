@@ -100,6 +100,11 @@ struct VoiceSessionState: Decodable {
         /// last with a default: the local turn constructors
         /// in CallSession predate it and omit it.
         let photos: Int? = nil
+        /// v0.37.0: this turn is an ambient Watch observation
+        /// — nobody spoke; its replyText, when present, is
+        /// the comment GUS spoke about the camera's view.
+        /// Same default treatment as photos.
+        let watch: Bool? = nil
         var id: Int { index }
     }
     let ok: Bool
@@ -110,7 +115,17 @@ struct VoiceSessionState: Decodable {
     let sttMode: String?
     let ttsMode: String?
     let speechNotice: String?
+    /// v0.37.0: the call's Watch summary — whether the
+    /// camera view is streaming to the core, and which
+    /// cameras the app said are live. The frames themselves
+    /// never cross in state; this is all a poll ever sees.
+    let watch: Watch?
     let turns: [Turn]
+
+    struct Watch: Decodable {
+        let on: Bool
+        let cameras: [String]
+    }
 }
 
 /// GET /api/chat/history — the core's chat transcript (v0.6):
@@ -538,6 +553,38 @@ actor GUSClient {
         return try decode(ActionResult.self, await request(
             "/api/voice/session/transcript", method: "POST",
             jsonBody: body))
+    }
+
+    /// Watch mode (v0.37.0): the per-call camera toggle.
+    /// Turning it on names the cameras about to stream (the
+    /// app's mode); turning it off drops the frames the core
+    /// holds — the eyes close and nothing of them remains.
+    /// The toggle carries no image data.
+    @discardableResult
+    func voiceSessionWatch(sessionId: String, on: Bool, cameras: [String]) async throws -> ActionResult {
+        try decode(ActionResult.self, await request(
+            "/api/voice/session/watch", method: "POST",
+            jsonBody: ["sessionId": sessionId, "on": on, "cameras": cameras]))
+    }
+
+    /// One Watch frame (v0.37.0): one camera's latest view —
+    /// a small JPEG (long edge ≤768, q0.4, encoded by
+    /// WatchFrameEncoder), its perceptual hash, and whether
+    /// it is a turn refresh (the fresh grab taken as the
+    /// operator finished a turn: it updates the session's
+    /// eyes but never starts an ambient observation of its
+    /// own). The core holds frames in memory only.
+    @discardableResult
+    func voiceSessionWatchFrame(sessionId: String, camera: String, image: Data, hash: String, turnRefresh: Bool) async throws -> ActionResult {
+        try decode(ActionResult.self, await request(
+            "/api/voice/session/watch-frame", method: "POST",
+            jsonBody: [
+                "sessionId": sessionId,
+                "camera": camera,
+                "image": ["mediaType": "image/jpeg", "data": image.base64EncodedString()],
+                "hash": hash,
+                "turnRefresh": turnRefresh,
+            ]))
     }
 
     /// A raw PCM16 audio chunk, for calls whose resolved STT

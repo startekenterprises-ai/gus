@@ -2,6 +2,7 @@ import AVFoundation
 import Foundation
 import ShieldKit
 import Speech
+import UIKit
 
 // The live call (v0.15.0, R4) — a REAL call, never push-to-talk
 // (Glenn's ruling, 2026-11-19): tap Call, talk, interrupt GUS
@@ -153,6 +154,53 @@ final class CallSession: NSObject, ObservableObject {
     /// rendered in the transcript panel at their turn
     /// anchors. Memory only — see the struct.
     @Published private(set) var photoEntries: [CallPhotoEntry] = []
+
+    // Watch mode (v0.37.0): the call's eyes. The operator's
+    // per-call tap (CallView's Watch control) is the ONLY
+    // way in — Watch never starts itself, not even on a
+    // start-in-call launch. While on, the WatchCapture
+    // controller runs the camera(s) and this session samples
+    // its latest frames to the core, which holds them in
+    // memory as the session's eyes and drops them when
+    // Watch turns off or the call ends. On-device calls
+    // can't watch (the local brain has no vision) — the
+    // toggle says so in plain words and captures nothing.
+    @Published private(set) var watchOn = false
+    @Published private(set) var watchMode: WatchCameraMode = .back
+    /// A Watch problem, in plain words for the call screen:
+    /// permission off, the on-device explanation, a start
+    /// the core refused. Set where it happens, cleared when
+    /// Watch next turns on or off cleanly.
+    @Published private(set) var watchNotice: String?
+    @Published private(set) var watchTorchOn = false
+    /// The torch can only exist while the back camera is
+    /// live and the device has one — recomputed at every
+    /// mode change (refreshWatchTorch).
+    @Published private(set) var watchTorchUsable = false
+    /// Whether this phone can run both cameras at once —
+    /// read from the controller when Watch turns on; the
+    /// Both control exists only when this is true.
+    @Published private(set) var watchBothSupported = false
+    private let watchCapture = WatchCaptureController()
+    private var watchSamplerTask: Task<Void, Never>?
+    /// The app left the foreground mid-watch: the capture
+    /// session is stopped (the camera is off while the app
+    /// is away — the background-audio mode keeps the CALL,
+    /// never the camera) and sampling is paused. Foreground
+    /// return resumes both, if the call is still live.
+    private var watchSuspended = false
+    private var watchBackgroundObserver: NSObjectProtocol?
+    private var watchForegroundObserver: NSObjectProtocol?
+    /// The baseline sampling cadence: a fresh frame set
+    /// every 12 s while watching (SerenAI's proven 15 s
+    /// comment rhythm, a touch quicker) — plus an immediate
+    /// grab whenever a turn ends, so an answer is grounded
+    /// in the view as it is, not as it was.
+    private static let watchSampleSeconds: UInt64 = 12
+
+    /// The capture's preview surface, for the call screen
+    /// to embed while watching.
+    var watchPreviewView: UIView { watchCapture.previewView }
     @Published private(set) var isMuted: Bool = false
     /// Output route: speaker (the default — calls start on
     /// speaker) or earpiece, toggled from the call screen.
@@ -322,6 +370,11 @@ final class CallSession: NSObject, ObservableObject {
         liveReplyText = ""
         turns = []
         photoEntries = []
+        // Watch is per-call and never survives into a new
+        // one: a previous call's watch was stopped when it
+        // ended, and this is the belt to that suspender.
+        if watchOn { stopWatch(announce: false) }
+        watchNotice = nil
         lastSeq = 0
         playbackFailuresThisCall = 0
         callMode = CallMode.preferred
@@ -493,6 +546,25 @@ final class CallSession: NSObject, ObservableObject {
                 Task { @MainActor in self?.handleMediaServicesReset() }
             }
         }
+        // Watch's foreground discipline (v0.37.0): the
+        // camera suspends when the app leaves the foreground
+        // and resumes on return — registered with the call's
+        // lifecycle observers, removed with them, and inert
+        // whenever Watch is off (the handlers check).
+        if watchBackgroundObserver == nil {
+            watchBackgroundObserver = center.addObserver(
+                forName: UIApplication.didEnterBackgroundNotification,
+                object: nil, queue: nil) { [weak self] _ in
+                Task { @MainActor in self?.handleWatchBackground() }
+            }
+        }
+        if watchForegroundObserver == nil {
+            watchForegroundObserver = center.addObserver(
+                forName: UIApplication.willEnterForegroundNotification,
+                object: nil, queue: nil) { [weak self] _ in
+                Task { @MainActor in self?.handleWatchForeground() }
+            }
+        }
     }
 
     private func removeAudioLifecycleObservers() {
@@ -500,9 +572,13 @@ final class CallSession: NSObject, ObservableObject {
         if let interruptionObserver { center.removeObserver(interruptionObserver) }
         if let routeChangeObserver { center.removeObserver(routeChangeObserver) }
         if let mediaResetObserver { center.removeObserver(mediaResetObserver) }
+        if let watchBackgroundObserver { center.removeObserver(watchBackgroundObserver) }
+        if let watchForegroundObserver { center.removeObserver(watchForegroundObserver) }
         interruptionObserver = nil
         routeChangeObserver = nil
         mediaResetObserver = nil
+        watchBackgroundObserver = nil
+        watchForegroundObserver = nil
         audioInterrupted = false
     }
 
@@ -733,6 +809,11 @@ final class CallSession: NSObject, ObservableObject {
         guard phase == .live || phase == .connecting else { return }
         phase = .ended
         Self.isAnyCallLive = false
+        // The camera stops with the call (v0.37.0): capture
+        // off, sampler off, and the core told to drop the
+        // eyes it holds — before the session end below, so
+        // the drop lands while the session still exists.
+        stopWatch(announce: false)
         removeAudioLifecycleObservers()
         pendingShieldQuarantine = nil
         watchdogTask?.cancel(); watchdogTask = nil
@@ -755,6 +836,7 @@ final class CallSession: NSObject, ObservableObject {
     private func fail(_ message: String) {
         errorText = message
         voiceLevel = 0
+        stopWatch(announce: false)
         removeAudioLifecycleObservers()
         pendingShieldQuarantine = nil
         phase = .ended
@@ -925,7 +1007,15 @@ final class CallSession: NSObject, ObservableObject {
         if transport == .local {
             answerLocally(text)
         } else if let id = sessionId {
-            Task { _ = try? await client.voiceSessionTranscript(sessionId: id, text: text) }
+            Task {
+                // Watch (v0.37.0): the fresh frame goes
+                // FIRST, awaited, so the core's eyes are
+                // current before this message's turn runs —
+                // the answer is grounded in the view as it
+                // is. A no-op unless Watch is on.
+                await self.uploadWatchFrames(turnRefresh: true)
+                _ = try? await client.voiceSessionTranscript(sessionId: id, text: text)
+            }
         }
     }
 
@@ -1020,6 +1110,262 @@ final class CallSession: NSObject, ObservableObject {
         photoEntries[idx].note = note
     }
 
+    // MARK: - Watch mode (v0.37.0)
+
+    /// The Watch toggle (CallView's Watch control): the one
+    /// and only way the camera starts. On-device, there is
+    /// nothing to start — the local brain has no vision, so
+    /// the toggle explains itself in plain words on the call
+    /// screen and in the transcript, and NO frame is ever
+    /// captured. In Core mode the core is told first (its
+    /// refusal, if any, is the answer the operator sees);
+    /// only then does the capture start and the sampler run.
+    func setWatch(on: Bool) {
+        if on {
+            startWatch()
+        } else {
+            stopWatch(announce: true)
+        }
+    }
+
+    private func startWatch() {
+        guard phase == .live else { return }
+        guard transport == .core, let id = sessionId else {
+            let words = "Watching needs Core mode — this brain can't see yet."
+            watchNotice = words
+            appendPhotoEntry(imageData: nil, note: words)
+            return
+        }
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            beginWatch(sessionId: id)
+        case .notDetermined:
+            // The system's ask, in context, over the call
+            // screen — the same discipline as the still
+            // camera's gate (v0.36.0).
+            Task {
+                let granted = await AVCaptureDevice.requestAccess(for: .video)
+                guard granted else {
+                    self.watchPermissionDenied()
+                    return
+                }
+                guard self.phase == .live, self.transport == .core,
+                      let id = self.sessionId else { return }
+                self.beginWatch(sessionId: id)
+            }
+        case .denied, .restricted:
+            watchPermissionDenied()
+        @unknown default:
+            watchPermissionDenied()
+        }
+    }
+
+    private func watchPermissionDenied() {
+        let words = "Camera access is off for GUS — turn it on in Settings → GUS → Camera if you want GUS to watch."
+        watchNotice = words
+        appendPhotoEntry(imageData: nil, note: words)
+    }
+
+    private func beginWatch(sessionId id: String) {
+        Task {
+            do {
+                let result = try await client.voiceSessionWatch(
+                    sessionId: id, on: true, cameras: watchMode.cameraNames)
+                guard result.ok else {
+                    watchNotice = result.detail
+                    appendPhotoEntry(imageData: nil, note: result.detail)
+                    return
+                }
+            } catch {
+                let words = "Watching couldn't start — \(error.localizedDescription)"
+                watchNotice = words
+                appendPhotoEntry(imageData: nil, note: words)
+                return
+            }
+            // The call may have ended while the core was
+            // answering: then the watch is undone at once,
+            // not left running into a dead session.
+            guard phase == .live, sessionId == id else {
+                _ = try? await client.voiceSessionWatch(
+                    sessionId: id, on: false, cameras: [])
+                return
+            }
+            watchOn = true
+            watchNotice = nil
+            watchBothSupported = WatchCaptureController.isMultiCamSupported
+            watchCapture.onEffectiveModeChange = { [weak self] mode in
+                Task { @MainActor in self?.watchFellBack(to: mode) }
+            }
+            watchCapture.onFailure = { [weak self] words in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.watchNotice = words
+                    self.appendPhotoEntry(imageData: nil, note: words)
+                    self.stopWatch(announce: false)
+                }
+            }
+            watchCapture.start(mode: watchMode)
+            refreshWatchTorch()
+            appendPhotoEntry(
+                imageData: nil,
+                note: "Watching on — GUS can see what the \(watchMode.label) sees. Frames aren't saved.")
+            startWatchSampler()
+            // The first frame as soon as the capture has one
+            // to give (conversion takes a beat to land).
+            Task {
+                try? await Task.sleep(nanoseconds: 750_000_000)
+                await self.uploadWatchFrames(turnRefresh: false)
+            }
+        }
+    }
+
+    /// Both cameras were asked for and this phone couldn't
+    /// run them together on the day: the controller fell
+    /// back to one camera — the call screen hears about it
+    /// in the transcript, and the core's camera list is
+    /// corrected to match what is actually streaming.
+    private func watchFellBack(to mode: WatchCameraMode) {
+        guard watchOn else { return }
+        watchMode = mode
+        refreshWatchTorch()
+        appendPhotoEntry(
+            imageData: nil,
+            note: "This iPhone can't run both cameras at once right now — watching with the \(mode.label).")
+        if let id = sessionId {
+            Task {
+                _ = try? await client.voiceSessionWatch(
+                    sessionId: id, on: true, cameras: mode.cameraNames)
+            }
+        }
+    }
+
+    /// Watch off: capture stops, the sampler stops, the
+    /// torch dies with the camera, and the core is told to
+    /// drop the eyes it holds. Announced in the transcript
+    /// only for the operator's own toggle — a call ending
+    /// (endCall / fail) stops the watch silently, because
+    /// the call's own ending is the announcement there.
+    private func stopWatch(announce: Bool) {
+        let wasOn = watchOn
+        watchOn = false
+        watchSamplerTask?.cancel()
+        watchSamplerTask = nil
+        watchCapture.stop()
+        watchTorchOn = false
+        watchSuspended = false
+        if announce { watchNotice = nil }
+        guard wasOn else { return }
+        if let id = sessionId {
+            Task {
+                _ = try? await client.voiceSessionWatch(
+                    sessionId: id, on: false, cameras: [])
+            }
+        }
+        if announce {
+            appendPhotoEntry(imageData: nil, note: "Watching off.")
+        }
+    }
+
+    /// Flip / Both from the call screen: the capture
+    /// rebuilds around the new mode, the core's camera list
+    /// is re-posted to match, and the torch's usability is
+    /// recomputed (the front camera has no torch to offer).
+    func setWatchMode(_ newMode: WatchCameraMode) {
+        guard newMode != watchMode else { return }
+        watchMode = newMode
+        guard watchOn else { return }
+        watchCapture.setMode(newMode)
+        refreshWatchTorch()
+        if let id = sessionId {
+            Task {
+                _ = try? await client.voiceSessionWatch(
+                    sessionId: id, on: true, cameras: newMode.cameraNames)
+            }
+        }
+        VoiceFailureLog.shared.recordInfo("Watch camera: \(newMode.rawValue).")
+    }
+
+    func setWatchTorch(_ on: Bool) {
+        if watchCapture.setTorch(on) {
+            watchTorchOn = on
+        }
+    }
+
+    private func refreshWatchTorch() {
+        let backActive = watchMode == .back || watchMode == .both
+        watchTorchUsable = backActive && watchCapture.backTorchAvailable
+        if !watchTorchUsable && watchTorchOn {
+            _ = watchCapture.setTorch(false)
+            watchTorchOn = false
+        }
+    }
+
+    /// The baseline sampler: while watching, a fresh frame
+    /// set every 12 s. Suspended (backgrounded) ticks are
+    /// skipped — no capture runs while the app is away, so
+    /// there is nothing new to send.
+    private func startWatchSampler() {
+        watchSamplerTask?.cancel()
+        watchSamplerTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(
+                    nanoseconds: Self.watchSampleSeconds * 1_000_000_000)
+                guard let self, self.watchOn, self.phase == .live,
+                      !self.watchSuspended else { continue }
+                await self.uploadWatchFrames(turnRefresh: false)
+            }
+        }
+    }
+
+    /// Send the capture's latest frame for each live camera
+    /// to the core as the session's eyes. Fire-and-forget by
+    /// design: a frame that fails to land is superseded by
+    /// the next one seconds later, and the core refuses
+    /// frames for a call that has ended — neither is worth
+    /// words on the call screen. Frames are encoded here,
+    /// in memory, from the capture's stored images: nothing
+    /// is written to any file, in any mode, incognito
+    /// included (an incognito Core call's frames travel to
+    /// the Mac exactly like its audio — the v0.34.0
+    /// boundary — and are kept nowhere).
+    func uploadWatchFrames(turnRefresh: Bool) async {
+        guard watchOn, transport == .core, let id = sessionId else { return }
+        for slot in watchMode.slots {
+            guard let image = watchCapture.latestFrame(for: slot),
+                  let encoded = WatchFrameEncoder.encode(image)
+            else { continue }
+            _ = try? await client.voiceSessionWatchFrame(
+                sessionId: id, camera: slot.rawValue,
+                image: encoded.data, hash: encoded.hash,
+                turnRefresh: turnRefresh)
+        }
+    }
+
+    /// The app left the foreground mid-watch: the capture
+    /// session stops — the camera is OFF while the app is
+    /// away. The call itself keeps running on its
+    /// background-audio mode, as it always has; only the
+    /// eyes close. The core keeps the last frames it held
+    /// (memory only, dropped at Watch-off or call end); on
+    /// return, a fresh frame replaces them at once.
+    private func handleWatchBackground() {
+        guard watchOn, !watchSuspended else { return }
+        watchSuspended = true
+        watchCapture.suspend()
+        VoiceFailureLog.shared.recordInfo(
+            "Watch suspended — the app left the foreground; the camera is off and sampling paused.")
+    }
+
+    private func handleWatchForeground() {
+        guard watchOn, watchSuspended else { return }
+        watchSuspended = false
+        guard phase == .live else { return }
+        watchCapture.resume()
+        Task { await self.uploadWatchFrames(turnRefresh: false) }
+        VoiceFailureLog.shared.recordInfo(
+            "Watch resumed — the app is back in the foreground.")
+    }
+
     /// Endpoint mode: convert a mic buffer to 16 kHz mono
     /// PCM16 and post ~100 ms chunks to the core. Runs on the
     /// audio tap's thread; the converter and accumulator are
@@ -1088,7 +1434,15 @@ final class CallSession: NSObject, ObservableObject {
                 if transport == .local {
                     answerLocally(trimmed)
                 } else if sttMode == "local", let id = sessionId {
-                    Task { _ = try? await client.voiceSessionTranscript(sessionId: id, text: trimmed) }
+                    Task {
+                        // Watch (v0.37.0): the fresh frame
+                        // goes FIRST, awaited — the core's
+                        // eyes are current before the turn
+                        // runs (see sendTypedMessage). A
+                        // no-op unless Watch is on.
+                        await self.uploadWatchFrames(turnRefresh: true)
+                        _ = try? await client.voiceSessionTranscript(sessionId: id, text: trimmed)
+                    }
                 }
             }
         }
