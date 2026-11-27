@@ -53,6 +53,30 @@ struct PersonaStarter: Identifiable {
         PersonaVoiceAssignment.voiceID(forPersona: id) ?? voiceID
     }
 
+    /// The words this persona actually speaks with
+    /// (v0.44.0): the operator's saved edit when one
+    /// exists (Personas tab → Edit, kept as an override in
+    /// PersonaPromptOverrides), else the shipped prompt
+    /// above. Every pick writes THIS into the prompt field
+    /// and every identity match reads it, so an edited
+    /// starter is still itself — same face, same voice,
+    /// same memory bucket, same paired brain — only its
+    /// words are the operator's. For a created persona
+    /// (vended from CustomPersonaStore) the record's words
+    /// are its own and no override ever applies, so this
+    /// is simply `prompt`.
+    var effectivePrompt: String {
+        PersonaPromptOverrides.prompt(for: id) ?? prompt
+    }
+
+    /// Whether the operator has edited this persona's
+    /// words (the picker's "Edited" marker, the editor's
+    /// Reset affordance). Created personas edit their
+    /// record directly and never carry an override.
+    var hasPromptOverride: Bool {
+        PersonaPromptOverrides.prompt(for: id) != nil
+    }
+
     /// The line this persona's voice preview speaks
     /// (v0.33.0): a few words in character, so auditioning
     /// voices FOR a persona (the Personas tab's voice card)
@@ -546,21 +570,23 @@ final class LocalBrain {
                               personaID: activeMemoryPersonaID)
     }
 
-    /// The starter the operator has picked, if the saved
-    /// prompt is exactly a starter's words (v0.31.0). An
-    /// edited prompt matches nothing — the operator's own
-    /// words are a custom persona with no face or voice of
+    /// The persona the operator has picked, if the saved
+    /// prompt is exactly a persona's effective words
+    /// (v0.31.0; the shelf widened in v0.44.0). A hand-edited
+    /// prompt matches nothing — those words are an
+    /// anonymous custom persona with no face or voice of
     /// its own. This one match is how the picker, the
     /// avatar, and the voice all know who is on.
     static var activeStarter: PersonaStarter? {
         guard let prompt = customPrompt else { return nil }
-        return personaStarters.first { $0.prompt == prompt }
+        return allPersonas.first { $0.effectivePrompt == prompt }
     }
 
-    /// A starter by its stable id (debate slots, message
-    /// attribution) — nil for an id the shelf doesn't carry.
+    /// A persona by its stable id (debate slots, message
+    /// attribution) — shipped or created; nil for an id
+    /// the shelf doesn't carry.
     static func starter(id: String) -> PersonaStarter? {
-        personaStarters.first { $0.id == id }
+        allPersonas.first { $0.id == id }
     }
 
     /// The memory bucket the active persona carries
@@ -842,6 +868,23 @@ final class LocalBrain {
                 cropOriginX: 0.12, cropOriginY: 0.08, cropSide: 0.70,
                 mouthCenterX: 0.543, mouthCenterY: 0.864, mouthWidth: 0.34)),
     ]
+
+    /// The whole shelf (v0.44.0): the shipped starters
+    /// above plus the operator's own created personas
+    /// (CustomPersonaStore, vended as starters), in picker
+    /// order — shipped first, then their own in the order
+    /// they were made. Identity resolution reads this (the
+    /// pick, debate slots, message attribution), so a
+    /// created persona is a first-class citizen everywhere
+    /// a shipped one is. Surfaces that mean the SHIPPED
+    /// shelf specifically — Settings' starter shelf, and
+    /// the literals the Mac roster is pinned against —
+    /// keep reading personaStarters itself: the shipped
+    /// array stays a stored, published text, and customs
+    /// are runtime state that never touches it.
+    static var allPersonas: [PersonaStarter] {
+        personaStarters + CustomPersonaStore.shared.starters
+    }
 
     private let bot: LLM
 

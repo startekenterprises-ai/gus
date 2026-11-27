@@ -10,6 +10,14 @@ import SwiftUI
 /// made here is the pick Settings' editor shows (and vice
 /// versa).
 ///
+/// v0.44.0: the shelf carries the operator's own created
+/// personas after the shipped six (CustomPersonaStore),
+/// picks write a persona's EFFECTIVE words (its saved
+/// edit when one stands), and the card at the bottom is
+/// the customization door — edit a starter's words, or
+/// create, edit, and delete personas of their own
+/// (PersonaEditorView).
+///
 /// v0.31.0: the picker is a horizontal strip of FACES —
 /// each persona wears its own portrait now, name underneath,
 /// no blurbs; the selected face is ringed and a touch
@@ -54,6 +62,15 @@ struct PersonaPickerView: View {
     /// the memory card's count moves the beat a line is
     /// remembered or forgotten, wherever it happened.
     @ObservedObject private var memoryStore = PersonaMemoryStore.shared
+    /// The created personas (v0.44.0) — observed so a
+    /// create, an edit, or a delete in the editor below
+    /// moves the strip and the management rows in the
+    /// same beat.
+    @ObservedObject private var customStore = CustomPersonaStore.shared
+    /// The editor's current target (v0.44.0): a starter
+    /// to edit, a created persona to edit, or a new one
+    /// to make. Presented as a sheet over the picker.
+    @State private var editorTarget: PersonaEditorTarget?
     @AppStorage("gus.avatar.stock") private var stockAvatar = "boy"
 
     /// The stored pick, mirrored live by PersonaSelection.
@@ -71,11 +88,15 @@ struct PersonaPickerView: View {
     /// observable state.
     @State private var cardVoiceID: String?
 
-    /// A saved prompt that no starter matches — the
-    /// operator's own edited words from Settings.
+    /// A saved prompt that no persona on the shelf
+    /// matches — the operator's own hand-edited words
+    /// from Settings. (A CREATED persona is on the shelf
+    /// and matches by its own words, so this state is
+    /// only ever the anonymous edit — the cell below
+    /// keeps its "Custom" name for it.)
     private var currentIsCustom: Bool {
         guard let currentPrompt else { return false }
-        return !LocalBrain.personaStarters.contains { $0.prompt == currentPrompt }
+        return !LocalBrain.allPersonas.contains { $0.effectivePrompt == currentPrompt }
     }
 
     /// The stock face — what General wears (and what a
@@ -108,11 +129,15 @@ struct PersonaPickerView: View {
                         .font(.callout)
                         .foregroundColor(.secondary)
                 }
-                Text("A pick is a package: the persona's words, its voice, its face, and its memory change together, and they land right away — the brain reloads in this same app run with your next message or call. While the Gmail demo pitch is on (Settings → Call mode), it wins over any persona. Making a starter's words your own still happens in Settings — nothing here is locked. A persona's voice can be changed in the card above (the Personas tab is its home — a pick made from the avatar sheet closes the sheet first): tap the play button to hear a voice say the persona's line before you choose it.")
+                manageCard
+                Text("A pick is a package: the persona's words, its voice, its face, and its memory change together, and they land right away — the brain reloads in this same app run with your next message or call. While the Gmail demo pitch is on (Settings → Call mode), it wins over any persona. A persona's voice can be changed in the card above (the Personas tab is its home — a pick made from the avatar sheet closes the sheet first): tap the play button to hear a voice say the persona's line before you choose it.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
             .padding(16)
+        }
+        .sheet(item: $editorTarget) { target in
+            PersonaEditorView(target: target)
         }
         .onAppear {
             cardVoiceID = LocalBrain.activeStarter?.assignedVoiceID
@@ -141,7 +166,17 @@ struct PersonaPickerView: View {
                 }
                 ForEach(LocalBrain.personaStarters) { starter in
                     cell(name: starter.name, face: starter.face,
-                         selected: currentPrompt == starter.prompt) {
+                         selected: currentPrompt == starter.effectivePrompt) {
+                        choose(starter)
+                    }
+                }
+                // The operator's own (v0.44.0): created
+                // personas ride the same strip, right
+                // after the shipped shelf — same cells,
+                // same pick, same package.
+                ForEach(customStore.starters) { starter in
+                    cell(name: starter.name, face: starter.face,
+                         selected: currentPrompt == starter.effectivePrompt) {
                         choose(starter)
                     }
                 }
@@ -190,7 +225,11 @@ struct PersonaPickerView: View {
         // setter's job since v0.32.0), so this view's
         // highlight — and every other surface's face and
         // name — moves with the pick, no local copy to sync.
-        LocalBrain.customPrompt = starter?.prompt
+        // The words written are the persona's EFFECTIVE
+        // words (v0.44.0) — an edited starter is picked by
+        // its edit, so the pick and the identity match in
+        // LocalBrain.activeStarter read the same text.
+        LocalBrain.customPrompt = starter?.effectivePrompt
         switchNote = nil
         downloadOffer = nil
         if let starter {
@@ -339,6 +378,69 @@ struct PersonaPickerView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.secondary.opacity(0.08))
         .cornerRadius(12)
+    }
+
+    // MARK: - The make-it-yours card
+
+    /// The customization door (v0.44.0): every starter's
+    /// words can be edited (the edit is an override — the
+    /// shipped words stay shipped, and Reset removes the
+    /// edit), and personas of the operator's own can be
+    /// created, edited, and deleted. The editor is one
+    /// sheet (PersonaEditorView) with three targets; this
+    /// card is just its index — a row per persona, an
+    /// "Edited" marker where an override stands, and the
+    /// New persona button at the top.
+    private var manageCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Make it yours")
+                .font(.callout)
+                .fontWeight(.semibold)
+            Text("Edit a starter's words — your edit replaces them until you reset it — or create a persona of your own: a name, its words, a voice, and a face from the portraits already here. Your personas live on this iPhone only.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Button {
+                editorTarget = .new
+            } label: {
+                Label("New persona", systemImage: "plus.circle")
+                    .font(.callout)
+            }
+            ForEach(LocalBrain.personaStarters) { starter in
+                manageRow(name: starter.name,
+                          edited: starter.hasPromptOverride) {
+                    editorTarget = .starter(starter)
+                }
+            }
+            ForEach(customStore.personas) { record in
+                manageRow(name: record.name, edited: false) {
+                    editorTarget = .custom(record)
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.08))
+        .cornerRadius(12)
+    }
+
+    private func manageRow(name: String, edited: Bool,
+                           action: @escaping () -> Void) -> some View {
+        HStack(spacing: 8) {
+            Text(name)
+                .font(.callout)
+            if edited {
+                Text("Edited")
+                    .font(.caption2)
+                    .fontWeight(.semibold)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.accentColor.opacity(0.15))
+                    .cornerRadius(6)
+            }
+            Spacer()
+            Button("Edit", action: action)
+                .font(.callout)
+        }
     }
 
     // MARK: - The download card

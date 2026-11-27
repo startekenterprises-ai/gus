@@ -70,6 +70,13 @@ struct ChatView: View {
     /// until the next message forced a redraw (Glenn,
     /// 2026-11-27).
     @ObservedObject private var personaSelection = PersonaSelection.shared
+    /// The created personas, observed (v0.44.0): the
+    /// debate menus enumerate the whole shelf
+    /// (LocalBrain.allPersonas), and this observation is
+    /// what makes a persona created or deleted in the
+    /// Personas tab appear in — or leave — those menus
+    /// without waiting for some other redraw.
+    @ObservedObject private var customPersonas = CustomPersonaStore.shared
     /// Incognito, observed (v0.34.0): the toggle, the
     /// banner, and the mode line all render from the one
     /// shared flag the model and the call session read.
@@ -427,7 +434,9 @@ struct ChatView: View {
         let currentID = slot == 0 ? model.debateLeftID : model.debateRightID
         let current = LocalBrain.starter(id: currentID)
         return Menu {
-            ForEach(LocalBrain.personaStarters) { starter in
+            // The whole shelf (v0.44.0): created personas
+            // debate on the same terms as shipped ones.
+            ForEach(LocalBrain.allPersonas) { starter in
                 Button {
                     model.setDebater(slot: slot, id: starter.id)
                 } label: {
@@ -1633,7 +1642,7 @@ final class ChatModel: ObservableObject {
         guard let entry,
               let passBrain = LocalBrain(
                 modelURL: ModelStore.fileURL(for: entry),
-                systemPrompt: LocalBrain.composedPrompt(starter.prompt, personaID: starter.id))
+                systemPrompt: LocalBrain.composedPrompt(starter.effectivePrompt, personaID: starter.id))
         else {
             appendNotice(exchangeID: exchangeID,
                 text: "\(starter.name) couldn't answer — its brain isn't downloaded or wouldn't load.")

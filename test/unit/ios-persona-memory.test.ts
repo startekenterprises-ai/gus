@@ -116,8 +116,13 @@ test("injection: the composedPrompt personaID door, fed by activePrompt and deba
     localBrain.includes("if demoPitchEnabled { return composedPrompt(emailDemoPrompt) }"),
     "the demo pitch composes with no persona id — no memories ride a pitch",
   );
+  // v0.44.0: the debate pass composes the persona's
+  // EFFECTIVE prompt (its saved edit when one stands) —
+  // the bucket discipline this pin guards is unchanged:
+  // the pass still carries its own persona's id, and
+  // only its own bucket.
   assert.ok(
-    chatView.includes("LocalBrain.composedPrompt(starter.prompt, personaID: starter.id)"),
+    chatView.includes("LocalBrain.composedPrompt(starter.effectivePrompt, personaID: starter.id)"),
     "each debate pass carries its own persona's bucket",
   );
 });

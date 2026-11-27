@@ -142,7 +142,17 @@ struct SettingsView: View {
                 Section {
                     ForEach(LocalBrain.personaStarters) { starter in
                         Button {
-                            personaText = starter.prompt
+                            // The persona's CURRENT words
+                            // (v0.44.0): its saved edit when
+                            // one stands, else the shipped
+                            // prompt — so tapping an edited
+                            // starter here fills the field
+                            // with the words it actually
+                            // speaks with, and its identity
+                            // (face, voice, memory) survives
+                            // the tap instead of dissolving
+                            // into the anonymous Custom state.
+                            personaText = starter.effectivePrompt
                         } label: {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(starter.name)
