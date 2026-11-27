@@ -297,7 +297,10 @@ test("flap: the mouth follows a smoother, not the raw level", () => {
 
 test("tab bar: pinned visible on every root, minimize refused", () => {
   const assertions = rootView.match(/\.toolbar\(\.visible, for: \.tabBar\)/g) ?? [];
-  assert.equal(assertions.length, 5, "one visibility assertion per tab root");
+  // v0.35.0: four roots — Settings left the tab bar for
+  // Chat's hamburger menu (the hub pins live in
+  // ios-shield-hub.test.ts).
+  assert.equal(assertions.length, 4, "one visibility assertion per tab root");
   assert.ok(rootView.includes("tabBarMinimizeBehavior(.never)"));
   assert.ok(rootView.includes("if #available(iOS 26.0, *)"));
 });

@@ -14,6 +14,13 @@ import SwiftUI
 /// quarantined turn lives on the call screen, where the turn
 /// is actually waiting.
 struct ShieldLogView: View {
+    /// v0.35.0: the Shield hub hosts this log as its lower
+    /// half — embedded, the hub's name is the title ("Shield",
+    /// the tab's own word) instead of the log's; standalone
+    /// (the Settings door) it keeps "Shield log". Nothing else
+    /// changes: same receipts, same rows, same filter.
+    var embedded = false
+
     @State private var receipts: [ShieldReceipt] = []
     @State private var searchText = ""
     @State private var filter: Filter = .all
@@ -72,7 +79,7 @@ struct ShieldLogView: View {
                 .searchable(text: $searchText, prompt: "Rule, verdict, direction")
             }
         }
-        .navigationTitle("Shield log")
+        .navigationTitle(embedded ? "Shield" : "Shield log")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             receipts = Array(ShieldReceiptLog.shared.allReceipts().reversed())

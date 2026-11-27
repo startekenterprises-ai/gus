@@ -29,11 +29,15 @@ struct RootView: View {
                 // here. v0.30.0: five tabs, Muse's count —
                 // the Shield log and the persona picker move
                 // out of Settings' depths to the top level.
-                // Both host the SAME views (the log Settings
-                // links to, the picker behind the avatar tap);
-                // the Settings doors to them stay where they
-                // were. Tabs: Chat, Activity, Shield,
-                // Personas, Settings.
+                // v0.35.0: Settings LEAVES the tab bar — it
+                // lives behind Chat's top-left hamburger now
+                // (with New Chat and About), so four tabs
+                // remain: Chat, Activity, Shield, Personas.
+                // The Shield tab is the Shield HUB: the
+                // protection controls on top, the log below
+                // (ShieldHubView hosts the same ShieldLogView
+                // Settings links to). The Settings doors to
+                // the log and the picker stay where they were.
                 //
                 // Tab-bar visibility (v0.32.0): nothing in
                 // this app ever asks to hide the bar — no
@@ -57,17 +61,17 @@ struct RootView: View {
                 // bar visible, so whichever tab the operator
                 // returns to re-asserts it the moment a
                 // presentation leaves it hidden. The
-                // assertions live here, on the five roots —
+                // assertions live here, on the four roots —
                 // the only places they're set, on purpose.
                 TabView {
-                    ChatView()
+                    ChatView(session: session)
                         .toolbar(.visible, for: .tabBar)
                         .tabItem { Label("Chat", systemImage: "message") }
                     ActivityView()
                         .toolbar(.visible, for: .tabBar)
                         .tabItem { Label("Activity", systemImage: "list.bullet.rectangle") }
                     NavigationStack {
-                        ShieldLogView()
+                        ShieldHubView()
                     }
                     .toolbar(.visible, for: .tabBar)
                     .tabItem { Label("Shield", systemImage: "shield") }
@@ -78,9 +82,6 @@ struct RootView: View {
                     }
                     .toolbar(.visible, for: .tabBar)
                     .tabItem { Label("Personas", systemImage: "person.2") }
-                    SettingsView(model: session)
-                        .toolbar(.visible, for: .tabBar)
-                        .tabItem { Label("Settings", systemImage: "gearshape") }
                 }
                 .tabBarNeverMinimizes()
                 // Kokoro prepares itself (Glenn, 2026-11-20 —

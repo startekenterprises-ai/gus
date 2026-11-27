@@ -171,6 +171,24 @@ struct TopBarView: View {
             Text("Chats")
                 .font(.headline)
             Spacer()
+            // v0.35.0: the protection shortcut + the DEFCON
+            // status, on the main screen (Glenn's direction):
+            // how protected this Mac is, at a glance, from its
+            // own settings — and one click to the Protection
+            // home that shows the whole posture. The badge
+            // waits for the first status readout; the button
+            // is always there.
+            if let status = model.status {
+                ProtectionStatusBadge(status: status)
+            }
+            Button {
+                model.settingsSection = .protection
+                model.section = .settings
+            } label: {
+                Label("Protection", systemImage: "shield.fill")
+            }
+            .buttonStyle(.bordered)
+            .help("Protection — the whole posture on one screen: Governor enforcement, the Shield gate, budget, and the rest (Settings → Protection).")
             VoiceCallButton(model: model)
             Button {
                 model.invite()

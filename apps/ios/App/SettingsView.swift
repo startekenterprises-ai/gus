@@ -19,7 +19,6 @@ struct SettingsView: View {
     @State private var callMode: CallMode = CallMode.preferred
     @State private var demoPitch: Bool = LocalBrain.demoPitchEnabled
     @State private var personaText: String = LocalBrain.customPrompt ?? ""
-    @State private var voiceLogLines: [String] = []
     @State private var stockAvatar: String = UserDefaults.standard.string(forKey: "gus.avatar.stock") ?? "boy"
     @State private var shieldEnabled: Bool = ShieldSettings.enabled
     @State private var shieldPosture: ShieldPosture = ShieldSettings.posture
@@ -247,50 +246,12 @@ struct SettingsView: View {
 
                 // v0.22.0: About — "which version is this
                 // phone running?" had no answer anywhere in
-                // the app. Three plain rows: the app version
-                // and build from the bundle, and the brain a
-                // call would load. The voice path's own record
-                // rides here too (VoiceFailureLog): when a
-                // call goes silent, these lines — the path,
-                // the route, and any failure with its error —
-                // are what a report can quote.
-                Section {
-                    HStack {
-                        Text("Version")
-                        Spacer()
-                        Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?")
-                            .foregroundColor(.secondary)
-                    }
-                    HStack {
-                        Text("Build")
-                        Spacer()
-                        Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?")
-                            .foregroundColor(.secondary)
-                    }
-                    HStack {
-                        Text("Brain")
-                        Spacer()
-                        Text(ActiveBrain.resolved()?.plainName ?? "None downloaded")
-                            .foregroundColor(.secondary)
-                    }
-                    if !voiceLogLines.isEmpty {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Voice playback — the last things it did")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            ForEach(Array(voiceLogLines.suffix(6).enumerated()), id: \.offset) { _, line in
-                                Text(line)
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                        .padding(.vertical, 2)
-                    }
-                } header: {
-                    Text("About")
-                } footer: {
-                    Text("The voice lines are the call path's own record — formats, route, and any playback failure with its error — kept so a silent call can say why.")
-                }
+                // the app. v0.35.0: the section is its own
+                // view (AboutSection, below) because Chat's
+                // hamburger menu opens the very same About —
+                // one About, two doors (the v0.30.0 same-view
+                // pattern).
+                AboutSection()
 
                 // v0.34.0: Privacy — the delete that is
                 // actually a delete. It tombstones every
@@ -346,7 +307,6 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .onAppear {
-                voiceLogLines = VoiceFailureLog.shared.recentLines
                 // v0.30.0: the persona picker (the avatar
                 // tap, the Personas tab) writes the same key
                 // this editor holds — re-read it on appear so
@@ -360,6 +320,12 @@ struct SettingsView: View {
                 // (gus.voice.kokoroVoice), and this picker's
                 // state was loaded when the view was built.
                 kokoroVoice = KokoroVoice.selected
+                // v0.35.0: the same coherence for Shield —
+                // the Shield hub's toggles write the same
+                // persisted settings this section holds, so
+                // re-read them on appear too.
+                shieldEnabled = ShieldSettings.enabled
+                shieldPosture = ShieldSettings.posture
             }
         }
     }
@@ -404,6 +370,61 @@ struct SettingsView: View {
             // the time anyone looks at the row, it starts
             // itself. The row only reports.
             if kokoro.state == .idle { kokoro.warmUp() }
+        }
+    }
+}
+
+/// About (v0.22.0), as its own section so two doors show the
+/// very same view: Settings' form above, and Chat's
+/// hamburger menu (v0.35.0). Three plain rows — the app
+/// version and build from the bundle, and the brain a call
+/// would load. The voice path's own record rides here too
+/// (VoiceFailureLog): when a call goes silent, these lines —
+/// the path, the route, and any failure with its error —
+/// are what a report can quote.
+struct AboutSection: View {
+    @State private var voiceLogLines: [String] = []
+
+    var body: some View {
+        Section {
+            HStack {
+                Text("Version")
+                Spacer()
+                Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?")
+                    .foregroundColor(.secondary)
+            }
+            HStack {
+                Text("Build")
+                Spacer()
+                Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?")
+                    .foregroundColor(.secondary)
+            }
+            HStack {
+                Text("Brain")
+                Spacer()
+                Text(ActiveBrain.resolved()?.plainName ?? "None downloaded")
+                    .foregroundColor(.secondary)
+            }
+            if !voiceLogLines.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Voice playback — the last things it did")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    ForEach(Array(voiceLogLines.suffix(6).enumerated()), id: \.offset) { _, line in
+                        Text(line)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+        } header: {
+            Text("About")
+        } footer: {
+            Text("The voice lines are the call path's own record — formats, route, and any playback failure with its error — kept so a silent call can say why.")
+        }
+        .onAppear {
+            voiceLogLines = VoiceFailureLog.shared.recentLines
         }
     }
 }

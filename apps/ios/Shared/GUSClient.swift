@@ -304,7 +304,7 @@ actor GUSClient {
         case http(Int, String)
         var errorDescription: String? {
             switch self {
-            case .notConfigured: return "Connect this iPhone to your GUS core first (Settings tab)."
+            case .notConfigured: return "Connect this iPhone to your GUS core first (Settings, behind Chat's top-left menu)."
             case .http(let code, let body): return "Core answered HTTP \(code): \(body)"
             }
         }

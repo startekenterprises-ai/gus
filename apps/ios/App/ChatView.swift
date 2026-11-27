@@ -53,6 +53,15 @@ struct ChatView: View {
     private static let tabBarClearance: CGFloat = 72
 
     @StateObject private var model = ChatModel()
+    /// RootView's identity session (v0.35.0): the hamburger
+    /// menu's Settings door presents the full Settings view,
+    /// which is built over this model — the same instance
+    /// the launch gate and (through v0.34.0) the Settings
+    /// tab used, passed in rather than rebuilt.
+    @ObservedObject var session: SessionModel
+    /// The hamburger menu's sheets (v0.35.0).
+    @State private var showSettings = false
+    @State private var showAbout = false
     /// The persona pick, observed (v0.32.0): the header's
     /// face and name derive from LocalBrain at render time,
     /// and this observation is what makes a carousel pick
@@ -111,6 +120,18 @@ struct ChatView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.horizontal, 16)
                     .padding(.top, 8)
+
+                // The compact protection indicator (v0.35.0):
+                // the Shield hub's DEFCON status, small, on
+                // the main screen — it derives from the same
+                // persisted Shield settings the hub's toggles
+                // write, so it moves the moment protection
+                // changes anywhere. Deliberately NOT in the
+                // toolbar: the bar already carries the menu,
+                // incognito, share, and the call, and the
+                // avatar + name above keep their room.
+                ProtectionStatusPill()
+                    .padding(.top, 4)
 
                 if incognitoMode.isOn {
                     incognitoBanner
@@ -185,11 +206,37 @@ struct ChatView: View {
             // small toolbar chip is gone so the face shows
             // once, not twice.
             .toolbar {
-                // v0.34.0: incognito, at the leading edge —
-                // the ghost affordance other apps taught
-                // (an eye-slash: this conversation is not
-                // being kept). Filled while it's on.
-                ToolbarItem(placement: .topBarLeading) {
+                // v0.35.0: the hamburger, top-left (Glenn's
+                // direction — the Muse-app arrangement):
+                // New chat, the full Settings, and About move
+                // up here, and Settings leaves the tab bar.
+                // The incognito toggle keeps its place beside
+                // it — the two share the leading group.
+                ToolbarItemGroup(placement: .topBarLeading) {
+                    Menu {
+                        Button {
+                            model.startNewChat()
+                        } label: {
+                            Label("New chat", systemImage: "square.and.pencil")
+                        }
+                        Button {
+                            showSettings = true
+                        } label: {
+                            Label("Settings", systemImage: "gearshape")
+                        }
+                        Button {
+                            showAbout = true
+                        } label: {
+                            Label("About", systemImage: "info.circle")
+                        }
+                    } label: {
+                        Image(systemName: "line.3.horizontal")
+                    }
+                    .accessibilityLabel("Menu")
+                    // v0.34.0: incognito — the ghost affordance
+                    // other apps taught (an eye-slash: this
+                    // conversation is not being kept). Filled
+                    // while it's on.
                     Button {
                         if incognitoMode.isOn {
                             confirmLeaveIncognito = true
@@ -222,6 +269,18 @@ struct ChatView: View {
             }
             .sheet(isPresented: $showPersonaPicker) {
                 PersonaPickerSheet()
+            }
+            // The hamburger's doors (v0.35.0): the FULL
+            // Settings view (its own navigation stack, the
+            // same instance RootView's gate uses) and the
+            // same About section Settings shows — each in a
+            // sheet with its own Done, the picker sheet's
+            // house pattern.
+            .sheet(isPresented: $showSettings) {
+                SettingsSheet(session: session)
+            }
+            .sheet(isPresented: $showAbout) {
+                AboutSheet()
             }
             // Leaving incognito is destructive by design —
             // the conversation was never saved, so there is
@@ -686,7 +745,7 @@ struct ChatView: View {
                 .disabled(!model.canSend)
             }
             if !model.coreConnected {
-                Text("Connect to your Mac to send photos — its address and token go in the Settings tab.")
+                Text("Connect to your Mac to send photos — its address and token go in Settings (the menu at Chat's top left).")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -928,6 +987,55 @@ final class ChatModel: ObservableObject {
         // while this screen was away folds in, and whatever
         // this phone said offline flows out.
         syncWithCore()
+    }
+
+    /// New chat (v0.35.0) — the HONEST version. GUS has ONE
+    /// continuous synced history and no separate threads, so
+    /// this button does not create a conversation and does
+    /// not hide or delete anything: the history above stays
+    /// exactly where it is (deleting it is Settings →
+    /// Privacy's job, and the notice below says so). What a
+    /// new chat actually restarts is the WORKING SESSION:
+    ///
+    ///  - On-device (and incognito, which is on-device by
+    ///    construction): the brain's context IS the cached
+    ///    LocalBrain's LLM history (historyLimit 40 — the
+    ///    bot instance holds it, nothing else does). Dropping
+    ///    the cached instance is the reset: the next answer
+    ///    loads a fresh brain that has never seen the earlier
+    ///    turns. The same between-turns swap discipline as a
+    ///    brain switch (v0.31.0) — an answer already in
+    ///    flight keeps the instance it loaded with and
+    ///    finishes; the fresh context starts with the NEXT
+    ///    message. A live debate ends too: its transcript is
+    ///    context of the same kind.
+    ///  - Core: there is nothing to reset, and the notice
+    ///    says so rather than faking it — on the core, every
+    ///    submitted message is already its own job (the
+    ///    runtime starts each turn from the submitted text;
+    ///    no cross-job conversation is carried), so no
+    ///    running context exists on the Mac for the phone
+    ///    to clear.
+    ///
+    /// PersonaSessionStyle resets in both modes (its offer
+    /// suppression and length stance are session state by
+    /// definition). The notice is session ephemera — never
+    /// stored, never synced — and landing at the bottom is
+    /// what scrolls the view to the clean start.
+    func startNewChat() {
+        if debateActive {
+            debateActive = false
+            debateTranscript = []
+        }
+        PersonaSessionStyle.reset()
+        brain = nil
+        if incognito || mode == .onDevice {
+            appendNotice(exchangeID: UUID(),
+                text: "New chat — starting fresh from here: the brain no longer carries the earlier conversation as context. Your history above is still saved; deleting it lives in Settings → Privacy.")
+        } else {
+            appendNotice(exchangeID: UUID(),
+                text: "New chat — a fresh start on this iPhone. On your Mac, every message is already its own job, so there is no running conversation context there to clear. Your saved history is untouched; deleting it lives in Settings → Privacy.")
+        }
     }
 
     func receipts(for exchangeID: UUID) -> [ShieldReceipt] {
@@ -1864,5 +1972,45 @@ final class ChatModel: ObservableObject {
     private func update(_ id: UUID, _ change: (inout ChatMessage) -> Void) {
         guard let i = messages.firstIndex(where: { $0.id == id }) else { return }
         change(&messages[i])
+    }
+}
+
+/// The hamburger's Settings door (v0.35.0): the full
+/// Settings view in a sheet, with a Done of its own (the
+/// picker sheet's house pattern). SettingsView carries its
+/// own navigation stack; the Done rides its bar.
+private struct SettingsSheet: View {
+    @ObservedObject var session: SessionModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        SettingsView(model: session)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+    }
+}
+
+/// The hamburger's About door (v0.35.0): the very same
+/// AboutSection Settings shows — version, build, brain,
+/// and the voice path's record — in a sheet of its own.
+private struct AboutSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                AboutSection()
+            }
+            .navigationTitle("About")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
     }
 }
