@@ -214,7 +214,15 @@ struct CallView: View {
             }
             .padding(.top, 12)
         } else {
-            personaFaceButton(side: 232)
+            // Space discipline (v0.47.2): while a call is
+            // live, the face steps down from the screen's
+            // dominant visual to a participant's size —
+            // the transcript below is the record of the
+            // call and needs the room more (see
+            // transcriptPanel's floor). Pre-call the face
+            // keeps its full 232: there is nothing else
+            // competing for the screen yet.
+            personaFaceButton(side: inCall ? 150 : 232)
                 .padding(.top, 12)
         }
     }
@@ -265,12 +273,18 @@ struct CallView: View {
             .frame(maxWidth: .infinity)
             .fixedSize(horizontal: false, vertical: true)
 
+        // The four notices (speech / watch / screen /
+        // error) are transient status, not reading
+        // material: while a call is live each is capped
+        // at 2 lines (v0.47.2) so a stack of them can't
+        // crowd the transcript off the screen; pre-call
+        // they keep 3, when nothing competes.
         if let notice = call.speechNotice {
             Text(notice)
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
-                .lineLimit(3)
+                .lineLimit(inCall ? 2 : 3)
                 .minimumScaleFactor(0.8)
                 .frame(maxWidth: .infinity)
                 .fixedSize(horizontal: false, vertical: true)
@@ -280,7 +294,7 @@ struct CallView: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
-                .lineLimit(3)
+                .lineLimit(inCall ? 2 : 3)
                 .minimumScaleFactor(0.8)
                 .frame(maxWidth: .infinity)
                 .fixedSize(horizontal: false, vertical: true)
@@ -290,7 +304,7 @@ struct CallView: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
-                .lineLimit(3)
+                .lineLimit(inCall ? 2 : 3)
                 .minimumScaleFactor(0.8)
                 .frame(maxWidth: .infinity)
                 .fixedSize(horizontal: false, vertical: true)
@@ -300,7 +314,7 @@ struct CallView: View {
                 .font(.caption)
                 .foregroundColor(.orange)
                 .multilineTextAlignment(.center)
-                .lineLimit(3)
+                .lineLimit(inCall ? 2 : 3)
                 .minimumScaleFactor(0.8)
                 .frame(maxWidth: .infinity)
                 .fixedSize(horizontal: false, vertical: true)
@@ -682,7 +696,23 @@ struct CallView: View {
     /// `call.liveTranscript`. Auto-scrolls to the newest line
     /// as any of the three changes; the panel flexes to
     /// whatever height the rest of the screen leaves it, so
-    /// the controls and composer never move.
+    /// the controls and composer never move — down to a
+    /// floor (v0.47.2): the panel is the only flexible
+    /// element in callContent, and everything the screen
+    /// gained since v0.23.0 (the persona name, Camera and
+    /// Watch controls, stackable notices, push-to-talk,
+    /// the Share screen row) was quietly spending its
+    /// height, squeezing it toward invisibility on
+    /// shorter screens. The minHeight below is the
+    /// guarantee that can't happen again; the room comes
+    /// from the in-call face stepping down (headerSection)
+    /// and the notices' live-call line cap (statusBlock).
+    /// The stack inside is a plain VStack, not a
+    /// LazyVStack: call turn counts are modest, and a lazy
+    /// stack's not-yet-realized bottom anchor made
+    /// ScrollViewReader.scrollTo silently no-op — the
+    /// anchor now always exists when scrollTranscript
+    /// fires.
     private var transcriptPanel: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Transcript")
@@ -692,7 +722,7 @@ struct CallView: View {
                 .textCase(.uppercase)
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 10) {
                         if call.turns.isEmpty && call.photoEntries.isEmpty && call.liveReplyText.isEmpty && call.liveTranscript.isEmpty {
                             Text("What you say and what GUS answers will appear here as you talk.")
                                 .font(.callout)
@@ -737,7 +767,7 @@ struct CallView: View {
                 .onChange(of: call.liveReplyText) { _ in scrollTranscript(proxy) }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, minHeight: 170, maxHeight: .infinity, alignment: .topLeading)
         .padding(12)
         .background(Color.secondary.opacity(0.08))
         .cornerRadius(12)

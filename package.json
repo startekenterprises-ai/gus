@@ -20,7 +20,7 @@
     "smoke:headless": "node scripts/headless-smoke.mjs"
   },
   "type": "module",
-  "version": "0.47.1",
+  "version": "0.47.2",
   "workspaces": [
     "packages/shared",
     "packages/gate",

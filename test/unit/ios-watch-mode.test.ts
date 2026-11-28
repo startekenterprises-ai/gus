@@ -43,7 +43,12 @@ test("Watch toggle: video icon beside Camera, filled while watching, operator-ta
 
 test("Watch layout: persona stays a tile beside the camera, with the on-air pill", () => {
   assert.match(callView, /personaFaceButton\(side: 104\)/);
-  assert.match(callView, /personaFaceButton\(side: 232\)/);
+  // Off Watch, the face is the big one — 232 pre-call,
+  // stepping down to 150 while a call is live so the
+  // transcript keeps its room (v0.47.2; the size
+  // contract itself is pinned in
+  // ios-call-transcript-layout.test.ts).
+  assert.match(callView, /personaFaceButton\(side: inCall \? 150 : 232\)/);
   assert.match(callView, /WatchPreviewHost\(view: call\.watchPreviewView\)/);
   assert.match(callView, /Text\("Watching"\)/);
   assert.match(callView, /frames aren't saved/);
