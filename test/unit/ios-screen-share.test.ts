@@ -91,10 +91,20 @@ test("pbxproj: balanced, and every referenced id is defined", () => {
 });
 
 test("pbxproj: the broadcast extension target exists, wired end to end", () => {
-  // The target: broadcast-extension product, its product
-  // reference, its synchronized group, its config list.
+  // The target: its product reference, its synchronized
+  // group, its config list. The product type pairing
+  // (v0.47.1): a ReplayKit broadcast upload extension is a
+  // PLAIN app extension to Xcode — the productType is
+  // app-extension, and the broadcast KIND comes from the
+  // plist's extension point. Pinning
+  // "com.apple.product-type.broadcast-extension" here in
+  // v0.45.0 shipped a product type Xcode 26 does not know,
+  // and the archive died before compiling; the two halves
+  // are pinned together so neither drifts alone again.
   assert.match(pbxproj, /BB0000000000000000000103 \/\* GUSBroadcast \*\/ = \{\n\t\t\tisa = PBXNativeTarget;/);
-  assert.match(pbxproj, /productType = "com\.apple\.product-type\.broadcast-extension";/);
+  assert.match(pbxproj, /productType = "com\.apple\.product-type\.app-extension";/);
+  assert.doesNotMatch(pbxproj, /product-type\.broadcast-extension/);
+  assert.match(broadcastPlist, /<key>NSExtensionPointIdentifier<\/key>\s*<string>com\.apple\.broadcast-services-upload<\/string>/);
   assert.match(pbxproj, /productReference = BB0000000000000000000101 \/\* GUSBroadcast\.appex \*\/;/);
   assert.match(pbxproj, /BB0000000000000000000102 \/\* Broadcast \*\/ = \{\n\t\t\tisa = PBXFileSystemSynchronizedRootGroup;/);
   assert.match(pbxproj, /buildConfigurationList = BB0000000000000000000104 \/\* Build configuration list for PBXNativeTarget "GUSBroadcast" \*\/;/);

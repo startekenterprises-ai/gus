@@ -208,7 +208,7 @@
 			name = GUSBroadcast;
 			productName = GUSBroadcast;
 			productReference = BB0000000000000000000101 /* GUSBroadcast.appex */;
-			productType = "com.apple.product-type.broadcast-extension";
+			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -342,7 +342,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 57;
+				CURRENT_PROJECT_VERSION = 58;
 				DEVELOPMENT_TEAM = XCRAH44MU2;
 				GENERATE_INFOPLIST_FILE = NO;
 				CODE_SIGN_ENTITLEMENTS = GUS.entitlements;
@@ -352,7 +352,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.47.0;
+				MARKETING_VERSION = 0.47.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.startekenterprises.gus;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -365,7 +365,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 57;
+				CURRENT_PROJECT_VERSION = 58;
 				DEVELOPMENT_TEAM = XCRAH44MU2;
 				GENERATE_INFOPLIST_FILE = NO;
 				CODE_SIGN_ENTITLEMENTS = GUS.entitlements;
@@ -375,7 +375,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.47.0;
+				MARKETING_VERSION = 0.47.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.startekenterprises.gus;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -389,7 +389,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = GUSBroadcast.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 57;
+				CURRENT_PROJECT_VERSION = 58;
 				DEVELOPMENT_TEAM = XCRAH44MU2;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = BroadcastInfo.plist;
@@ -399,7 +399,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.47.0;
+				MARKETING_VERSION = 0.47.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.startekenterprises.gus.broadcast;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -415,7 +415,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = GUSBroadcast.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 57;
+				CURRENT_PROJECT_VERSION = 58;
 				DEVELOPMENT_TEAM = XCRAH44MU2;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = BroadcastInfo.plist;
@@ -425,7 +425,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.47.0;
+				MARKETING_VERSION = 0.47.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.startekenterprises.gus.broadcast;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -440,13 +440,13 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 57;
+				CURRENT_PROJECT_VERSION = 58;
 				DEVELOPMENT_TEAM = XCRAH44MU2;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = GUS;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.startekenterprises.gus;
-				MARKETING_VERSION = 0.47.0;
+				MARKETING_VERSION = 0.47.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.startekenterprises.gus.watchapp;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = watchos;
@@ -461,13 +461,13 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 57;
+				CURRENT_PROJECT_VERSION = 58;
 				DEVELOPMENT_TEAM = XCRAH44MU2;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = GUS;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.startekenterprises.gus;
-				MARKETING_VERSION = 0.47.0;
+				MARKETING_VERSION = 0.47.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.startekenterprises.gus.watchapp;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = watchos;
