@@ -3,11 +3,14 @@
  * v0.33.0: the voice pack + conversation-quality pins.
  *
  * What is pinned here:
- *  - LocalBrain.personaStarters carries exactly the six
+ *  - LocalBrain.personaStarters carries exactly the seven
  *    starters of the consolidated roster (v0.32.0: the
  *    email helper, injection shield, and everyday assistant
  *    folded into the one Gus persona; the therapist is male
- *    now), each with a Kokoro voice that EXISTS in the
+ *    now) plus the restored Agent Shield (v0.46.0: the
+ *    dedicated security persona back as a first-class
+ *    starter, second on the shelf, with the catalog widened
+ *    by am_onyx so he has a male voice of his own), each with a Kokoro voice that EXISTS in the
  *    app's catalog (Shared/KokoroTTS.swift) — a persona
  *    pointing at a voice the engine doesn't have would
  *    fail silently in the picker and loudly nowhere.
@@ -88,13 +91,14 @@ function startersBlock(): string {
   return localBrain.slice(start, end);
 }
 
-test("personas: exactly six starters — the consolidated roster", () => {
+test("personas: exactly seven starters — the consolidated roster plus Agent Shield", () => {
   const block = startersBlock();
   const ids = [...block.matchAll(/PersonaStarter\(\s*id: "([^"]+)"/g)].map(
     (m) => m[1],
   );
   assert.deepEqual(ids, [
     "gus",
+    "agent-shield",
     "therapist",
     "ai-doctor",
     "ai-priest",
@@ -109,8 +113,8 @@ test("personas: exactly six starters — the consolidated roster", () => {
   }
   // And their portraits left the build with them.
   assert.ok(
-    buildIpa.includes("for PERSONA_FACE in Priest Devil Therapist Debbie Doctor"),
-    "build-ipa.sh decodes exactly the five surviving portraits",
+    buildIpa.includes("for PERSONA_FACE in Priest Devil Therapist Debbie Doctor Shield"),
+    "build-ipa.sh decodes exactly the six surviving portraits",
   );
 });
 
@@ -118,10 +122,10 @@ test("personas: every declared voice exists in the Kokoro catalog", () => {
   const catalog = new Set(
     [...kokoroTTS.matchAll(/KokoroVoice\(id: "([^"]+)"/g)].map((m) => m[1]),
   );
-  assert.ok(catalog.size >= 8, "the catalog should carry the full voice list");
+  assert.ok(catalog.size >= 9, "the catalog should carry the full voice list");
   const block = startersBlock();
   const voices = [...block.matchAll(/voiceID: "([^"]+)"/g)].map((m) => m[1]);
-  assert.equal(voices.length, 6, "every starter declares a voice");
+  assert.equal(voices.length, 7, "every starter declares a voice");
   for (const voice of voices) {
     assert.ok(catalog.has(voice), `persona voice ${voice} is not in the catalog`);
   }
@@ -135,6 +139,9 @@ test("personas: every declared voice exists in the Kokoro catalog", () => {
   // am_puck, the one male left. Debbie keeps af_nicole
   // (moved off the doctor's af_bella in v0.32.0), the
   // doctor keeps af_bella — no two personas share a voice.
+  // v0.46.0: Agent Shield takes am_onyx, the deep male
+  // voice the catalog was widened by one to give him —
+  // the four male voices it carried were all assigned.
   const byId = new Map(
     [...block.matchAll(/id: "([^"]+)"[\s\S]*?voiceID: "([^"]+)"/g)].map((m) => [
       m[1],
@@ -142,12 +149,13 @@ test("personas: every declared voice exists in the Kokoro catalog", () => {
     ]),
   );
   assert.equal(byId.get("gus"), "am_michael");
+  assert.equal(byId.get("agent-shield"), "am_onyx");
   assert.equal(byId.get("therapist"), "am_puck");
   assert.equal(byId.get("devil"), "bm_george");
   assert.equal(byId.get("ai-priest"), "am_fenrir");
   assert.equal(byId.get("debbie-downer"), "af_nicole");
   assert.equal(byId.get("ai-doctor"), "af_bella");
-  assert.equal(new Set(voices).size, 6, "no two personas share a voice");
+  assert.equal(new Set(voices).size, 7, "no two personas share a voice");
   assert.notEqual(byId.get("devil"), byId.get("ai-priest"));
 });
 
@@ -166,10 +174,10 @@ test("personas: only the Devil pairs with a brain, and it is a real manifest ent
     "the Devil's paired brain must exist in ModelManifest.swift",
   );
   const unpaired = [...block.matchAll(/pairedBrainID: nil/g)].length;
-  assert.equal(unpaired, 5, "the other five starters ride the active brain");
+  assert.equal(unpaired, 6, "the other six starters ride the active brain");
 });
 
-const PERSONA_FACES = ["Priest", "Devil", "Therapist", "Debbie", "Doctor"];
+const PERSONA_FACES = ["Priest", "Devil", "Therapist", "Debbie", "Doctor", "Shield"];
 
 for (const face of PERSONA_FACES) {
   test(`portraits: Avatar${face} master decodes to a 1024×1024 PNG and is built`, () => {
@@ -237,7 +245,8 @@ test("mouths: the v0.32.0 measured centers, converted into crop space", () => {
   // Ground truth (full-art fractions, vision-measured):
   // priest (0.505, 0.618), devil (0.500, 0.685),
   // debbie (0.503, 0.605), doctor (0.532, 0.597),
-  // therapist-male (0.505, 0.603). In crop space each is
+  // therapist-male (0.505, 0.603), agent-shield-male
+  // (0.491, 0.634) (v0.46.0). In crop space each is
   // (measured − cropOrigin) / cropSide against that face's
   // own window — the values pinned here are those
   // conversions, so a future "eyeball" can't silently
@@ -252,6 +261,7 @@ test("mouths: the v0.32.0 measured centers, converted into crop space", () => {
     const mouth = /mouthCenterX: ([\d.]+), mouthCenterY: ([\d.]+)/.exec(chunk);
     if (id && mouth) mouths.set(id, [Number(mouth[1]), Number(mouth[2])]);
   }
+  assert.deepEqual(mouths.get("agent-shield"), [0.487, 0.859]);
   assert.deepEqual(mouths.get("ai-priest"), [0.5, 0.785]);
   assert.deepEqual(mouths.get("devil"), [0.543, 0.864]);
   assert.deepEqual(mouths.get("debbie-downer"), [0.505, 0.784]);

@@ -4,7 +4,7 @@
  * What is pinned here:
  *  - The roster sync: the Mac shelf (hosts/mac-app
  *    Persona.swift) and the iPhone shelf (LocalBrain
- *    .personaStarters) carry the same six starters in
+ *    .personaStarters) carry the same seven starters in
  *    the same order — ids, names, blurbs, default
  *    voices, preview lines, and the prompt texts
  *    themselves (compared whitespace-normalized, since
@@ -18,8 +18,9 @@
  *    characters), and the same block framing header as
  *    the iPhone's PersonaMemoryStore.
  *  - Voice assignments: the same per-persona key shape
- *    (gus.voice.persona.<id>) and the same eight-voice
- *    catalog in both apps.
+ *    (gus.voice.persona.<id>) and the same nine-voice
+ *    catalog in both apps (v0.46.0: am_onyx joined for
+ *    the restored Agent Shield persona).
  *  - The transport: the Mac submits its composed
  *    persona context through the v0.40.0 field — on
  *    /api/chat bodies, on voice-session start, and as
@@ -81,13 +82,14 @@ function promptsOf(block: string): string[] {
 const iosBlock = rosterBlock(iosBrain);
 const macBlock = rosterBlock(macPersona);
 
-test("roster sync: same six starters, same order, ids/names/blurbs/voices", () => {
+test("roster sync: same seven starters, same order, ids/names/blurbs/voices", () => {
   const fields = (block: string, re: RegExp) =>
     [...block.matchAll(re)].map((m) => m[1]);
   const iosIds = fields(iosBlock, /id: "([^"]+)"/g);
   const macIds = fields(macBlock, /id: "([^"]+)"/g);
   assert.deepEqual(macIds, [
     "gus",
+    "agent-shield",
     "therapist",
     "ai-doctor",
     "ai-priest",
@@ -113,7 +115,7 @@ test("roster sync: same six starters, same order, ids/names/blurbs/voices", () =
 test("roster sync: the prompt texts are the same words", () => {
   const iosPrompts = promptsOf(iosBlock);
   const macPrompts = promptsOf(macBlock);
-  assert.equal(macPrompts.length, 6);
+  assert.equal(macPrompts.length, 7);
   assert.deepEqual(macPrompts, iosPrompts);
 });
 
@@ -127,7 +129,7 @@ test("roster sync: preview lines match the iPhone's switch", () => {
   const macLines = [...macBlock.matchAll(/previewLine: "([^"]+)"/g)].map(
     (m) => m[1],
   );
-  assert.equal(iosLines.length, 6);
+  assert.equal(iosLines.length, 7);
   assert.deepEqual(macLines, iosLines);
 });
 
@@ -161,7 +163,7 @@ test("memory: same key, same caps, same framing header", () => {
   assert.ok(macPersona.includes("final class MacPersonaMemoryStore: ObservableObject"));
 });
 
-test("voices: same assignment key shape, same eight-voice catalog", () => {
+test("voices: same assignment key shape, same nine-voice catalog", () => {
   assert.ok(macPersona.includes('"gus.voice.persona.\\(id)"'));
   assert.ok(iosTTS.includes('"gus.voice.persona.\\(id)"'));
   const iosCatalog = new Set(
@@ -170,7 +172,7 @@ test("voices: same assignment key shape, same eight-voice catalog", () => {
   const macCatalog = new Set(
     [...macPersona.matchAll(/MacKokoroVoice\(id: "([^"]+)"/g)].map((m) => m[1]),
   );
-  assert.equal(macCatalog.size, 8);
+  assert.equal(macCatalog.size, 9);
   assert.deepEqual(macCatalog, iosCatalog);
 });
 
@@ -206,7 +208,7 @@ test("surfaces: strip in Chat, block in Identity, name in the call strip", () =>
 });
 
 test("portraits: Mac masters are byte-identical to the iPhone's, and ship", () => {
-  for (const name of ["Priest", "Therapist", "Doctor", "Debbie", "Devil"]) {
+  for (const name of ["Priest", "Therapist", "Doctor", "Debbie", "Devil", "Shield"]) {
     const mac = readFileSync(
       join(root, `hosts/mac-app/Resources/Persona${name}.png.b64`),
     );

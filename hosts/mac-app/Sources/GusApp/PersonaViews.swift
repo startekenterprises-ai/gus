@@ -47,7 +47,7 @@ struct PersonaAvatarView: View {
 
 /// The persona picker (v0.43.0): a horizontal strip of
 /// faces — General first (the app's own avatar; no
-/// persona), then the six starters — name underneath,
+/// persona), then the seven starters — name underneath,
 /// the selected face ringed and a touch larger, exactly
 /// the iPhone picker's shape. One component, two hosts:
 /// the Chat top bar (compact) and the Identity tab's

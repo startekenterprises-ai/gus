@@ -149,7 +149,7 @@ base64 -d < "$SCRIPT_DIR/Resources/DefaultAvatarGirl.png.b64" > "$APP/Contents/R
 # them by these names; Gus's own portrait is
 # DefaultAvatar.png above, byte-identical to the iPhone's
 # Avatar master, so he needs no second copy).
-for persona in Priest Therapist Doctor Debbie Devil; do
+for persona in Priest Therapist Doctor Debbie Devil Shield; do
   base64 -d < "$SCRIPT_DIR/Resources/Persona$persona.png.b64" > "$APP/Contents/Resources/Persona$persona.png" || fail "decoding the bundled persona portrait ($persona) failed"
 done
 

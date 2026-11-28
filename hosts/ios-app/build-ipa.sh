@@ -177,7 +177,9 @@ fi
 # v0.32.0: the roster consolidated — the Email and Shield faces
 # retired with their starters (folded into the one Gus persona,
 # who wears the stock boy above); five persona portraits remain.
-for PERSONA_FACE in Priest Devil Therapist Debbie Doctor; do
+# v0.46.0: a NEW Shield face joins them — the restored Agent
+# Shield persona's own portrait (not the retired v0.31.0 art).
+for PERSONA_FACE in Priest Devil Therapist Debbie Doctor Shield; do
   PERSONA_B64="$PROJECT_DIR/App/Assets.xcassets/Avatar$PERSONA_FACE.imageset/Avatar$PERSONA_FACE.png.b64"
   if [ -f "$PERSONA_B64" ]; then
     base64 -d < "$PERSONA_B64" > "$PROJECT_DIR/App/Assets.xcassets/Avatar$PERSONA_FACE.imageset/Avatar$PERSONA_FACE.png" \

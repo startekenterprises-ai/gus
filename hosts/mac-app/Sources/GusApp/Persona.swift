@@ -13,7 +13,7 @@ import Foundation
 // iPhone's persona core (apps/ios/Shared/LocalBrain.swift +
 // PersonaMemory.swift + KokoroTTS.swift's assignment store):
 //
-//   - the same six starters (ids, names, blurbs, prompts,
+//   - the same seven starters (ids, names, blurbs, prompts,
 //     default voices, preview lines) — mirrored text, kept
 //     in sync by a test that reads BOTH sources and fails
 //     when they diverge (test/unit/mac-persona-parity);
@@ -48,7 +48,7 @@ import Foundation
 /// not carried). Gus's portrait is the bundled
 /// DefaultAvatar.png — byte-identical art to the iPhone's
 /// Avatar master, already in the bundle since v0.14.7;
-/// the other five ride as Persona*.png, decoded by
+/// the other six ride as Persona*.png, decoded by
 /// build-dmg.sh from base64 masters copied byte-for-byte
 /// from the iPhone's imagesets (no new artwork).
 struct MacPersonaFace: Equatable {
@@ -245,6 +245,40 @@ enum MacPersona {
                 imageName: "DefaultAvatar",
                 cropOriginX: 0.14, cropOriginY: 0.193, cropSide: 0.72)),
         MacPersonaStarter(
+            id: "agent-shield",
+            name: "Agent Shield",
+            blurb: "Your security chief — checks anything that looks off, in plain words.",
+            prompt: """
+                You are GUS as Agent Shield, the person's security chief, \
+                speaking out loud in a live phone call: one to three short \
+                sentences, plain everyday words, no lists, no markdown, no code. \
+                Calm and confident, never alarmist — your job is to make the \
+                person feel looked after, not scared. Invite them to paste or \
+                read out anything that looks even slightly off — an email, a \
+                text, a link, a message from a stranger — and talk them through \
+                what the Shield checks for: hidden orders tucked inside \
+                ordinary words, links that only pretend to be a bank or a \
+                delivery, pressure, flattery, and rush, and anything trying to \
+                get them, or you, to hand over something private. When the \
+                Shield catches something, say what it caught and why it matters \
+                in plain words, and point them to the receipt in the Shield \
+                tab, where it stays for them to see any time; if the Shield \
+                stops something mid-conversation, explain the catch in one \
+                plain sentence and offer to show the receipt. You know your \
+                own house: the DEFCON levels say how tight the protection is, \
+                from five — steady — down to one — dark; everything is scanned \
+                right here on the person's own phone or Mac; incognito \
+                conversations are never saved; and their chats live on their \
+                phone — nobody else's server has them, including ours. Say \
+                plainly when you don't know something instead of inventing it, \
+                and keep answers short; the person can always ask for more.
+                """,
+            voiceID: "am_onyx",
+            previewLine: "Agent Shield here, reporting for duty — show me anything that looks off and I'll check it.",
+            face: MacPersonaFace(
+                imageName: "PersonaShield",
+                cropOriginX: 0.16, cropOriginY: 0.05, cropSide: 0.68)),
+        MacPersonaStarter(
             id: "therapist",
             name: "Therapist",
             blurb: "Supportive listening, in SerenAI's spirit.",
@@ -371,9 +405,9 @@ struct MacKokoroVoice: Identifiable, Equatable {
 }
 
 /// The Kokoro voice catalog, Mac mirror of the iPhone's
-/// KokoroVoice.all — the eight voices both apps offer a
+/// KokoroVoice.all — the nine voices both apps offer a
 /// persona. (The Mac's Settings → Voice pickers carry the
-/// same eight for voice.json; this list is the persona
+/// same nine for voice.json; this list is the persona
 /// assignment validation set, kept beside the roster it
 /// serves.)
 enum MacKokoroVoices {
@@ -384,6 +418,7 @@ enum MacKokoroVoices {
         MacKokoroVoice(id: "am_michael", displayName: "Michael — male"),
         MacKokoroVoice(id: "am_fenrir", displayName: "Fenrir — male"),
         MacKokoroVoice(id: "am_puck", displayName: "Puck — male"),
+        MacKokoroVoice(id: "am_onyx", displayName: "Onyx — male"),
         MacKokoroVoice(id: "bf_emma", displayName: "Emma — British female"),
         MacKokoroVoice(id: "bm_george", displayName: "George — British male"),
     ]

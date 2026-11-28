@@ -48,7 +48,12 @@ import Foundation
 /// the curated few the Settings picker offers (v0.15.4) —
 /// the male default (v0.33.0 — see `selected`), the female
 /// voice that was the default through v0.32.0, and British
-/// options for range. The selection persists in
+/// options for range. v0.46.0 widened the list by one —
+/// am_onyx, the deep American male voice, added so the
+/// restored Agent Shield persona has a male voice of his
+/// own (the four male voices the catalog carried were all
+/// assigned); it resolves like every voice here, a
+/// Kokoro-82M pack the SDK fetches on demand. The selection persists in
 /// UserDefaults; warm-up preloads the selected voice's
 /// pack, and the SDK fetches any other pack on demand
 /// (~0.5 MB) the first time that voice is used.
@@ -71,6 +76,7 @@ struct KokoroVoice: Identifiable, Equatable, Hashable {
         KokoroVoice(id: "am_michael", displayName: "Michael — male (default)"),
         KokoroVoice(id: "am_fenrir", displayName: "Fenrir — male"),
         KokoroVoice(id: "am_puck", displayName: "Puck — male"),
+        KokoroVoice(id: "am_onyx", displayName: "Onyx — male"),
         KokoroVoice(id: "bf_emma", displayName: "Emma — British female"),
         KokoroVoice(id: "bm_george", displayName: "George — British male"),
     ]
@@ -79,7 +85,7 @@ struct KokoroVoice: Identifiable, Equatable, Hashable {
     /// Heart (the female voice), Emma (a clearly different
     /// voice: British, where Heart is American), and Michael
     /// (the male voice, and the default since v0.33.0). The
-    /// full eight stay one disclosure away in Settings.
+    /// full nine stay one disclosure away in Settings.
     /// Michael has been in the catalog since v0.15.4 and
     /// rides the same delivery as every voice: warm-up
     /// preloads the SELECTED voice's pack, and the SDK

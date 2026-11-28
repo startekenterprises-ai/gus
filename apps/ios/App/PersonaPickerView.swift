@@ -11,7 +11,7 @@ import SwiftUI
 /// versa).
 ///
 /// v0.44.0: the shelf carries the operator's own created
-/// personas after the shipped six (CustomPersonaStore),
+/// personas after the shipped seven (CustomPersonaStore),
 /// picks write a persona's EFFECTIVE words (its saved
 /// edit when one stands), and the card at the bottom is
 /// the customization door — edit a starter's words, or

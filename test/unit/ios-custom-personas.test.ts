@@ -18,7 +18,7 @@
  *    starter-by-id door) reads the pool and matches on
  *    effective words — so a created persona resolves its
  *    face, name, voice, and memory bucket through the
- *    exact derivations the shipped six use, and an edited
+ *    exact derivations the shipped seven use, and an edited
  *    starter keeps its identity.
  *  - Created personas persist as Codable JSON under
  *    gus.personas.custom with custom- ids; the store

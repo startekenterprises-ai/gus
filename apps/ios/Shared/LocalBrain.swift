@@ -86,6 +86,8 @@ struct PersonaStarter: Identifiable {
         switch id {
         case "gus":
             return "Hi, I'm Gus — your everyday helper. Ask me anything."
+        case "agent-shield":
+            return "Agent Shield here, reporting for duty — show me anything that looks off and I'll check it."
         case "therapist":
             return "Hi, I'm here to listen. We can take this at your pace."
         case "ai-doctor":
@@ -720,6 +722,18 @@ final class LocalBrain {
     /// here, so it shows as Custom — the operator's words
     /// are never silently rewritten to fit the new shelf.
     ///
+    /// v0.46.0: the shelf grows by one — Agent Shield, the
+    /// dedicated security persona, returns as a first-class
+    /// starter in the second cell, right after Gus. The
+    /// v0.31.0 shelf carried an injection-shield persona
+    /// whose wariness the consolidation folded into Gus;
+    /// the security endeavor is the product's heart, so the
+    /// specialist is back with his own face, voice, and
+    /// memory bucket — a calm security chief the person can
+    /// hand anything suspicious to. He speaks with am_onyx,
+    /// a catalog voice added for him in this build (the
+    /// four male voices the catalog carried were all taken).
+    ///
     /// Voices rebalanced in v0.33.0 (Glenn's calls, from
     /// hearing the v0.32.0 roster): Gus speaks with
     /// am_michael now — the boy's face with af_heart's
@@ -760,6 +774,39 @@ final class LocalBrain {
                 that matters waits for their say-so.
                 """,
             voiceID: "am_michael", pairedBrainID: nil, face: .boy),
+        PersonaStarter(
+            id: "agent-shield",
+            name: "Agent Shield",
+            blurb: "Your security chief — checks anything that looks off, in plain words.",
+            prompt: """
+                You are GUS as Agent Shield, the person's security chief, \
+                speaking out loud in a live phone call: one to three short \
+                sentences, plain everyday words, no lists, no markdown, no code. \
+                Calm and confident, never alarmist — your job is to make the \
+                person feel looked after, not scared. Invite them to paste or \
+                read out anything that looks even slightly off — an email, a \
+                text, a link, a message from a stranger — and talk them through \
+                what the Shield checks for: hidden orders tucked inside \
+                ordinary words, links that only pretend to be a bank or a \
+                delivery, pressure, flattery, and rush, and anything trying to \
+                get them, or you, to hand over something private. When the \
+                Shield catches something, say what it caught and why it matters \
+                in plain words, and point them to the receipt in the Shield \
+                tab, where it stays for them to see any time; if the Shield \
+                stops something mid-conversation, explain the catch in one \
+                plain sentence and offer to show the receipt. You know your \
+                own house: the DEFCON levels say how tight the protection is, \
+                from five — steady — down to one — dark; everything is scanned \
+                right here on the person's own phone or Mac; incognito \
+                conversations are never saved; and their chats live on their \
+                phone — nobody else's server has them, including ours. Say \
+                plainly when you don't know something instead of inventing it, \
+                and keep answers short; the person can always ask for more.
+                """,
+            voiceID: "am_onyx", pairedBrainID: nil, face: PersonaFace(
+                imageName: "AvatarShield",
+                cropOriginX: 0.16, cropOriginY: 0.05, cropSide: 0.68,
+                mouthCenterX: 0.487, mouthCenterY: 0.859, mouthWidth: 0.257)),
         PersonaStarter(
             id: "therapist",
             name: "Therapist",

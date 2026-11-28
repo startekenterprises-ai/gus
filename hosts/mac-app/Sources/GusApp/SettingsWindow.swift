@@ -626,8 +626,10 @@ final class SettingsModel: ObservableObject {
         let label: String
     }
 
-    /// v0.15.6: the curated Kokoro catalog — the same eight
-    /// voices, with the same labels, as the iPhone app's picker
+    /// v0.15.6: the curated Kokoro catalog — the same nine
+    /// voices (eight through v0.45.0; am_onyx joined in
+    /// v0.46.0 as the Agent Shield persona's voice), with the
+    /// same labels, as the iPhone app's picker
     /// (iOS 0.15.4), so the Mac and the phone offer one list.
     /// The pick is voice.json's ttsVoice, which the endpoint
     /// synthesis request already carries — the picker is a new
@@ -639,12 +641,13 @@ final class SettingsModel: ObservableObject {
         KokoroVoiceOption(id: "am_michael", label: "Michael — male"),
         KokoroVoiceOption(id: "am_fenrir", label: "Fenrir — male"),
         KokoroVoiceOption(id: "am_puck", label: "Puck — male"),
+        KokoroVoiceOption(id: "am_onyx", label: "Onyx — male"),
         KokoroVoiceOption(id: "bf_emma", label: "Emma — British female"),
         KokoroVoiceOption(id: "bm_george", label: "George — British male"),
     ]
 
     /// The picker's options: the catalog, plus the value on
-    /// file when it isn't one of the eight — a custom voice
+    /// file when it isn't one of the nine — a custom voice
     /// name typed into the old free-text field stays selectable
     /// (and stays the selection) instead of being silently
     /// replaced by the picker's first entry.
@@ -660,7 +663,7 @@ final class SettingsModel: ObservableObject {
     /// The simple level (v0.23.0, mirroring the iPhone): the
     /// front-door picker shows three curated voices — Heart
     /// (the default), Emma (British, a clearly different
-    /// voice), and Michael (male) — with the full eight
+    /// voice), and Michael (male) — with the full nine
     /// under the Voice pane's Advanced disclosure. The value
     /// on file rides along when it isn't one of the three,
     /// under the same rule as kokoroVoiceOptions: a pick
