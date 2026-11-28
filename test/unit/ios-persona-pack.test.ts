@@ -91,6 +91,38 @@ function startersBlock(): string {
   return localBrain.slice(start, end);
 }
 
+test("personas: the Secret Agent — stable id, new name, suave security prompt (v0.47.0)", () => {
+  const block = startersBlock();
+  // The id MUST NOT change: memory buckets, voice
+  // assignments, and personaContext all key off it.
+  const start = block.indexOf('id: "agent-shield"');
+  assert.ok(start >= 0, "the agent-shield starter is still on the shelf");
+  const end = block.indexOf("PersonaStarter(", start);
+  const entry = block.slice(start, end > start ? end : undefined);
+  assert.ok(entry.includes('name: "Secret Agent"'), "he answers to Secret Agent now");
+  assert.ok(!entry.includes('name: "Agent Shield"'), "the old display name is gone from the starter");
+  assert.ok(entry.includes('voiceID: "am_onyx"'), "the voice does not move with the name");
+  // The flavor: 1960s secret agent — dry wit, mission
+  // language, cool under pressure.
+  for (const flavor of ["Suave", "dry-witted", "cool under pressure", "mission", "brief"]) {
+    assert.ok(entry.includes(flavor), `the prompt carries the flavor: ${flavor}`);
+  }
+  // The job does not move: plain-words security help,
+  // paste anything suspicious, the receipt in the
+  // Shield tab.
+  for (const job of ["Shield checks for", "receipt in the Shield tab", "hand you"]) {
+    assert.ok(entry.includes(job), `the prompt keeps the job: ${job}`);
+  }
+  // The word "demo" appears nowhere in his entry.
+  assert.ok(!/demo/i.test(entry), "no 'demo' in the Secret Agent's starter entry");
+  // The preview line wears the new name too.
+  assert.ok(
+    localBrain.includes(
+      'return "Secret Agent, at your service — hand me anything that looks off and I\'ll check it."',
+    ),
+  );
+});
+
 test("personas: exactly seven starters — the consolidated roster plus Agent Shield", () => {
   const block = startersBlock();
   const ids = [...block.matchAll(/PersonaStarter\(\s*id: "([^"]+)"/g)].map(

@@ -75,12 +75,79 @@ test("fit: the cap is 40% of physical RAM, computed purely", () => {
 test("catalog: Hugging Face public API shapes, no auth", () => {
   assert.ok(brainSearch.includes('"https://huggingface.co/api/models"'));
   assert.ok(brainSearch.includes('URLQueryItem(name: "filter", value: "gguf")'));
-  assert.ok(brainSearch.includes('URLQueryItem(name: "sort", value: "downloads")'));
+  assert.ok(brainSearch.includes('URLQueryItem(name: "sort", value: sort.hfValue)'));
   assert.ok(brainSearch.includes("/tree/main"));
   assert.ok(brainSearch.includes("/resolve/main/"));
   assert.ok(
     !brainSearch.includes("Authorization"),
     "the public catalog needs no credential and none is sent",
+  );
+});
+
+test("filters: the Sort menu maps one-to-one onto the API's sort values (v0.47.0)", () => {
+  // The three orderings, in menu order, spelled the
+  // API's way — downloads / trending / lastModified —
+  // and the plain searchURL keeps the downloads default.
+  const sortEnum = brainSearch.slice(
+    brainSearch.indexOf("enum BrainSort"),
+    brainSearch.indexOf("/// The Type menu"),
+  );
+  const cases = [...sortEnum.matchAll(/case (\w+)/g)].map((m) => m[1]);
+  assert.deepEqual(cases, ["downloads", "trending", "lastModified"]);
+  assert.ok(sortEnum.includes("var hfValue: String { rawValue }"));
+  assert.ok(sortEnum.includes('"Most downloaded"'));
+  assert.ok(sortEnum.includes('"Trending"'));
+  assert.ok(sortEnum.includes('"Recently updated"'));
+  assert.ok(
+    brainSearch.includes("searchURL(query: query, sort: .downloads)"),
+    "the one-argument searchURL still defaults to downloads",
+  );
+  // An empty query omits the search term — that query
+  // IS the Popular list.
+  assert.ok(brainSearch.includes("if !trimmed.isEmpty"));
+  assert.ok(
+    brainSearch.includes('items.append(URLQueryItem(name: "search", value: trimmed))'),
+  );
+});
+
+test("filters: Type reads the siblings signal; Size reuses BrainFit purely (v0.47.0)", () => {
+  assert.ok(brainSearch.includes("static func repoMatchesType(_ repo: HFRepoResult, type: BrainTypeFilter) -> Bool"));
+  assert.ok(brainSearch.includes("case .vision: return repo.hasVisionFiles"));
+  assert.ok(brainSearch.includes("case .textOnly: return !repo.hasVisionFiles"));
+  assert.ok(
+    brainSearch.includes(
+      "static func visibleFiles(\n        _ files: [HFBrainFile], fitsOnly: Bool, physicalMemory: UInt64\n    ) -> [HFBrainFile]",
+    ),
+    "visibleFiles is pure in (files, fitsOnly, physicalMemory)",
+  );
+  assert.ok(
+    brainSearch.includes(
+      "!$0.isSplitShard && BrainFit.fits(fileBytes: $0.bytes, physicalMemory: physicalMemory)",
+    ),
+    "the Fits view drops shards and non-fitting files by the one fit rule",
+  );
+  assert.ok(brainSearch.includes("guard fitsOnly else { return files }"));
+});
+
+test("popular: the screen opens onto content, headed Popular (v0.47.0)", () => {
+  assert.ok(brainSearch.includes("func loadPopularIfNeeded() async"));
+  assert.ok(brainSearch.includes("guard state == .idle else { return }"));
+  assert.ok(brainSearch.includes("await load(query: \"\", popular: true)"));
+  assert.ok(brainSearch.includes("func applySort() async"));
+  assert.ok(brainSearchView.includes(".task { await search.loadPopularIfNeeded() }"));
+  assert.ok(brainSearchView.includes('Text(search.isPopular ? "Popular" : "Results")'));
+  assert.ok(brainSearchView.includes("Loading popular brains…"));
+  assert.ok(
+    brainSearchView.includes("results.filter { BrainCatalog.repoMatchesType($0, type: typeFilter) }") ||
+      brainSearch.includes("results.filter { BrainCatalog.repoMatchesType($0, type: typeFilter) }"),
+    "the Type menu filters the displayed list",
+  );
+  assert.ok(brainSearchView.includes('Picker("Sort", selection: $search.sort)'));
+  assert.ok(brainSearchView.includes('Picker("Type", selection: $search.typeFilter)'));
+  assert.ok(brainSearchView.includes('Picker("Size", selection: $search.sizeFilter)'));
+  assert.ok(
+    brainSearchView.includes("BrainCatalog.visibleFiles("),
+    "an opened repo's files pass through the Size filter",
   );
 });
 
@@ -107,6 +174,23 @@ test("catalog: mmproj is a badge, never a brain; shards are listed, never offere
   assert.ok(brainSearch.includes("isSplitShard"));
   assert.ok(
     brainSearchView.includes("Split into parts — GUS can't load split brains yet."),
+  );
+});
+
+test("vision honesty: no dead on-device vision path is shipped (v0.47.0)", () => {
+  // v0.47.0 investigated wiring mmproj into LocalBrain:
+  // the pinned LLM.swift (exact 3.0.3) exposes a
+  // text-only API — Chat is (role, content: String) and
+  // its C++ bridge carries no mtmd at all — so there is
+  // nothing honest to wire. Until that changes, the app
+  // must not grow a fake path: LocalBrain never mentions
+  // a projector, and the badge caption stays the true
+  // one (pinned above).
+  const localBrain = read("apps/ios/Shared/LocalBrain.swift");
+  assert.ok(!localBrain.includes("mmproj"), "LocalBrain ships no dead projector path");
+  assert.ok(
+    brainSearch.includes("vision is not wired yet"),
+    "the catalog header still tells the truth about vision",
   );
 });
 

@@ -26,7 +26,7 @@ struct SettingsGeneralView: View {
                 Toggle("Show the live status line in Chat", isOn: $secureLogVisible)
                 HelpMark(entry: model.help("secure-log"))
             }
-            Text("One slim line above the composer carrying the newest entry of the secure log — the full log, with its filters and search, lives in the Jobs section (v0.12.0: the chat is the conversation again; the record moved out of its way). On by default: the record is the product. Hiding the line stops nothing; the recording continues underneath.")
+            Text("One slim line above the composer carrying the newest entry of the secure log — the full log, with its filters and search, lives in the Jobs section. On by default: the record is the product. Hiding the line stops nothing; the recording continues underneath.")
                 .font(.caption)
                 .foregroundColor(.secondary)
             Divider()

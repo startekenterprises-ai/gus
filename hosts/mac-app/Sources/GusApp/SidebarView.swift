@@ -470,7 +470,7 @@ struct IdentityTabView: View {
                 }
                 .controlSize(.small)
                 .help("Open Settings at the Voice pane — the one place the speech engine and the spoken voice are chosen, the same as the iPhone's Settings.")
-                Text("Chosen in Settings → Voice — one front door, as on the iPhone. Through v0.19.0 this tab carried its own pickers for the same settings; they live there now.")
+                Text("Chosen in Settings → Voice — one front door, as on the iPhone. This tab once carried its own pickers for the same settings; they live there now.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             } else {

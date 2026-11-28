@@ -33,11 +33,40 @@ struct BrainSearchView: View {
                     Button("Search") { runSearch() }
                         .disabled(search.query.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
+            } footer: {
+                Text("Type to search Hugging Face for a brain. The popular list below is ready either way.")
+            }
+            Section {
+                Picker("Sort", selection: $search.sort) {
+                    ForEach(BrainSort.allCases) { sort in
+                        Text(sort.label).tag(sort)
+                    }
+                }
+                .pickerStyle(.menu)
+                .onChange(of: search.sort) { _ in
+                    expandedRepo = nil
+                    Task { await search.applySort() }
+                }
+                Picker("Type", selection: $search.typeFilter) {
+                    ForEach(BrainTypeFilter.allCases) { type in
+                        Text(type.label).tag(type)
+                    }
+                }
+                .pickerStyle(.menu)
+                Picker("Size", selection: $search.sizeFilter) {
+                    ForEach(BrainSizeFilter.allCases) { size in
+                        Text(size.label).tag(size)
+                    }
+                }
+                .pickerStyle(.menu)
+            } header: {
+                Text("Filters")
             }
             results
         }
         .navigationTitle("Find a brain")
         .navigationBarTitleDisplayMode(.inline)
+        .task { await search.loadPopularIfNeeded() }
     }
 
     private func runSearch() {
@@ -50,8 +79,7 @@ struct BrainSearchView: View {
         switch search.state {
         case .idle:
             Section {
-                Text("Type to search Hugging Face for a brain.")
-                    .foregroundColor(.secondary)
+                ProgressView() { Text("Loading popular brains…").font(.callout) }
             }
         case .searching:
             Section {
@@ -64,18 +92,20 @@ struct BrainSearchView: View {
                     .foregroundColor(.orange)
             }
         case .done:
-            if search.results.isEmpty {
+            if search.displayedResults.isEmpty {
                 Section {
-                    Text("No brains matched that search.")
+                    Text(search.results.isEmpty
+                        ? "No brains matched that search."
+                        : "No brains match the Type filter — widen it to see the rest.")
                         .foregroundColor(.secondary)
                 }
             } else {
                 Section {
-                    ForEach(search.results) { repo in
+                    ForEach(search.displayedResults) { repo in
                         repoRow(repo)
                     }
                 } header: {
-                    Text("Results")
+                    Text(search.isPopular ? "Popular" : "Results")
                 } footer: {
                     Text("Tap a result to see its brain files. Only files that fit this iPhone can be downloaded.")
                 }
@@ -134,12 +164,18 @@ struct BrainSearchView: View {
                 .font(.caption)
                 .foregroundColor(.orange)
         } else if let files = search.filesByRepo[repo.id] {
-            if files.isEmpty {
-                Text("No runnable brain files in this repo.")
+            let visible = BrainCatalog.visibleFiles(
+                files,
+                fitsOnly: search.sizeFilter == .fits,
+                physicalMemory: BrainFit.thisDeviceMemory)
+            if visible.isEmpty {
+                Text(files.isEmpty
+                    ? "No runnable brain files in this repo."
+                    : "No files here fit this iPhone — the Size filter is hiding the rest.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             } else {
-                ForEach(files) { file in
+                ForEach(visible) { file in
                     BrainFileRow(repoID: repo.id, file: file)
                 }
             }

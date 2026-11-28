@@ -89,7 +89,7 @@ struct SettingsView: View {
                         .onChange(of: demoPitch) { newValue in
                             LocalBrain.demoPitchEnabled = newValue
                         }
-                    Text("On, the on-device brain introduces itself with the email pitch — the Gmail demo. Off, it's a general-purpose assistant. Takes effect with your next message or call — the brain reloads in this same app run (v0.31.0).")
+                    Text("On: the on-device brain introduces itself with the Gmail cleanup pitch. Off: a general-purpose assistant.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                     // v0.36.0: start in a voice call — the
@@ -176,7 +176,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Persona starters")
                 } footer: {
-                    Text("Tap a starter to fill the prompt, then make the words your own — nothing here is locked or hidden. Empty means the general assistant. A change lands with your next message or call — the brain reloads in this same app run (v0.31.0); while the Gmail demo pitch above is on, it wins. To switch persona, voice, and face together in one tap, use the Personas tab or tap the avatar in Chat.")
+                    Text("Tap a starter to fill the prompt, then make the words your own — nothing here is locked or hidden. Empty means the general assistant. A change lands with your next message or call — the brain reloads in this same app run; while the Gmail demo pitch above is on, it wins. To switch persona, voice, and face together in one tap, use the Personas tab or tap the avatar in Chat.")
                 }
 
                 Section {
@@ -283,7 +283,7 @@ struct SettingsView: View {
                 } header: {
                     Text("On-device models")
                 } footer: {
-                    Text("Brains are downloaded once, verified against the model manifest before use, and stored on this iPhone. You can keep more than one and switch freely — switching never deletes anything, and the switch takes effect right away: the new brain loads in this same app run with your next message or call (v0.31.0), no restart needed. The brain marked Active is the one that loads. Nothing about a call leaves the phone in on-device mode. Deleting every brain turns on-device calls off (Core mode still works) and brings the setup prompt back at the next launch. Brains marked Custom came from Find a brain (v0.38.0): they come straight from Hugging Face, are size-checked — and checksum-checked when the repo publishes one — before use, and aren't vetted by GUS.")
+                    Text("Brains are downloaded once, verified against the model manifest before use, and stored on this iPhone. You can keep more than one and switch freely — switching never deletes anything, and the switch takes effect right away: the new brain loads in this same app run with your next message or call, no restart needed. The brain marked Active is the one that loads. Nothing about a call leaves the phone in on-device mode. Deleting every brain turns on-device calls off (Core mode still works) and brings the setup prompt back at the next launch. Brains marked Custom came from Find a brain: they come straight from Hugging Face, are size-checked — and checksum-checked when the repo publishes one — before use, and aren't vetted by GUS.")
                 }
 
                 Section {

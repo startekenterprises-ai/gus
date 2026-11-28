@@ -85,6 +85,67 @@ enum BrainFit {
     }
 }
 
+// MARK: - The Find-a-brain menus (v0.47.0)
+
+/// The Sort menu: the orderings the Hugging Face
+/// models page leads with, mapped one-to-one onto the
+/// API's sort values (all read newest/biggest first,
+/// direction -1, in searchURL).
+enum BrainSort: String, CaseIterable, Identifiable {
+    case downloads
+    case trending
+    case lastModified
+
+    var id: String { rawValue }
+
+    /// The API's own spelling of this ordering.
+    var hfValue: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .downloads: return "Most downloaded"
+        case .trending: return "Trending"
+        case .lastModified: return "Recently updated"
+        }
+    }
+}
+
+/// The Type menu: every brain, text-only brains, or
+/// vision brains (repos carrying an mmproj projector —
+/// the same signal the Vision badge reads).
+enum BrainTypeFilter: String, CaseIterable, Identifiable {
+    case all
+    case textOnly
+    case vision
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .all: return "All"
+        case .textOnly: return "Text only"
+        case .vision: return "Vision"
+        }
+    }
+}
+
+/// The Size menu: every size, or only what this iPhone
+/// can run (BrainFit's 40%-of-RAM rule, applied to a
+/// repo's file list when it opens).
+enum BrainSizeFilter: String, CaseIterable, Identifiable {
+    case all
+    case fits
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .all: return "All sizes"
+        case .fits: return "Fits this iPhone"
+        }
+    }
+}
+
 // MARK: - Hugging Face catalog shapes
 
 /// One repo in the search results. `siblings` arrives with
@@ -201,15 +262,56 @@ enum BrainCatalog {
     }
 
     static func searchURL(query: String) -> URL {
+        searchURL(query: query, sort: .downloads)
+    }
+
+    /// The catalog query (v0.47.0): the sort is the
+    /// person's pick from the Sort menu, mapped to the
+    /// API's own sort values; an empty query omits the
+    /// search term entirely — that is the Popular list,
+    /// the screen's opening content, so the Advanced
+    /// door never opens onto an empty room.
+    static func searchURL(query: String, sort: BrainSort) -> URL {
         var components = URLComponents(string: "https://huggingface.co/api/models")!
-        components.queryItems = [
-            URLQueryItem(name: "search", value: query),
-            URLQueryItem(name: "filter", value: "gguf"),
-            URLQueryItem(name: "sort", value: "downloads"),
-            URLQueryItem(name: "direction", value: "-1"),
-            URLQueryItem(name: "limit", value: "30"),
-        ]
+        var items: [URLQueryItem] = []
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            items.append(URLQueryItem(name: "search", value: trimmed))
+        }
+        items.append(URLQueryItem(name: "filter", value: "gguf"))
+        items.append(URLQueryItem(name: "sort", value: sort.hfValue))
+        items.append(URLQueryItem(name: "direction", value: "-1"))
+        items.append(URLQueryItem(name: "limit", value: "30"))
+        components.queryItems = items
         return components.url!
+    }
+
+    /// The Type menu's verdict on one repo (v0.47.0),
+    /// from the list response's own siblings: Vision
+    /// means the repo carries an mmproj projector;
+    /// Text only means it doesn't. Pure, so the suite
+    /// pins the mapping.
+    static func repoMatchesType(_ repo: HFRepoResult, type: BrainTypeFilter) -> Bool {
+        switch type {
+        case .all: return true
+        case .vision: return repo.hasVisionFiles
+        case .textOnly: return !repo.hasVisionFiles
+        }
+    }
+
+    /// The Size menu's view of one repo's files
+    /// (v0.47.0): with "Fits this iPhone" picked, only
+    /// files this iPhone can actually run remain —
+    /// fitting, and never a split shard (a shard cannot
+    /// load at all, fitting or not). Pure in (files,
+    /// fitsOnly, physicalMemory), like BrainFit itself.
+    static func visibleFiles(
+        _ files: [HFBrainFile], fitsOnly: Bool, physicalMemory: UInt64
+    ) -> [HFBrainFile] {
+        guard fitsOnly else { return files }
+        return files.filter {
+            !$0.isSplitShard && BrainFit.fits(fileBytes: $0.bytes, physicalMemory: physicalMemory)
+        }
     }
 
     static func treeURL(repoID: String) -> URL {
@@ -246,8 +348,26 @@ final class BrainSearchModel: ObservableObject {
     }
 
     @Published var query = ""
+    /// The Find-a-brain menus (v0.47.0). Sort rides the
+    /// API query itself; Type filters the result list
+    /// where it stands; Size filters an opened repo's
+    /// file list. Changing Sort re-runs whatever list is
+    /// on screen (the search, or Popular when no search
+    /// has run).
+    @Published var sort: BrainSort = .downloads
+    @Published var typeFilter: BrainTypeFilter = .all
+    @Published var sizeFilter: BrainSizeFilter = .all
     @Published private(set) var state: SearchState = .idle
     @Published private(set) var results: [HFRepoResult] = []
+    /// True while `results` is the Popular list (the
+    /// opening content) rather than a search's answer —
+    /// the section header says which it is.
+    @Published private(set) var isPopular = false
+
+    /// The results as the Type menu leaves them.
+    var displayedResults: [HFRepoResult] {
+        results.filter { BrainCatalog.repoMatchesType($0, type: typeFilter) }
+    }
     /// File lists by repo id, filled on first expansion.
     @Published private(set) var filesByRepo: [String: [HFBrainFile]] = [:]
     @Published private(set) var visionByRepo: [String: Bool] = [:]
@@ -257,12 +377,37 @@ final class BrainSearchModel: ObservableObject {
     func search() async {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        await load(query: trimmed, popular: false)
+    }
+
+    /// The opening content (v0.47.0): the catalog's top
+    /// GGUF brains under the current Sort, fetched the
+    /// first time the screen appears — the Advanced door
+    /// never opens onto an empty search box.
+    func loadPopularIfNeeded() async {
+        guard state == .idle else { return }
+        await load(query: "", popular: true)
+    }
+
+    /// A Sort change re-runs the list on screen: the
+    /// search when one stands, Popular otherwise.
+    func applySort() async {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if isPopular || trimmed.isEmpty {
+            await load(query: "", popular: true)
+        } else {
+            await load(query: trimmed, popular: false)
+        }
+    }
+
+    private func load(query: String, popular: Bool) async {
         state = .searching
         do {
             let (data, response) = try await URLSession.shared.data(
-                from: BrainCatalog.searchURL(query: trimmed))
+                from: BrainCatalog.searchURL(query: query, sort: sort))
             try Self.requireOK(response)
             results = try JSONDecoder().decode([HFRepoResult].self, from: data)
+            isPopular = popular
             state = .done
         } catch {
             results = []
