@@ -24,6 +24,13 @@
 #import <AVFoundation/AVFoundation.h>
 #import <Foundation/Foundation.h>
 
+// v0.48.0: the vision engine's C door rides this same
+// bridging header (GUSVisionShim.h) — one bridging header
+// per target, and the vision shim is the second contained
+// C surface behind it. Swift reaches the engine only
+// through VisionEngine.swift's VisionDescribing protocol.
+#import "GUSVisionShim.h"
+
 NS_ASSUME_NONNULL_BEGIN
 
 /// Start `player` playing, containing any NSException the

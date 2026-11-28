@@ -14,16 +14,35 @@ import Foundation
 // Two delivery classes, named honestly:
 //   - downloads: fetched by ModelLibrary (ModelDownloader.swift)
 //     into Application Support, sha256-verified before use.
-//     Three entries: the standard brain (the one required
-//     entry, and the first-launch prompt's download) plus two
+//     Four entries: the standard brain (the one required
+//     entry, and the first-launch prompt's download), two
 //     OPTIONAL alternative brains the library offers as a
-//     choice of character. Any of them may sit on disk at
-//     once; ActiveBrain (below) says which one loads.
+//     choice of character, and (v0.48.0) the vision brain —
+//     a PAIR entry whose model file travels with a vision
+//     projector file (see ProjectorFile). Any of them may
+//     sit on disk at once; ActiveBrain (below) says which
+//     one loads.
 //   - sdkManaged: the Kokoro CoreML assets are fetched and
 //     hash-verified by the pinned FluidAudio SDK against its
 //     own pinned manifest (KokoroTTS.swift). They are listed
 //     in manifest.json for the record; the app does not
 //     re-download what the SDK already verifies.
+
+/// The vision projector half of a PAIR entry (v0.48.0): a
+/// vision brain is two files — the language model and the
+/// mmproj that turns pixels into tokens the model can read.
+/// The pair downloads together, verifies together, and the
+/// entry counts as present only when BOTH files are on disk
+/// at their pinned sizes (ModelStore.isPresent). Only the
+/// curated vision entry carries one; brain SEARCH never
+/// pairs (a searched repo's mmproj still only earns the
+/// Vision badge in the search results — see BrainSearch).
+struct ProjectorFile: Equatable {
+    let fileName: String
+    let url: URL
+    let bytes: Int64
+    let sha256: String
+}
 
 struct ModelDownloadEntry: Equatable {
     let id: String
@@ -44,10 +63,53 @@ struct ModelDownloadEntry: Equatable {
     /// One honest line about this brain's character, in the
     /// same plain words. Describes; never moralizes.
     let plainDescription: String
+    /// The vision projector this entry pairs with (v0.48.0),
+    /// or nil for an ordinary single-file brain. Defaulted
+    /// so every existing construction site (the manifest
+    /// entries above, the custom-brain builder in
+    /// BrainSearch.swift) reads unchanged.
+    let projector: ProjectorFile? = nil
 
-    /// The size as a person would say it ("2.5 GB").
+    /// The size as a person would say it ("2.5 GB"). For a
+    /// pair entry this is the COMBINED size — the download
+    /// the person is actually agreeing to is both files.
     var sizeText: String {
-        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+        ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file)
+    }
+
+    /// Model + projector combined (just the model for a
+    /// single-file entry). The BrainFit gate judges a pair
+    /// by this number: the two files load together, so the
+    /// cap that keeps one brain from crowding the phone's
+    /// memory must see them together too.
+    var totalBytes: Int64 { bytes + (projector?.bytes ?? 0) }
+
+    /// Suffix marking a pair's projector leg in the
+    /// download machinery (ModelLibrary keys its tasks,
+    /// records, and per-leg states by leg id: the entry's
+    /// own id for the model leg, id + this suffix for the
+    /// projector leg).
+    static let projectorLegSuffix = "#mmproj"
+
+    /// This entry's projector-leg id (meaningful only when
+    /// projector != nil).
+    var projectorLegID: String { id + Self.projectorLegSuffix }
+
+    /// The projector file dressed as a download entry of
+    /// its own, so ModelLibrary's existing per-file
+    /// machinery (background task, verify-before-use,
+    /// launch reconciliation) carries the second leg
+    /// unchanged. Nil for a single-file entry.
+    func projectorLegEntry() -> ModelDownloadEntry? {
+        guard let projector else { return nil }
+        return ModelDownloadEntry(
+            id: projectorLegID,
+            fileName: projector.fileName,
+            url: projector.url,
+            bytes: projector.bytes,
+            sha256: projector.sha256,
+            plainName: plainName,
+            plainDescription: plainDescription)
     }
 }
 
@@ -107,7 +169,36 @@ enum GUSModelManifest {
         plainDescription: "The least filtered of the three — tuned to almost never refuse a topic. Same size, the strongest change of character."
     )
 
-    static let downloads: [ModelDownloadEntry] = [brain, brainAbliterated, brainAggressive]
+    /// The vision brain (v0.48.0): Qwen2.5-VL-3B-Instruct
+    /// at Q4_K_M, in the llama.cpp project's own GGUF
+    /// conversion (ggml-org) — the same project's pins the
+    /// runtime already trusts — paired with its Q8_0 vision
+    /// projector. Pins verified against the Hugging Face
+    /// tree API (each file's LFS oid is its sha256, its LFS
+    /// size the byte count) on 2026-11-28. Combined
+    /// 2,774,658,784 bytes: inside the 40%-of-RAM BrainFit
+    /// cap on an 8 GB phone, outside it on a 6 GB one — the
+    /// fit gate in the library is what keeps the offer off
+    /// phones the pair cannot fit. Photo turns reach it
+    /// through the isolated vision engine (VisionEngine
+    /// .swift); as a text brain it loads through the
+    /// ordinary text path like the other three.
+    static let brainVision = ModelDownloadEntry(
+        id: "brain-qwen25-vl-3b-instruct-q4km",
+        fileName: "Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf",
+        url: URL(string: "https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/resolve/main/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf")!,
+        bytes: 1_929_901_056,
+        sha256: "d02fe9b69ad8cadbbd228e387667af66612c44bed29ffc8eb1e7caf9ac486c12",
+        plainName: "Vision brain",
+        plainDescription: "The brain that can see — attach a photo in a chat and it will tell you what's in it, right here on this iPhone. A smaller brain than the standard one, and looking takes longer than talking. In a call or a plain chat it talks like the others.",
+        projector: ProjectorFile(
+            fileName: "mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf",
+            url: URL(string: "https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/resolve/main/mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf")!,
+            bytes: 844_757_728,
+            sha256: "980c9b2f78c04e6cff93d277ada09e768394f112d75db3b4e9dea8a69f9fb904")
+    )
+
+    static let downloads: [ModelDownloadEntry] = [brain, brainAbliterated, brainAggressive, brainVision]
 
     static func entry(id: String) -> ModelDownloadEntry? {
         // The curated manifest first; a custom brain the
@@ -115,7 +206,14 @@ enum GUSModelManifest {
         // through the same door, so every holder of an id —
         // the library, the download delegate, ActiveBrain —
         // sees one library, not two.
-        downloads.first(where: { $0.id == id }) ?? CustomBrainStore.shared.entry(id: id)
+        // A pair's projector leg (v0.48.0) resolves to the
+        // projector dressed as an entry, so the download
+        // delegate and launch reconciliation — which only
+        // ever hold a task's id string — can carry the
+        // second file through the same per-file path.
+        let curatedOrLeg = downloads.first(where: { $0.id == id })
+            ?? downloads.first(where: { $0.projectorLegID == id })?.projectorLegEntry()
+        return curatedOrLeg ?? CustomBrainStore.shared.entry(id: id)
     }
 }
 
@@ -182,18 +280,41 @@ enum ModelStore {
         directory.appendingPathComponent(entry.fileName)
     }
 
-    /// Present means: the file exists AND is the manifest's
+    /// Where a pair entry's projector file lives (v0.48.0).
+    static func projectorURL(for entry: ModelDownloadEntry) -> URL? {
+        guard let projector = entry.projector else { return nil }
+        return directory.appendingPathComponent(projector.fileName)
+    }
+
+    /// One file's presence: it exists AND is the pinned
     /// byte size. (Full sha256 verification happens at download
     /// time and on demand in Settings; size is the cheap gate
     /// the call path uses, and a truncated file fails it.)
-    static func isPresent(_ entry: ModelDownloadEntry) -> Bool {
-        let url = fileURL(for: entry)
+    static func filePresent(fileName: String, bytes: Int64) -> Bool {
+        let url = directory.appendingPathComponent(fileName)
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
               let size = attrs[.size] as? NSNumber else { return false }
-        return size.int64Value == entry.bytes
+        return size.int64Value == bytes
+    }
+
+    /// Present means every file the entry needs is present:
+    /// the model file, and — for a pair entry (v0.48.0) —
+    /// its projector too. A vision brain with only half its
+    /// pair on disk is NOT present: ActiveBrain never
+    /// resolves to it, so no surface can promise seeing
+    /// with half an engine.
+    static func isPresent(_ entry: ModelDownloadEntry) -> Bool {
+        guard filePresent(fileName: entry.fileName, bytes: entry.bytes) else { return false }
+        if let projector = entry.projector {
+            return filePresent(fileName: projector.fileName, bytes: projector.bytes)
+        }
+        return true
     }
 
     static func remove(_ entry: ModelDownloadEntry) {
         try? FileManager.default.removeItem(at: fileURL(for: entry))
+        if let projectorURL = projectorURL(for: entry) {
+            try? FileManager.default.removeItem(at: projectorURL)
+        }
     }
 }

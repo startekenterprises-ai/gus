@@ -733,7 +733,9 @@ struct ChatView: View {
                         .clipped()
                         .cornerRadius(8)
                     Text(model.mode == .onDevice
-                         ? "Photo attached — photos need Core mode; this brain can't see pictures."
+                         ? (VisionRouting.useVisionEngine()
+                            ? "Photo attached — the vision brain will look at it right here on this iPhone."
+                            : "Photo attached — photos need Core mode; this brain can't see pictures.")
                          : "Photo attached — it sends with your message, and GUS sees it on your Mac.")
                         .font(.caption)
                         .foregroundColor(.secondary)
@@ -1269,7 +1271,18 @@ final class ChatModel: ObservableObject {
             // whole or in part: the note on the message says
             // why, in plain words, at send time. Never a silent
             // drop, never a pretend delivery.
+            // v0.48.0: exactly one exception to "on-device
+            // brains take text only" — the vision brain, its
+            // pair on disk, and the Settings kill switch on
+            // (VisionRouting). Then the photo is looked at
+            // right here by the isolated vision engine and
+            // never sent anywhere. Every other on-device case
+            // keeps the note below, word for word.
             if mode == .onDevice {
+                if VisionRouting.useVisionEngine() {
+                    dispatchVision(exchangeID: exchangeID, text: text, photo: photo)
+                    return
+                }
                 setPhotoNote(exchangeID: exchangeID,
                     note: "This brain can't look at photos yet — switch to Core to ask about pictures.")
                 return
@@ -1360,6 +1373,94 @@ final class ChatModel: ObservableObject {
             self.replyingCount -= 1
             // Share the finished exchange with the desk
             // promptly when a core is configured.
+            self.syncWithCore()
+        }
+    }
+
+    // MARK: On-device vision answers (v0.48.0)
+
+    /// A photo turn for the vision engine, chained onto the
+    /// same localChain as text answers: the phone thinks one
+    /// thought at a time whichever engine is thinking, so a
+    /// vision look and a text generation never overlap (and
+    /// never hold two models' working memory at once beyond
+    /// what the chain's serialization already implies).
+    private func dispatchVision(exchangeID: UUID, text: String, photo: Data) {
+        replyingCount += 1
+        let previous = localChain
+        localChain = Task { [weak self] in
+            await previous?.value
+            await self?.runVisionAnswer(exchangeID: exchangeID, text: text, photo: photo)
+        }
+    }
+
+    private func runVisionAnswer(exchangeID: UUID, text: String, photo: Data) async {
+        // Routing said yes when the turn was dispatched; if
+        // the world changed underneath it (the brain was
+        // deleted mid-send), the honest note is the answer.
+        guard let entry = ActiveBrain.resolved(),
+              entry.id == GUSModelManifest.brainVision.id,
+              let projectorURL = ModelStore.projectorURL(for: entry) else {
+            setPhotoNote(exchangeID: exchangeID,
+                note: "This brain can't look at photos yet — switch to Core to ask about pictures.")
+            replyingCount -= 1
+            return
+        }
+        // The person's words are the question; with no words,
+        // a short default observation ask stands in.
+        let prompt = text.isEmpty
+            ? "Describe what you see in this photo, briefly."
+            : text
+        let engine: VisionDescribing = LlamaVisionEngine()
+        let result = await engine.describe(
+            image: photo, prompt: prompt,
+            modelURL: ModelStore.fileURL(for: entry),
+            projectorURL: projectorURL)
+        let reply: String
+        switch result {
+        case .success(let answer):
+            reply = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .failure(let error):
+            reply = error.honestLine
+        }
+        // The reply lands like any on-device answer: Shield
+        // scans it sentence by sentence before it shows (the
+        // engine's own failure lines are scanned too — one
+        // rule for everything the assistant says), and the
+        // finished exchange joins the durable history unless
+        // it was born incognito, exactly as a text answer's
+        // finalize does (runOnDeviceAnswer).
+        Task { @MainActor in
+            if reply.isEmpty {
+                self.appendNotice(exchangeID: exchangeID, text: "GUS didn't reply to that.")
+            } else {
+                var sentences: [String] = []
+                reply.enumerateSubstrings(
+                    in: reply.startIndex..<reply.endIndex,
+                    options: .bySentences
+                ) { substring, _, _, _ in
+                    if let substring { sentences.append(substring) }
+                }
+                if sentences.isEmpty { sentences = [reply] }
+                for sentence in sentences {
+                    let trimmed = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed.isEmpty { continue }
+                    if self.replySentenceAllowed(trimmed, exchangeID: exchangeID) {
+                        self.appendReplySentence(exchangeID: exchangeID, sentence: trimmed)
+                    }
+                }
+                if let assembled = self.messages.last(where: {
+                    $0.exchangeID == exchangeID && $0.role == .assistant
+                })?.text, !assembled.isEmpty,
+                   !self.incognitoExchangeIDs.contains(exchangeID) {
+                    let replyRecord = self.store.appendLocal(direction: "out", text: assembled)
+                    self.builtStoreRevision = self.store.revision
+                    if let rid = UUID(uuidString: replyRecord.id) {
+                        self.exchangeByRecordId[rid] = exchangeID
+                    }
+                }
+            }
+            self.replyingCount -= 1
             self.syncWithCore()
         }
     }
@@ -1462,13 +1563,22 @@ final class ChatModel: ObservableObject {
     }
 
     /// Incognito dispatch: on-device only. A photo cannot
-    /// be dispatched — the on-device brains are text-only,
-    /// and the one surface that could see it (the core) is
-    /// exactly where incognito words never go — so the note
-    /// on the message says so in plain words, and a
-    /// photo-only incognito message ends there.
+    /// be dispatched to a text brain — the on-device brains
+    /// are text-only, and the one surface that could see it
+    /// (the core) is exactly where incognito words never
+    /// go — so the note on the message says so in plain
+    /// words, and a photo-only incognito message ends there.
+    /// v0.48.0: the vision engine is the exception, and it
+    /// is incognito's own bargain in engine form — the
+    /// photo is read on this iPhone and never leaves it —
+    /// so a vision-brain photo turn answers in incognito
+    /// too, shown and forgotten like every incognito reply.
     private func dispatchIncognito(exchangeID: UUID, text: String, photo: Data?) {
-        if photo != nil {
+        if let photo {
+            if VisionRouting.useVisionEngine() {
+                dispatchVision(exchangeID: exchangeID, text: text, photo: photo)
+                return
+            }
             setPhotoNote(exchangeID: exchangeID,
                 note: "Incognito stays on this iPhone, and this brain can't look at photos — the photo wasn't sent anywhere.")
             if text.isEmpty { return }

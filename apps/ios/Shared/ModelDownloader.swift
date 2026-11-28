@@ -34,6 +34,18 @@ import Foundation
 // expected size, sha256) so a cold start can tell an orphaned
 // record apart from a live download and recover a staged or
 // partial file through the same verify-before-use path.
+//
+// v0.48.0 — a PAIR entry (the vision brain: model + vision
+// projector) downloads as two LEGS through this same
+// machinery: the model file under the entry's own id, the
+// projector under id + "#mmproj" (the leg entry
+// GUSModelManifest.entry(id:) resolves). One leg runs at a
+// time like everything else; when the model leg lands and
+// verifies, the projector leg starts on its own (legLanded).
+// The state Settings shows for a pair is DERIVED from its
+// two leg states plus what's actually on disk (state(of:)),
+// and presence itself is pair-aware (ModelStore), so no
+// surface can call the brain ready with half a pair.
 
 /// Where the AppDelegate parks the system's background-session
 /// completion handler until ModelLibrary's delegate has seen
@@ -178,7 +190,13 @@ final class ModelLibrary: NSObject, ObservableObject {
                         self.clearRecord(id)
                         continue
                     }
-                    if ModelStore.isPresent(entry) {
+                    // Leg presence (v0.48.0): a record names
+                    // ONE file — a pair's model leg or its
+                    // projector leg — so it settles on that
+                    // file alone. (ModelStore.isPresent on the
+                    // pair parent would demand both halves and
+                    // misjudge a finished leg as unfinished.)
+                    if ModelStore.filePresent(fileName: entry.fileName, bytes: entry.bytes) {
                         self.states[id] = .ready
                         self.activeEntryID = ActiveBrain.resolved()?.id
                         self.clearRecord(id)
@@ -207,7 +225,50 @@ final class ModelLibrary: NSObject, ObservableObject {
     }
 
     func state(of entry: ModelDownloadEntry) -> EntryState {
-        states[entry.id] ?? .notDownloaded
+        guard entry.projector != nil else {
+            return states[entry.id] ?? .notDownloaded
+        }
+        // A pair's shown state is derived from its two leg
+        // states (states[] only ever holds LEG truth: the
+        // model leg under the entry's id, the projector leg
+        // under its leg id) plus what's on disk — never a
+        // stored pair verdict that could drift from either.
+        if ModelStore.isPresent(entry) { return .ready }
+        let main = states[entry.id] ?? .notDownloaded
+        let proj = states[entry.projectorLegID] ?? .notDownloaded
+        if case .failed(let message) = main { return .failed(message) }
+        if case .failed(let message) = proj { return .failed(message) }
+        if main == .verifying || proj == .verifying { return .verifying }
+        let mainActive = isDownloading(main)
+        let projActive = isDownloading(proj)
+        if mainActive || projActive {
+            // Byte-weighted progress across both legs; a leg
+            // whose file is already on disk counts complete.
+            let mainDone = ModelStore.filePresent(fileName: entry.fileName, bytes: entry.bytes)
+                ? Double(entry.bytes)
+                : (legFraction(main) ?? 0) * Double(entry.bytes)
+            let projDone = entry.projector.map {
+                ModelStore.filePresent(fileName: $0.fileName, bytes: $0.bytes)
+                    ? Double($0.bytes)
+                    : (legFraction(proj) ?? 0) * Double($0.bytes)
+            } ?? 0
+            let total = Double(entry.totalBytes)
+            return .downloading(total > 0 ? min(1, max(0, (mainDone + projDone) / total)) : 0)
+        }
+        // Nothing running and the pair incomplete: not
+        // downloaded — the row's Download resumes with
+        // whichever leg is missing (see download(_:)).
+        return .notDownloaded
+    }
+
+    private func isDownloading(_ state: EntryState) -> Bool {
+        if case .downloading = state { return true }
+        return false
+    }
+
+    private func legFraction(_ state: EntryState) -> Double? {
+        if case .downloading(let fraction) = state { return fraction }
+        return nil
     }
 
     func refresh() {
@@ -216,7 +277,12 @@ final class ModelLibrary: NSObject, ObservableObject {
             case .downloading, .verifying:
                 continue
             default:
-                states[entry.id] = ModelStore.isPresent(entry) ? .ready : .notDownloaded
+                // Leg truth (v0.48.0): for a pair entry this
+                // slot is the MODEL leg's state, so it settles
+                // on the model file alone; the pair's shown
+                // state is derived in state(of:). For a
+                // single-file entry the two are the same check.
+                states[entry.id] = ModelStore.filePresent(fileName: entry.fileName, bytes: entry.bytes) ? .ready : .notDownloaded
             }
         }
         // Custom brains (v0.38.0) settle the same way, so
@@ -273,6 +339,35 @@ final class ModelLibrary: NSObject, ObservableObject {
         // is mid-download is ignored (its row keeps its own
         // state; the person can start it when this one lands).
         guard activeTasks.isEmpty else { return }
+        if entry.projector != nil {
+            // The pair gate (v0.48.0): model + projector
+            // COMBINED against the same 40%-of-RAM BrainFit
+            // cap brain search uses — the two files load
+            // together, so they are judged together. The
+            // library row hides the offer entirely when the
+            // pair doesn't fit; this is the same rule at the
+            // door itself, so no caller can start what the
+            // row wouldn't offer.
+            guard BrainFit.fitsOnThisDevice(fileBytes: entry.totalBytes) else { return }
+            if ModelStore.filePresent(fileName: entry.fileName, bytes: entry.bytes),
+               let leg = entry.projectorLegEntry() {
+                // The model half is already on disk (an
+                // earlier download stopped between legs):
+                // fetch the eyes, not the whole brain again.
+                startLeg(leg)
+            } else {
+                startLeg(entry)
+            }
+            return
+        }
+        startLeg(entry)
+    }
+
+    /// Start one file's download: a whole single-file entry,
+    /// or one leg of a pair (the entry passed IS the leg —
+    /// the projector leg arrives as its own entry, resolved
+    /// by GUSModelManifest.entry(id:) everywhere else too).
+    private func startLeg(_ entry: ModelDownloadEntry) {
         states[entry.id] = .downloading(0)
         let task: URLSessionDownloadTask
         if let data = resumeData[entry.id] {
@@ -289,23 +384,31 @@ final class ModelLibrary: NSObject, ObservableObject {
     }
 
     func cancelDownload(_ entry: ModelDownloadEntry) {
-        guard let task = activeTasks[entry.id] else { return }
-        let id = entry.id
+        // A pair cancels whichever leg is running (v0.48.0);
+        // a single-file entry only ever has its own.
+        let legIDs = [entry.id, entry.projectorLegID]
+        guard let activeID = legIDs.first(where: { activeTasks[$0] != nil }),
+              let task = activeTasks[activeID] else { return }
         task.cancel(byProducingResumeData: { [weak self] data in
             Task { @MainActor in
-                if let data { self?.resumeData[id] = data }
+                if let data { self?.resumeData[activeID] = data }
             }
         })
-        activeTasks[entry.id] = nil
-        clearRecord(id)
+        activeTasks[activeID] = nil
+        clearRecord(activeID)
         states[entry.id] = ModelStore.isPresent(entry) ? .ready : .notDownloaded
     }
 
     func delete(_ entry: ModelDownloadEntry) {
-        if activeTasks[entry.id] != nil { cancelDownload(entry) }
+        if activeTasks[entry.id] != nil || activeTasks[entry.projectorLegID] != nil {
+            cancelDownload(entry)
+        }
         ModelStore.remove(entry)
         resumeData[entry.id] = nil
+        resumeData[entry.projectorLegID] = nil
+        clearRecord(entry.projectorLegID)
         states[entry.id] = .notDownloaded
+        states[entry.projectorLegID] = .notDownloaded
         // If this was the brain in use, ActiveBrain's
         // presence-aware resolution falls back on its own
         // (another downloaded brain, or none at all).
@@ -321,17 +424,38 @@ final class ModelLibrary: NSObject, ObservableObject {
             return
         }
         states[entry.id] = .verifying
+        // A pair entry (v0.48.0) verifies BOTH files: the
+        // projector carries a pinned hash just like the
+        // model, and a pair is only as verified as its
+        // weaker half.
+        var checks: [(url: URL, sha256: String)] = []
+        if let projector = entry.projector, let url = ModelStore.projectorURL(for: entry) {
+            checks.append((url, projector.sha256))
+        }
         // A custom brain whose repo publishes no checksum
         // (v0.38.0) has nothing to hash against: presence —
         // which is itself the size gate — is the whole
-        // check, and the entry's description says so.
+        // check, and the entry's description says so. (For a
+        // pair, the guard below only excuses the model
+        // file; the projector's check above still runs.)
         guard let expected = entry.sha256 else {
-            states[entry.id] = .ready
+            if checks.isEmpty {
+                states[entry.id] = .ready
+                return
+            }
+            runVerifyChecks(entry, checks: checks)
             return
         }
-        let url = ModelStore.fileURL(for: entry)
+        checks.append((ModelStore.fileURL(for: entry), expected))
+        runVerifyChecks(entry, checks: checks)
+    }
+
+    /// The detached hash pass behind verify(_:): every
+    /// listed file must match its pinned sha256, or the
+    /// entry is removed and reported — never half-trusted.
+    private func runVerifyChecks(_ entry: ModelDownloadEntry, checks: [(url: URL, sha256: String)]) {
         Task.detached(priority: .utility) {
-            let ok = (try? Self.sha256Hex(of: url)) == expected
+            let ok = checks.allSatisfy { (try? Self.sha256Hex(of: $0.url)) == $0.sha256 }
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 if ok {
@@ -406,6 +530,7 @@ final class ModelLibrary: NSObject, ObservableObject {
                         try FileManager.default.moveItem(at: partial, to: dest)
                         self.states[entry.id] = .ready
                         self.activeEntryID = ActiveBrain.resolved()?.id
+                        self.legLanded(entry)
                     } catch {
                         self.states[entry.id] = .failed("Downloaded and verified, but couldn't move into place: \(error.localizedDescription)")
                     }
@@ -415,6 +540,21 @@ final class ModelLibrary: NSObject, ObservableObject {
                 }
             }
         }
+    }
+
+    /// A file just landed and verified (v0.48.0): if it was
+    /// the model half of a pair whose projector is still
+    /// missing, start the projector leg — the pair is one
+    /// offer, so it completes itself. If another download
+    /// has taken the pipe by now, the leg waits: the pair's
+    /// derived state offers Download, which resumes with
+    /// the missing leg (see download(_:)).
+    private func legLanded(_ leg: ModelDownloadEntry) {
+        guard let projector = leg.projector,
+              !ModelStore.filePresent(fileName: projector.fileName, bytes: projector.bytes),
+              activeTasks.isEmpty,
+              let legEntry = leg.projectorLegEntry() else { return }
+        startLeg(legEntry)
     }
 
     /// Streaming sha256 — a 2.5 GB file is never loaded whole.

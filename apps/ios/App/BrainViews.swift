@@ -51,6 +51,17 @@ struct BrainRowView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
+            if entry.projector != nil && !BrainFit.fitsOnThisDevice(fileBytes: entry.totalBytes) {
+                // v0.48.0: a pair entry whose COMBINED size
+                // breaks this phone's memory cap is not
+                // offered at all — no Download button, just
+                // the plain reason. (ModelLibrary holds the
+                // same gate at its door; this is where the
+                // person meets it.)
+                Text("Too big for this iPhone — this brain needs more memory than this phone can give it, so it isn't offered here.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
             switch library.state(of: entry) {
             case .notDownloaded:
                 Button("Download") { library.download(entry) }
@@ -79,6 +90,7 @@ struct BrainRowView: View {
                     .font(.caption)
                     .foregroundColor(.orange)
                 Button("Try again") { library.download(entry) }
+            }
             }
         }
         .padding(.vertical, 2)

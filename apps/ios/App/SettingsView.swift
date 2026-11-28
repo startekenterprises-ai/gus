@@ -32,6 +32,11 @@ struct SettingsView: View {
     /// this picker writes the preference and nothing
     /// else holds a copy.
     @State private var kokoroSpeed: Double = KokoroSpeed.selected
+    /// v0.48.0: the on-device vision kill switch
+    /// (VisionSettings) — read once when Settings opens,
+    /// written on change; Chat's routing reads the setting
+    /// itself at every photo turn.
+    @State private var onDeviceVision: Bool = VisionSettings.enabled
     @State private var personaText: String = LocalBrain.customPrompt ?? ""
     @State private var stockAvatar: String = UserDefaults.standard.string(forKey: "gus.avatar.stock") ?? "boy"
     @State private var shieldEnabled: Bool = ShieldSettings.enabled
@@ -279,6 +284,20 @@ struct SettingsView: View {
                     NavigationLink("Find a brain (advanced)") {
                         BrainSearchView()
                     }
+                    // v0.48.0: the vision kill switch. On,
+                    // the vision brain (when it's the active
+                    // brain) can look at photos attached in a
+                    // chat; off, photo messages get the plain
+                    // can't-see note even with that brain
+                    // active. The caption carries the privacy
+                    // fact that is the feature's whole point.
+                    Toggle("On-device vision", isOn: $onDeviceVision)
+                        .onChange(of: onDeviceVision) { newValue in
+                            VisionSettings.enabled = newValue
+                        }
+                    Text("On: when the vision brain is the active brain, it can look at photos you attach in a chat. The photo is read right here on this iPhone and never leaves it — looking happens on the phone, not on a server. Off: attached photos get a note saying the brain can't see pictures, even with the vision brain active.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                     kokoroRow
                 } header: {
                     Text("On-device models")
